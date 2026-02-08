@@ -530,15 +530,30 @@ async function getNewOrders() {
           const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) || '';
           // 구매자: 셀[9]
           const buyerName = cells[9] || '';
+          // 수취인: 구매자 이후에 나오는 다른 한글 이름 (2~4글자)
+          // 보통 셀[10]~[15] 사이에 있음
+          let recipientName = '';
+          for (let j = 10; j <= 20; j++) {
+            if (cells[j] && cells[j] !== buyerName && cells[j].match(/^[가-힣]{2,4}$/)) {
+              recipientName = cells[j];
+              break;
+            }
+          }
           // 수량: 셀[24]
           const qty = parseInt(cells[24]) || 1;
           // 연락처: 010 패턴이 있는 셀
           const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
 
+          // 주문자 ≠ 수취인이면 "주문자(수취인)" 형식
+          let displayName = buyerName;
+          if (recipientName && recipientName !== buyerName) {
+            displayName = `${buyerName}(${recipientName})`;
+          }
+
           result.push({
             orderId,
             productName,
-            buyerName,
+            buyerName: displayName,
             qty,
             phone,
             option: '',
