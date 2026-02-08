@@ -789,23 +789,37 @@ async function scrapePpurioResults() {
     pageNum++;
     try {
       const hasNext = await ppurioPage.evaluate((nextNum) => {
-        // 페이지 번호 버튼 클릭
-        const links = document.querySelectorAll('.pagination a, .paging a, [class*="page"] a, [class*="paging"] a');
-        for (const a of links) {
-          if (a.innerText?.trim() === String(nextNum)) {
-            a.click();
-            return true;
+        // 모든 링크/버튼에서 페이지 번호 찾기 (매우 넓은 범위)
+        const allLinks = document.querySelectorAll('a, button, span[onclick], li[onclick]');
+        for (const el of allLinks) {
+          const t = el.innerText?.trim();
+          if (t === String(nextNum)) {
+            el.click();
+            return 'page_' + nextNum;
           }
         }
-        // next/다음 버튼
-        const nextBtn = document.querySelector('[class*="next"], .btn_next, a:has-text("다음"), a:has-text(">")');
-        if (nextBtn) { nextBtn.click(); return true; }
+        // "다음", ">", ">" 버튼
+        for (const el of allLinks) {
+          const t = el.innerText?.trim();
+          if (t === '다음' || t === '>' || t === '›' || t === '»') {
+            el.click();
+            return 'next_btn';
+          }
+        }
+        // class에 next가 포함된 요소
+        const nextEl = document.querySelector('[class*="next"]:not([class*="prevent"])');
+        if (nextEl) { nextEl.click(); return 'next_class'; }
         return false;
       }, pageNum);
 
-      if (!hasNext) break;
-      await ppurioPage.waitForTimeout(2000);
-    } catch {
+      if (!hasNext) {
+        console.log(`      ⏹ 더 이상 페이지 없음 (${pageNum - 1}페이지까지)`);
+        break;
+      }
+      console.log(`      ➡️ 페이지 ${pageNum}로 이동 (${hasNext})`);
+      await ppurioPage.waitForTimeout(3000);
+    } catch (e) {
+      console.log(`      ⚠️ 페이지 이동 오류: ${e.message?.substring(0, 50)}`);
       break;
     }
   }
