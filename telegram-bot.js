@@ -1278,6 +1278,18 @@ async function handleMessage(msg) {
         await sendMessage('✅ 새 주문 없음');
       }
 
+      // 승인 대기 중인 주문 알림
+      const pendingKeys = Object.keys(pendingOrders);
+      if (pendingKeys.length > 0) {
+        let pendingMsg = `⏳ <b>승인 대기 (${pendingKeys.length}건)</b>\n승인/거절을 선택해주세요!\n`;
+        for (const key of pendingKeys) {
+          const po = pendingOrders[key];
+          const qtyStr = ` ${po.qty || 1}매`;
+          pendingMsg += `\n• ${po.buyerName}${qtyStr} - 승인&거절 선택 필요`;
+        }
+        await sendMessage(pendingMsg);
+      }
+
       // 발송처리 대기 목록 알림
       const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
       if (pendingDelivery.length > 0) {
