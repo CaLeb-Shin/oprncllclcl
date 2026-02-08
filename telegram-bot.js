@@ -719,18 +719,38 @@ async function getFinalSummary(filterRegion) {
     const seatMatch = text.match(/좌석[:\s]+(\S+석)\s*(\d+)매/);
     // 수신번호
     const phoneMatch = text.match(/(01[0-9]-?\d{3,4}-?\d{4})/);
-    // 공연명: [지역] 으로 시작하는 패턴 또는 "멜론" 등 포함
+    // 공연명: [지역] 으로 시작하는 패턴
     const perfMatch = text.match(/\[(.+?)\]/);
+    // 날짜: 2026.02.08, 2026-02-08, 2/8, 02/08, 2월 8일 등
+    const dateMatch = text.match(/(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})/) ||
+                      text.match(/(\d{1,2}[./]\d{1,2})/) ||
+                      text.match(/(\d{1,2}월\s*\d{1,2}일)/);
+    // 공연명 전체 추출 시도: "[대구] 멜론 뮤직 어워드" 같은 패턴
+    const fullPerfMatch = text.match(/\[.+?\]\s*[^\n\-]*/);
 
     if (nameMatch || phoneMatch) {
+      // 공연 구분 키: 공연명 전체 + 날짜 (같은 지역 다른 공연 구분)
+      let perfKey = '';
+      if (fullPerfMatch) {
+        perfKey = fullPerfMatch[0].trim();
+      } else if (perfMatch) {
+        perfKey = perfMatch[1];
+      }
+      const dateStr = dateMatch ? dateMatch[1] : '';
+      if (dateStr && !perfKey.includes(dateStr)) {
+        perfKey = perfKey ? `${perfKey} (${dateStr})` : dateStr;
+      }
+
       orders.push({
         buyerName: nameMatch ? nameMatch[1].trim() : '',
         lastFour: lastFourMatch ? lastFourMatch[1] : (phoneMatch ? phoneMatch[1].replace(/-/g, '').slice(-4) : '----'),
         seatType: seatMatch ? seatMatch[1] : '',
         qty: seatMatch ? parseInt(seatMatch[2]) : 1,
         region: perfMatch ? perfMatch[1] : '',
+        perfKey: perfKey || '기타',
+        date: dateStr,
         phone: phoneMatch ? phoneMatch[1] : '',
-        rawText: text.substring(0, 200),
+        rawText: text.substring(0, 300),
       });
     }
   }
@@ -740,7 +760,11 @@ async function getFinalSummary(filterRegion) {
   // 지역 필터
   let filtered = orders;
   if (filterRegion) {
-    filtered = orders.filter((o) => o.region.includes(filterRegion) || o.rawText.includes(filterRegion));
+    filtered = orders.filter((o) => 
+      o.region.includes(filterRegion) || 
+      o.perfKey.includes(filterRegion) || 
+      o.rawText.includes(filterRegion)
+    );
   }
 
   if (filtered.length === 0) {
@@ -756,10 +780,10 @@ async function getFinalSummary(filterRegion) {
     return debugMsg;
   }
 
-  // 지역별(공연별) 그룹핑
+  // 공연명+날짜로 그룹핑 (같은 지역 다른 공연/날짜 구분)
   const groups = {};
   for (const order of filtered) {
-    const key = order.region || '기타';
+    const key = order.perfKey || '기타';
     if (!groups[key]) groups[key] = [];
     groups[key].push(order);
   }
@@ -768,19 +792,19 @@ async function getFinalSummary(filterRegion) {
   let msg = `📋 <b>최종결산</b>${filterRegion ? ` (${filterRegion})` : ''}\n`;
   let totalQty = 0;
 
-  for (const [region, regionOrders] of Object.entries(groups)) {
-    msg += `\n🎫 <b>[${region}] 공연</b>\n`;
+  for (const [perfName, perfOrders] of Object.entries(groups)) {
+    msg += `\n🎫 <b>${perfName}</b>\n`;
     msg += `──────────────\n`;
 
-    let regionQty = 0;
-    regionOrders.forEach((o, idx) => {
+    let perfQty = 0;
+    perfOrders.forEach((o, idx) => {
       const seatInfo = o.seatType ? `${o.seatType} ` : '';
       msg += `${idx + 1}. ${o.buyerName || '(이름없음)'} (${o.lastFour}) - ${seatInfo}${o.qty}매\n`;
-      regionQty += o.qty;
+      perfQty += o.qty;
     });
 
-    msg += `<b>소계: ${regionOrders.length}건 ${regionQty}매</b>\n`;
-    totalQty += regionQty;
+    msg += `<b>소계: ${perfOrders.length}건 ${perfQty}매</b>\n`;
+    totalQty += perfQty;
   }
 
   msg += `\n━━━━━━━━━━━━━━\n`;
