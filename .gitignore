@@ -1,0 +1,30 @@
+# 세션 파일 (민감정보 - 절대 올리면 안됨)
+smartstore-state.json
+ppurio-state.json
+
+# Node.js
+node_modules/
+package-lock.json
+
+# 로그
+*.log
+bot-output.log
+bot.log
+
+# 디버그 스크린샷/파일
+*.png
+*.html
+!setup-login.js
+!telegram-bot.js
+!interpark-sales.js
+
+# 주문 데이터
+pending-orders.json
+pending-delivery.json
+processed-orders.json
+
+# macOS
+.DS_Store
+
+# 쉘 스크립트
+run-sales.sh
