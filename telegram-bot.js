@@ -950,7 +950,9 @@ async function searchNolticketPerformances() {
       return `🔍 멜론 관련 공연을 찾지 못했습니다.\n\n직접 확인: ${searchUrl}`;
     }
 
-    // 2단계: 각 공연을 순번별로 클릭 → 이동된 URL 캡처 → 검색 페이지로 복귀
+    // 2단계: 각 공연을 Playwright 네이티브 클릭 → 이동된 URL 캡처
+    //   page.evaluate의 element.click()은 untrusted event라 React SPA가 무시함
+    //   반드시 Playwright ElementHandle.click() 사용 (실제 마우스 클릭 시뮬레이션)
     const performances = [];
 
     for (let i = 0; i < items.length; i++) {
@@ -963,24 +965,27 @@ async function searchNolticketPerformances() {
 
         console.log(`   [${i + 1}/${items.length}] "${items[i].title.substring(0, 35)}..." 클릭 중...`);
 
-        // i번째 MelON 링크 클릭 (페이지 내에서 MelON <a> 태그만 카운트)
-        const clicked = await page.evaluate((targetIdx) => {
-          const allLinks = document.querySelectorAll('a');
-          let melonIdx = 0;
-          for (const a of allLinks) {
-            const text = a.innerText?.trim() || '';
-            if (!text.includes('MelON') && !text.includes('멜론')) continue;
-            if (melonIdx === targetIdx) {
-              a.click();
-              return true;
+        // Playwright $$로 모든 <a> 가져온 뒤, MelON 포함하는 i번째 찾기
+        const allLinks = await page.$$('a');
+        let melonIdx = 0;
+        let targetLink = null;
+
+        for (const link of allLinks) {
+          const text = await link.innerText().catch(() => '');
+          if (text.includes('MelON') || text.includes('멜론')) {
+            if (melonIdx === i) {
+              targetLink = link;
+              break;
             }
             melonIdx++;
           }
-          return false;
-        }, i);
+        }
 
-        if (clicked) {
-          // 상세 페이지로 이동 대기 (/goods/ URL)
+        if (targetLink) {
+          // Playwright 네이티브 클릭 (trusted mouse event)
+          await targetLink.click();
+          
+          // 상세 페이지로 이동 대기
           try {
             await page.waitForURL(/\/goods\/|\/play\//, { timeout: 10000 });
           } catch {
