@@ -151,10 +151,16 @@ async function setupPpurio() {
   console.log('');
   console.log('브라우저가 열리면:');
   console.log('1. "네이버로 시작하기" 버튼을 자동 클릭합니다');
-  console.log('2. 네이버 로그인 (sinbun001)');
-  console.log('3. ⭐ "로그인 상태 유지" 반드시 체크!');
-  console.log('4. 로그인 후 자동 저장됩니다.');
+  console.log('2. 네이버 로그인');
+  console.log('3. ⭐⭐⭐ "로그인 상태 유지" 반드시 체크! ⭐⭐⭐');
+  console.log('4. 뿌리오 메인 보이면 여기 와서 Enter 누르세요!');
   console.log('');
+
+  // 기존 상태파일 삭제
+  if (fs.existsSync(PPURIO_STATE)) {
+    fs.unlinkSync(PPURIO_STATE);
+    console.log('🗑️ 기존 세션 파일 삭제');
+  }
 
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext();
@@ -171,47 +177,55 @@ async function setupPpurio() {
     console.log('⚠️ 네이버 버튼을 직접 클릭해주세요');
   }
 
-  await page.waitForTimeout(2000);
+  // 브라우저 안 닫음! 유저가 Enter 누를 때까지 대기
+  await waitForEnter('\n✋ 로그인 완료 후 여기서 Enter를 누르세요 → ');
 
-  // 네이버 로그인 페이지에서 "로그인 상태 유지" 체크
-  if (page.url().includes('nid.naver.com')) {
-    try {
-      const keepLoginChecked = await page.evaluate(() => {
-        const cb = document.querySelector('#keep, .keep_check input, [name="nvlong"]');
-        return cb ? cb.checked : null;
-      });
-      if (keepLoginChecked === false) {
-        await page.click('#keep, .keep_check, label[for="keep"]').catch(() => {});
-        console.log('✅ "로그인 상태 유지" 자동 체크');
-      } else if (keepLoginChecked === true) {
-        console.log('✅ "로그인 상태 유지" 이미 체크됨');
-      }
-    } catch {
-      console.log('⚠️ "로그인 상태 유지"를 직접 체크해주세요!');
-    }
-  }
-
-  console.log('⏳ 로그인 대기 중... (최대 5분)');
+  console.log('');
+  console.log('🔍 로그인 상태 확인 중...');
 
   try {
-    // 뿌리오 메인으로 돌아올 때까지 대기
-    await page.waitForFunction(
-      () => {
-        // 로그인 폼이 없어야 함 (정확한 로그인 판별)
-        const hasLoginForm = document.body.innerText.includes('아이디 저장') ||
-                             document.body.innerText.includes('비밀번호 재설정');
-        const isLoggedIn = document.body.innerText.includes('로그아웃');
-        return !hasLoginForm && isLoggedIn;
-      },
-      { timeout: 300_000 }
-    );
+    // 뿌리오 메인으로 이동해서 확인
+    await page.goto('https://www.ppurio.com/');
+    await page.waitForTimeout(3000);
 
-    console.log('✅ 뿌리오 로그인 성공!');
-    await page.waitForTimeout(2000);
+    const ppLoggedIn = await page.evaluate(() => {
+      const hasLoginForm = document.body.innerText.includes('아이디 저장') ||
+                           document.body.innerText.includes('비밀번호 재설정');
+      const isLoggedIn = document.body.innerText.includes('로그아웃');
+      return !hasLoginForm && isLoggedIn;
+    });
+
+    if (!ppLoggedIn) {
+      console.log('❌ 로그인이 안 된 것 같아요. 다시 시도해주세요.');
+      await browser.close();
+      return;
+    }
+
+    console.log('✅ 뿌리오 로그인 확인!');
+
+    // 세션 저장
     await context.storageState({ path: PPURIO_STATE });
     console.log('💾 저장됨:', PPURIO_STATE);
-  } catch {
-    console.log('❌ 시간 초과. 다시 시도해주세요.');
+
+    // 저장된 쿠키 확인
+    const savedState = JSON.parse(fs.readFileSync(PPURIO_STATE, 'utf8'));
+    const cookieCount = savedState.cookies?.length || 0;
+    const naverCookies = savedState.cookies?.filter(c => c.domain?.includes('naver')) || [];
+    const hasNID = savedState.cookies?.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES');
+
+    console.log('');
+    console.log('📊 저장된 쿠키 정보:');
+    console.log(`   총 쿠키: ${cookieCount}개`);
+    console.log(`   네이버 쿠키: ${naverCookies.length}개`);
+    console.log(`   NID_AUT/NID_SES: ${hasNID ? '✅ 완벽!' : '❌ "로그인 상태 유지" 안 눌렀어요!'}`);
+
+    if (hasNID) {
+      console.log('');
+      console.log('🎉 완벽하게 저장됐어요!');
+    }
+
+  } catch (e) {
+    console.log('❌ 오류:', e.message);
   }
 
   await browser.close();
