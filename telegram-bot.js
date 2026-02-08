@@ -530,15 +530,26 @@ async function getNewOrders() {
           const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) || '';
           // 구매자: 셀[9]
           const buyerName = cells[9] || '';
-          // 수취인: 구매자 이후에 나오는 다른 한글 이름 (2~4글자)
-          // 보통 셀[10]~[15] 사이에 있음
+          
+          // 수취인 찾기: 구매자(셀[9]) 이후에 나오는 한글 이름 (2~5글자)
+          // 구매자와 다른 이름만 수취인으로 인식
           let recipientName = '';
-          for (let j = 10; j <= 20; j++) {
-            if (cells[j] && cells[j] !== buyerName && cells[j].match(/^[가-힣]{2,4}$/)) {
-              recipientName = cells[j];
-              break;
+          // 한글 이름 패턴으로 전체 셀에서 검색 (구매자 다음부터)
+          const koreanNamePattern = /^[가-힣]{2,5}$/;
+          for (let j = 10; j < cells.length; j++) {
+            const cell = cells[j];
+            if (cell && cell !== buyerName && koreanNamePattern.test(cell)) {
+              // 연락처/상품명/숫자 등이 아닌 순수 이름인지 확인
+              if (!cell.match(/[0-9]/) && !cell.includes('석') && !cell.includes('택배') && !cell.includes('배송')) {
+                recipientName = cell;
+                break;
+              }
             }
           }
+          
+          // 디버그: 셀 내용 중 한글이름 후보들 기록
+          const nameDebug = cells.slice(8, 25).map((c, idx) => `[${idx+8}]${c}`).join(' | ');
+          
           // 수량: 셀[24]
           const qty = parseInt(cells[24]) || 1;
           // 연락처: 010 패턴이 있는 셀
@@ -554,9 +565,11 @@ async function getNewOrders() {
             orderId,
             productName,
             buyerName: displayName,
+            recipientName: recipientName || buyerName,
             qty,
             phone,
             option: '',
+            _nameDebug: nameDebug,
           });
         }
         return result;
@@ -570,6 +583,10 @@ async function getNewOrders() {
   }
 
   console.log(`   📦 총 ${allOrders.length}개 신규주문 발견`);
+  // 디버그: 주문자/수취인 정보 출력
+  for (const o of allOrders) {
+    console.log(`      👤 ${o.buyerName} | 수취인: ${o.recipientName} | 디버그: ${o._nameDebug}`);
+  }
   return allOrders;
 }
 
