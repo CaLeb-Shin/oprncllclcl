@@ -649,6 +649,154 @@ async function checkCancelledOrders() {
 }
 
 // ============================================================
+// 최종결산: 발송완료 주문을 공연별로 정리
+// ============================================================
+async function getFinalSummary(filterRegion) {
+  console.log('📋 최종결산 조회 중...');
+  await ensureBrowser();
+
+  // 발주/발송관리 페이지로 이동
+  await smartstorePage.goto(CONFIG.smartstore.orderUrl);
+  await smartstorePage.waitForTimeout(5000);
+
+  // 팝업 닫기
+  try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+  await smartstorePage.waitForTimeout(1000);
+
+  // iframe 찾기
+  const frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
+
+  // "발송완료" 카드 클릭
+  const allOrders = [];
+  for (const cardLabel of ['발송완료']) {
+    try {
+      await frame.click(`text=${cardLabel}`, { timeout: 5000 });
+      console.log(`   🔍 ${cardLabel} 조회...`);
+      await smartstorePage.waitForTimeout(4000);
+
+      const orders = await frame.evaluate(() => {
+        const rows = document.querySelectorAll('table tbody tr');
+        const headerOrderIds = [];
+        const dataRows = [];
+
+        for (const tr of rows) {
+          const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+          if (cells.length === 0) continue;
+
+          if (cells.length >= 3 && cells.length <= 10) {
+            const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
+            if (idCell) headerOrderIds.push(idCell);
+            continue;
+          }
+
+          if (cells.length >= 50) {
+            dataRows.push(cells);
+          }
+        }
+
+        const result = [];
+        for (let i = 0; i < dataRows.length; i++) {
+          const cells = dataRows[i];
+          const orderId = headerOrderIds[i] || '';
+          if (!orderId) continue;
+
+          const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) || '';
+          const buyerName = cells[9] || '';
+
+          // 수취인 찾기
+          let recipientName = '';
+          const koreanNamePattern = /^[가-힣]{2,4}$/;
+          const excludeWords = [
+            '발송대기', '발송완료', '발주확인', '결제완료', '배송중', '배송완료',
+            '구매확인', '수취확인', '교환반품', '취소완료', '반품완료', '환불완료',
+            '신규주문', '처리완료', '택배발송', '직접전달', '방문수령', '일반택배',
+            '선결제', '후결제', '무료배송', '유료배송', '착불배송',
+          ];
+          for (let j = 10; j <= 25; j++) {
+            const cell = cells[j];
+            if (cell && cell !== buyerName && koreanNamePattern.test(cell) && !excludeWords.includes(cell)) {
+              recipientName = cell;
+              break;
+            }
+          }
+
+          const qty = parseInt(cells[24]) || 1;
+          const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
+
+          let displayName = buyerName;
+          if (recipientName && recipientName !== buyerName) {
+            displayName = `${buyerName}(${recipientName})`;
+          }
+
+          result.push({
+            orderId,
+            productName,
+            buyerName: displayName,
+            qty,
+            phone,
+          });
+        }
+        return result;
+      });
+
+      console.log(`   📦 ${cardLabel}: ${orders.length}건`);
+      allOrders.push(...orders);
+    } catch (e) {
+      console.log(`   ${cardLabel} 조회 실패:`, e.message);
+    }
+  }
+
+  // 지역 필터 적용
+  let filtered = allOrders;
+  if (filterRegion) {
+    filtered = allOrders.filter((o) => o.productName.includes(filterRegion));
+  }
+
+  if (filtered.length === 0) {
+    return filterRegion
+      ? `📋 "${filterRegion}" 관련 발송완료 주문이 없습니다.`
+      : '📋 발송완료 주문이 없습니다.';
+  }
+
+  // 공연별(productName)로 그룹핑
+  const groups = {};
+  for (const order of filtered) {
+    const key = order.productName || '기타';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(order);
+  }
+
+  // 메시지 생성
+  let msg = `📋 <b>최종결산</b>${filterRegion ? ` (${filterRegion})` : ''}\n`;
+  let totalQty = 0;
+
+  for (const [perfName, orders] of Object.entries(groups)) {
+    // 좌석 종류 추출
+    const seatMatch = perfName.match(/,\s*(\S+석)\s*$/);
+    const seatType = seatMatch ? seatMatch[1] : '';
+
+    msg += `\n🎫 <b>${perfName}</b>\n`;
+    msg += `──────────────\n`;
+
+    let perfQty = 0;
+    orders.forEach((o, idx) => {
+      const lastFour = o.phone?.replace(/-/g, '').slice(-4) || '----';
+      msg += `${idx + 1}. ${o.buyerName} (${lastFour}) - ${seatType || ''} ${o.qty}매\n`;
+      perfQty += o.qty;
+    });
+
+    msg += `<b>소계: ${orders.length}건 ${perfQty}매</b>\n`;
+    totalQty += perfQty;
+  }
+
+  msg += `\n━━━━━━━━━━━━━━\n`;
+  msg += `<b>총 합계: ${filtered.length}건 ${totalQty}매</b>`;
+
+  return msg;
+}
+
+// ============================================================
 // 전체 주문 확인 플로우
 // ============================================================
 async function checkForNewOrders() {
@@ -1269,6 +1417,19 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 최종결산
+  if (text === '최종결산' || text.startsWith('최종결산 ')) {
+    const region = text.replace('최종결산', '').trim() || null;
+    await sendMessage(`📋 최종결산 조회 중...${region ? ` (${region})` : ''}`);
+    try {
+      const report = await getFinalSummary(region);
+      await sendMessage(report);
+    } catch (err) {
+      await sendMessage(`❌ 최종결산 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 스마트스토어 주문 확인
   if (['check', '체크', '확인', '주문확인', '주문'].includes(text)) {
     await sendMessage('🔍 스마트스토어 주문 확인 중...');
@@ -1371,7 +1532,9 @@ async function handleMessage(msg) {
   if (['help', '/help', '도움말'].includes(text)) {
     await sendMessage(
       `📋 <b>명령어 안내</b>\n\n` +
-      `• <b>결산</b> - 놀티켓 + 네이버 어제/오늘 따로\n\n` +
+      `• <b>결산</b> - 놀티켓 + 네이버 어제/오늘 따로\n` +
+      `• <b>최종결산</b> - 공연별 주문 정리 (이름/뒷자리/좌석)\n` +
+      `• <b>최종결산 대구</b> - 특정 지역만\n\n` +
       `<b>📊 인터파크</b>\n` +
       `• sales, 조회, 놀티켓 - 판매현황\n\n` +
       `<b>📦 스마트스토어</b>\n` +
