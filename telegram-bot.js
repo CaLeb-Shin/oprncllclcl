@@ -649,120 +649,117 @@ async function checkCancelledOrders() {
 }
 
 // ============================================================
-// 최종결산: 발송완료 주문을 공연별로 정리
+// 최종결산: 뿌리오 발송결과에서 문자 내역 가져와서 공연별 정리
 // ============================================================
 async function getFinalSummary(filterRegion) {
-  console.log('📋 최종결산 조회 중...');
+  console.log('📋 최종결산 조회 중... (뿌리오 발송결과)');
   await ensureBrowser();
 
-  // 발주/발송관리 페이지로 이동
-  await smartstorePage.goto(CONFIG.smartstore.orderUrl);
-  await smartstorePage.waitForTimeout(5000);
+  if (!ppurioPage) {
+    throw new Error('뿌리오 세션이 없습니다. "뿌리오로그인" 먼저 해주세요.');
+  }
 
-  // 팝업 닫기
-  try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
-  await smartstorePage.waitForTimeout(1000);
+  // 뿌리오 발송결과 페이지로 이동
+  await ppurioPage.goto('https://www.ppurio.com/result/message');
+  await ppurioPage.waitForTimeout(4000);
 
-  // iframe 찾기
-  const frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
-  if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
+  // 로그인 확인
+  const loggedIn = await isPpurioLoggedIn(ppurioPage);
+  if (!loggedIn) {
+    throw new Error('뿌리오 로그인 만료. "뿌리오로그인" 해주세요.');
+  }
 
-  // "발송완료" 카드 클릭
-  const allOrders = [];
-  for (const cardLabel of ['발송완료']) {
-    try {
-      await frame.click(`text=${cardLabel}`, { timeout: 5000 });
-      console.log(`   🔍 ${cardLabel} 조회...`);
-      await smartstorePage.waitForTimeout(4000);
-
-      const orders = await frame.evaluate(() => {
-        const rows = document.querySelectorAll('table tbody tr');
-        const headerOrderIds = [];
-        const dataRows = [];
-
-        for (const tr of rows) {
-          const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-          if (cells.length === 0) continue;
-
-          if (cells.length >= 3 && cells.length <= 10) {
-            const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
-            if (idCell) headerOrderIds.push(idCell);
-            continue;
-          }
-
-          if (cells.length >= 50) {
-            dataRows.push(cells);
-          }
-        }
-
-        const result = [];
-        for (let i = 0; i < dataRows.length; i++) {
-          const cells = dataRows[i];
-          const orderId = headerOrderIds[i] || '';
-          if (!orderId) continue;
-
-          const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) || '';
-          const buyerName = cells[9] || '';
-
-          // 수취인 찾기
-          let recipientName = '';
-          const koreanNamePattern = /^[가-힣]{2,4}$/;
-          const excludeWords = [
-            '발송대기', '발송완료', '발주확인', '결제완료', '배송중', '배송완료',
-            '구매확인', '수취확인', '교환반품', '취소완료', '반품완료', '환불완료',
-            '신규주문', '처리완료', '택배발송', '직접전달', '방문수령', '일반택배',
-            '선결제', '후결제', '무료배송', '유료배송', '착불배송',
-          ];
-          for (let j = 10; j <= 25; j++) {
-            const cell = cells[j];
-            if (cell && cell !== buyerName && koreanNamePattern.test(cell) && !excludeWords.includes(cell)) {
-              recipientName = cell;
-              break;
-            }
-          }
-
-          const qty = parseInt(cells[24]) || 1;
-          const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
-
-          let displayName = buyerName;
-          if (recipientName && recipientName !== buyerName) {
-            displayName = `${buyerName}(${recipientName})`;
-          }
-
-          result.push({
-            orderId,
-            productName,
-            buyerName: displayName,
-            qty,
-            phone,
-          });
-        }
-        return result;
+  // 발송결과 테이블에서 데이터 스크래핑
+  const results = await ppurioPage.evaluate(() => {
+    const items = [];
+    // 테이블 행 가져오기
+    const rows = document.querySelectorAll('table tbody tr');
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll('td')).map((td) => td.innerText?.trim());
+      // 각 행의 전체 텍스트도 저장 (디버그용)
+      items.push({
+        cellCount: cells.length,
+        cells: cells,
+        fullText: row.innerText?.trim().substring(0, 300),
       });
+    }
+    // 페이지 전체 구조 디버그
+    const tables = document.querySelectorAll('table');
+    const pageDebug = {
+      tableCount: tables.length,
+      url: window.location.href,
+      bodySnippet: document.body.innerText.substring(0, 500),
+    };
+    return { items, pageDebug };
+  });
 
-      console.log(`   📦 ${cardLabel}: ${orders.length}건`);
-      allOrders.push(...orders);
-    } catch (e) {
-      console.log(`   ${cardLabel} 조회 실패:`, e.message);
+  console.log('   📊 뿌리오 발송결과 디버그:');
+  console.log(`      테이블 수: ${results.pageDebug.tableCount}`);
+  console.log(`      URL: ${results.pageDebug.url}`);
+  console.log(`      행 수: ${results.items.length}`);
+  console.log(`      페이지 내용: ${results.pageDebug.bodySnippet.substring(0, 200)}`);
+
+  // 각 행 디버그 출력 (처음 5개만)
+  for (let i = 0; i < Math.min(results.items.length, 5); i++) {
+    const item = results.items[i];
+    console.log(`      행[${i}] (${item.cellCount}칸): ${item.fullText.substring(0, 150)}`);
+  }
+
+  // 발송 내역에서 문자 내용 파싱
+  // 뿌리오 발송결과에서 각 문자의 내용을 추출
+  const orders = [];
+  for (const item of results.items) {
+    const text = item.fullText || '';
+    
+    // 문자 내용에서 예매자 정보 추출: "예매자: 이름님 (뒷자리 1234)"
+    const nameMatch = text.match(/예매자[:\s]+(.+?)님/);
+    // 연락처 뒷자리: "(뒷자리 1234)"
+    const lastFourMatch = text.match(/뒷자리\s*(\d{4})/);
+    // 좌석: "좌석: S석 2매"
+    const seatMatch = text.match(/좌석[:\s]+(\S+석)\s*(\d+)매/);
+    // 수신번호
+    const phoneMatch = text.match(/(01[0-9]-?\d{3,4}-?\d{4})/);
+    // 공연명: [지역] 으로 시작하는 패턴 또는 "멜론" 등 포함
+    const perfMatch = text.match(/\[(.+?)\]/);
+
+    if (nameMatch || phoneMatch) {
+      orders.push({
+        buyerName: nameMatch ? nameMatch[1].trim() : '',
+        lastFour: lastFourMatch ? lastFourMatch[1] : (phoneMatch ? phoneMatch[1].replace(/-/g, '').slice(-4) : '----'),
+        seatType: seatMatch ? seatMatch[1] : '',
+        qty: seatMatch ? parseInt(seatMatch[2]) : 1,
+        region: perfMatch ? perfMatch[1] : '',
+        phone: phoneMatch ? phoneMatch[1] : '',
+        rawText: text.substring(0, 200),
+      });
     }
   }
 
-  // 지역 필터 적용
-  let filtered = allOrders;
+  console.log(`   📦 파싱된 주문: ${orders.length}건`);
+
+  // 지역 필터
+  let filtered = orders;
   if (filterRegion) {
-    filtered = allOrders.filter((o) => o.productName.includes(filterRegion));
+    filtered = orders.filter((o) => o.region.includes(filterRegion) || o.rawText.includes(filterRegion));
   }
 
   if (filtered.length === 0) {
-    return filterRegion
-      ? `📋 "${filterRegion}" 관련 발송완료 주문이 없습니다.`
-      : '📋 발송완료 주문이 없습니다.';
+    // 디버그 정보와 함께 반환
+    let debugMsg = filterRegion
+      ? `📋 "${filterRegion}" 관련 발송 내역이 없습니다.`
+      : '📋 발송 내역이 없습니다.';
+    
+    if (results.items.length > 0) {
+      debugMsg += `\n\n(참고: 뿌리오 페이지에 ${results.items.length}개 행이 있었으나 문자 내용 파싱 실패)`;
+      debugMsg += `\n첫 번째 행: ${results.items[0]?.fullText?.substring(0, 100) || '없음'}`;
+    }
+    return debugMsg;
   }
 
-  // 공연별(productName)로 그룹핑
+  // 지역별(공연별) 그룹핑
   const groups = {};
   for (const order of filtered) {
-    const key = order.productName || '기타';
+    const key = order.region || '기타';
     if (!groups[key]) groups[key] = [];
     groups[key].push(order);
   }
@@ -771,23 +768,19 @@ async function getFinalSummary(filterRegion) {
   let msg = `📋 <b>최종결산</b>${filterRegion ? ` (${filterRegion})` : ''}\n`;
   let totalQty = 0;
 
-  for (const [perfName, orders] of Object.entries(groups)) {
-    // 좌석 종류 추출
-    const seatMatch = perfName.match(/,\s*(\S+석)\s*$/);
-    const seatType = seatMatch ? seatMatch[1] : '';
-
-    msg += `\n🎫 <b>${perfName}</b>\n`;
+  for (const [region, regionOrders] of Object.entries(groups)) {
+    msg += `\n🎫 <b>[${region}] 공연</b>\n`;
     msg += `──────────────\n`;
 
-    let perfQty = 0;
-    orders.forEach((o, idx) => {
-      const lastFour = o.phone?.replace(/-/g, '').slice(-4) || '----';
-      msg += `${idx + 1}. ${o.buyerName} (${lastFour}) - ${seatType || ''} ${o.qty}매\n`;
-      perfQty += o.qty;
+    let regionQty = 0;
+    regionOrders.forEach((o, idx) => {
+      const seatInfo = o.seatType ? `${o.seatType} ` : '';
+      msg += `${idx + 1}. ${o.buyerName || '(이름없음)'} (${o.lastFour}) - ${seatInfo}${o.qty}매\n`;
+      regionQty += o.qty;
     });
 
-    msg += `<b>소계: ${orders.length}건 ${perfQty}매</b>\n`;
-    totalQty += perfQty;
+    msg += `<b>소계: ${regionOrders.length}건 ${regionQty}매</b>\n`;
+    totalQty += regionQty;
   }
 
   msg += `\n━━━━━━━━━━━━━━\n`;
