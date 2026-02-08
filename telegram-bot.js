@@ -649,22 +649,23 @@ async function checkCancelledOrders() {
 }
 
 // ============================================================
-// 최종결산: 뿌리오 발송결과 기반 (2단계 방식)
+// 최종결산: 뿌리오 발송결과 카드에서 데이터 수집 (2단계)
 // ============================================================
 
-// 최종결산 상태 (공연 목록 임시 저장)
-let finalSummaryPerfs = [];
+// 최종결산 상태
+let finalSummaryData = {};  // { '공연키': [주문들...] }
+let finalSummaryKeys = [];  // 공연키 목록
 
-// 1단계: 공연 목록 가져오기
-async function getFinalSummaryList() {
-  console.log('📋 최종결산 - 공연 목록 조회 중...');
+// 뿌리오 발송결과 카드에서 모든 데이터 수집
+async function scrapePpurioResults() {
+  console.log('📋 뿌리오 발송결과 스크래핑 중...');
   await ensureBrowser();
 
   if (!ppurioPage) {
     throw new Error('뿌리오 세션이 없습니다. "뿌리오로그인" 먼저 해주세요.');
   }
 
-  // 뿌리오 발송결과 페이지로 이동
+  // 발송결과 페이지 → 미리보기 모드
   await ppurioPage.goto('https://www.ppurio.com/result/message');
   await ppurioPage.waitForTimeout(4000);
 
@@ -673,239 +674,132 @@ async function getFinalSummaryList() {
     throw new Error('뿌리오 로그인 만료. "뿌리오로그인" 해주세요.');
   }
 
-  // 모든 페이지를 순회하며 제목(템플릿명) 수집
-  const allTitles = new Set();
+  // 미리보기 모드인지 확인, 아니면 클릭
+  try {
+    const isPreview = await ppurioPage.evaluate(() => {
+      const btn = document.querySelector('[class*="preview"], .btn_preview');
+      // 미리보기 버튼이 active 상태인지 확인
+      return document.body.innerText.includes('공연 정보') ||
+             document.body.innerText.includes('예매자');
+    });
+    if (!isPreview) {
+      // 미리보기 버튼 클릭
+      await ppurioPage.click('text=미리보기', { timeout: 3000 }).catch(() => {});
+      await ppurioPage.waitForTimeout(2000);
+    }
+  } catch {}
+
+  // 모든 페이지를 순회하며 카드 데이터 수집
+  const allOrders = [];
   let pageNum = 1;
   const maxPages = 20;
 
   while (pageNum <= maxPages) {
     console.log(`   📄 페이지 ${pageNum} 스캔 중...`);
 
-    // 현재 페이지의 테이블 행에서 제목/템플릿명 추출
-    const pageData = await ppurioPage.evaluate((currentPage) => {
-      const items = [];
-      const rows = document.querySelectorAll('table tbody tr');
-      for (const row of rows) {
-        const cells = Array.from(row.querySelectorAll('td')).map((td) => td.innerText?.trim());
-        items.push({
-          cells: cells,
-          fullText: row.innerText?.trim().substring(0, 500),
-        });
-      }
-      // 페이지네이션 버튼들
-      const pageButtons = Array.from(document.querySelectorAll('.pagination a, .paging a, .page_num a, [class*="page"] a'));
-      const pageNums = pageButtons.map(a => a.innerText?.trim()).filter(t => t.match(/^\d+$/));
-      const hasNext = !!document.querySelector('.pagination .next, .paging .next, [class*="next"]') ||
-                      pageNums.some(n => parseInt(n) > currentPage);
-
-      return {
-        items,
-        hasNext,
-        pageNums,
-        bodySnippet: document.body.innerText.substring(0, 300),
-      };
-    }, pageNum);
-
-    // 디버그 (첫 페이지만)
-    if (pageNum === 1) {
-      console.log(`      행 수: ${pageData.items.length}`);
-      console.log(`      페이지 버튼: ${pageData.pageNums.join(', ')}`);
-      if (pageData.items.length > 0) {
-        console.log(`      첫 행: ${pageData.items[0].fullText.substring(0, 200)}`);
-      }
-    }
-
-    // 각 행에서 제목(공연명) 추출
-    for (const item of pageData.items) {
-      const text = item.fullText || '';
-      // 템플릿명에 "[멜론]" 패턴이 있는지 확인
-      // 셀에서 제목 찾기: "[멜론] 대구 공연 예매 완료" 같은 패턴
-      for (const cell of item.cells) {
-        if (cell && cell.includes('[멜론]')) {
-          allTitles.add(cell.trim());
-        }
-        // 다른 형식 템플릿도 캡처: "[지역]" 패턴
-        if (cell && cell.match(/\[.+\].*공연.*완료/)) {
-          allTitles.add(cell.trim());
-        }
-      }
-      // fullText에서도 검색
-      const titleMatch = text.match(/\[멜론\][^\n\t]*/);
-      if (titleMatch) {
-        allTitles.add(titleMatch[0].trim());
-      }
-    }
-
-    // 다음 페이지가 없으면 종료
-    if (!pageData.hasNext || pageData.items.length === 0) break;
-
-    // 다음 페이지로 이동
-    pageNum++;
-    try {
-      // 페이지 번호 버튼 클릭 시도
-      const clicked = await ppurioPage.evaluate((num) => {
-        const links = document.querySelectorAll('.pagination a, .paging a, .page_num a, [class*="page"] a');
-        for (const a of links) {
-          if (a.innerText?.trim() === String(num)) {
-            a.click();
-            return true;
+    // 현재 페이지의 카드들에서 데이터 추출
+    const cards = await ppurioPage.evaluate(() => {
+      const results = [];
+      // 카드/항목들을 찾기 - 체크박스가 있는 각 항목
+      // 페이지 전체 텍스트에서 카드별로 분리
+      const bodyText = document.body.innerText;
+      
+      // "[멜론]" 으로 시작하는 각 카드 블록 찾기
+      // 각 카드는 제목 + 내용으로 구성
+      const cardElements = document.querySelectorAll('.message_list > div, .msg_list > div, .result_list > li, .card, [class*="message_item"], [class*="msg_item"]');
+      
+      // 카드 요소를 못 찾으면 텍스트 기반으로 파싱
+      if (cardElements.length === 0) {
+        // 텍스트에서 "[멜론]" 패턴으로 카드 분리
+        const blocks = bodyText.split(/(?=\[멜론\]\s*\S+\s*공연\s*예매\s*완료)/);
+        for (const block of blocks) {
+          if (!block.includes('[멜론]')) continue;
+          
+          // 제목 추출
+          const titleMatch = block.match(/(\[멜론\]\s*\S+\s*공연\s*예매\s*완료)/);
+          // 일시 추출
+          const dateMatch = block.match(/일시[:\s]*(.+?)(?:\n|$)/);
+          // 장소 추출
+          const venueMatch = block.match(/장소[:\s]*(.+?)(?:\n|$)/);
+          // 예매자 추출
+          const nameMatch = block.match(/예매자[:\s]*(.+?)님/);
+          // 뒷자리 추출
+          const lastFourMatch = block.match(/뒷자리\s*(\d{4})/);
+          // 좌석 추출
+          const seatMatch = block.match(/좌석[:\s]*(\S+석)\s*(\d+)매/);
+          
+          if (titleMatch) {
+            results.push({
+              title: titleMatch[1].trim(),
+              date: dateMatch ? dateMatch[1].trim() : '',
+              venue: venueMatch ? venueMatch[1].trim() : '',
+              buyerName: nameMatch ? nameMatch[1].trim() : '',
+              lastFour: lastFourMatch ? lastFourMatch[1] : '',
+              seatType: seatMatch ? seatMatch[1] : '',
+              qty: seatMatch ? parseInt(seatMatch[2]) : 1,
+              raw: block.substring(0, 300),
+            });
           }
         }
-        // next 버튼
-        const next = document.querySelector('.pagination .next, .paging .next, [class*="next"]');
-        if (next) { next.click(); return true; }
-        return false;
-      }, pageNum);
-
-      if (!clicked) break;
-      await ppurioPage.waitForTimeout(2000);
-    } catch {
-      break;
-    }
-  }
-
-  console.log(`   📦 발견된 공연: ${allTitles.size}개`);
-
-  // 공연 목록에서 지역/날짜 추출하고 오늘 이후만 필터
-  // (일단 전체 보여주고, 날짜 정보는 텍스트에서 추출 시도)
-  const perfList = Array.from(allTitles);
-  
-  // 저장 (2단계에서 사용)
-  finalSummaryPerfs = perfList;
-
-  return perfList;
-}
-
-// 2단계: 선택한 공연의 상세 내역
-async function getFinalSummaryDetail(perfIndex) {
-  if (perfIndex < 0 || perfIndex >= finalSummaryPerfs.length) {
-    return '❌ 잘못된 번호입니다.';
-  }
-
-  const selectedPerf = finalSummaryPerfs[perfIndex];
-  console.log(`📋 최종결산 상세 - "${selectedPerf}" 조회 중...`);
-
-  if (!ppurioPage) {
-    throw new Error('뿌리오 세션이 없습니다.');
-  }
-
-  // 발송결과 페이지로 이동
-  await ppurioPage.goto('https://www.ppurio.com/result/message');
-  await ppurioPage.waitForTimeout(4000);
-
-  // 모든 페이지를 순회하며 해당 공연의 발송 내역 수집
-  const orderDetails = [];
-  let pageNum = 1;
-  const maxPages = 20;
-
-  while (pageNum <= maxPages) {
-    console.log(`   📄 페이지 ${pageNum} 스캔 중...`);
-
-    // 현재 페이지에서 해당 공연 행 찾기
-    const rowCount = await ppurioPage.evaluate(() => {
-      return document.querySelectorAll('table tbody tr').length;
+      } else {
+        // 카드 요소가 있으면 각 카드에서 추출
+        for (const card of cardElements) {
+          const text = card.innerText || '';
+          if (!text.includes('[멜론]')) continue;
+          
+          const titleMatch = text.match(/(\[멜론\]\s*\S+\s*공연\s*예매\s*완료)/);
+          const dateMatch = text.match(/일시[:\s]*(.+?)(?:\n|$)/);
+          const venueMatch = text.match(/장소[:\s]*(.+?)(?:\n|$)/);
+          const nameMatch = text.match(/예매자[:\s]*(.+?)님/);
+          const lastFourMatch = text.match(/뒷자리\s*(\d{4})/);
+          const seatMatch = text.match(/좌석[:\s]*(\S+석)\s*(\d+)매/);
+          
+          if (titleMatch) {
+            results.push({
+              title: titleMatch[1].trim(),
+              date: dateMatch ? dateMatch[1].trim() : '',
+              venue: venueMatch ? venueMatch[1].trim() : '',
+              buyerName: nameMatch ? nameMatch[1].trim() : '',
+              lastFour: lastFourMatch ? lastFourMatch[1] : '',
+              seatType: seatMatch ? seatMatch[1] : '',
+              qty: seatMatch ? parseInt(seatMatch[2]) : 1,
+              raw: text.substring(0, 300),
+            });
+          }
+        }
+      }
+      
+      // 페이지네이션 정보
+      const pageLinks = document.querySelectorAll('.pagination a, .paging a, [class*="page"] a, [class*="paging"] a');
+      const pageNums = Array.from(pageLinks).map(a => a.innerText?.trim()).filter(t => t && t.match(/^\d+$/));
+      
+      return { results, pageNums };
     });
 
-    for (let rowIdx = 0; rowIdx < rowCount; rowIdx++) {
-      // 행이 해당 공연인지 확인
-      const rowInfo = await ppurioPage.evaluate((idx, perfTitle) => {
-        const rows = document.querySelectorAll('table tbody tr');
-        if (idx >= rows.length) return null;
-        const row = rows[idx];
-        const text = row.innerText || '';
-        const cells = Array.from(row.querySelectorAll('td')).map(td => td.innerText?.trim());
-        
-        // 수신번호 추출
-        const phoneMatch = text.match(/(01[0-9]-?\d{3,4}-?\d{4})/);
-        
-        return {
-          isMatch: text.includes(perfTitle),
-          phone: phoneMatch ? phoneMatch[1] : '',
-          cells: cells,
-          text: text.substring(0, 300),
-        };
-      }, rowIdx, selectedPerf);
-
-      if (!rowInfo || !rowInfo.isMatch) continue;
-
-      // 미리보기 버튼 클릭
-      try {
-        const previewBtn = await ppurioPage.evaluate((idx) => {
-          const rows = document.querySelectorAll('table tbody tr');
-          if (idx >= rows.length) return false;
-          const row = rows[idx];
-          // 미리보기 버튼 찾기
-          const btn = row.querySelector('button, a, [class*="preview"], [class*="view"]');
-          if (btn) {
-            btn.click();
-            return true;
-          }
-          // 또는 특정 셀 클릭
-          const clickableCell = row.querySelector('td a, td button');
-          if (clickableCell) {
-            clickableCell.click();
-            return true;
-          }
-          return false;
-        }, rowIdx);
-
-        if (previewBtn) {
-          await ppurioPage.waitForTimeout(1500);
-
-          // 미리보기 팝업/모달에서 내용 추출
-          const content = await ppurioPage.evaluate(() => {
-            // 모달/팝업에서 문자 내용 추출
-            const modal = document.querySelector('.modal, .popup, .layer_pop, [class*="modal"], [class*="popup"], [class*="preview"]');
-            if (modal) return modal.innerText || '';
-            // 또는 페이지 전체에서 문자 내용 부분 찾기
-            return document.body.innerText.substring(0, 1000);
-          });
-
-          // 문자 내용에서 정보 추출
-          const nameMatch = content.match(/예매자[:\s]+(.+?)님/);
-          const lastFourMatch = content.match(/뒷자리\s*(\d{4})/);
-          const seatMatch = content.match(/좌석[:\s]+(\S+석)\s*(\d+)매/);
-          const dateMatch = content.match(/(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})/) ||
-                           content.match(/(\d{1,2}월\s*\d{1,2}일)/);
-
-          const phone = rowInfo.phone || '';
-          const lastFour = lastFourMatch ? lastFourMatch[1] : phone.replace(/-/g, '').slice(-4) || '----';
-
-          orderDetails.push({
-            buyerName: nameMatch ? nameMatch[1].trim() : '',
-            lastFour: lastFour,
-            seatType: seatMatch ? seatMatch[1] : '',
-            qty: seatMatch ? parseInt(seatMatch[2]) : 1,
-            phone: phone,
-            date: dateMatch ? dateMatch[1] : '',
-          });
-
-          console.log(`      ✅ ${nameMatch ? nameMatch[1] : '?'} (${lastFour}) - ${seatMatch ? seatMatch[1] + ' ' + seatMatch[2] + '매' : '?'}`);
-
-          // 미리보기 닫기
-          try {
-            await ppurioPage.click('button:has-text("닫기"), button:has-text("확인"), .modal .close, [class*="close"]', { timeout: 2000 });
-          } catch {}
-          await ppurioPage.waitForTimeout(500);
-        }
-      } catch (e) {
-        console.log(`      ⚠️ 미리보기 실패 (행 ${rowIdx}):`, e.message.substring(0, 50));
-      }
+    console.log(`      카드 ${cards.results.length}개 발견`);
+    for (const c of cards.results) {
+      console.log(`      📨 ${c.title} | ${c.date} | ${c.buyerName} (${c.lastFour}) | ${c.seatType} ${c.qty}매`);
     }
 
+    allOrders.push(...cards.results);
+
     // 다음 페이지
+    if (cards.results.length === 0 && pageNum > 1) break;
+    
     pageNum++;
     try {
-      const hasNext = await ppurioPage.evaluate((num) => {
-        const links = document.querySelectorAll('.pagination a, .paging a, .page_num a, [class*="page"] a');
+      const hasNext = await ppurioPage.evaluate((nextNum) => {
+        // 페이지 번호 버튼 클릭
+        const links = document.querySelectorAll('.pagination a, .paging a, [class*="page"] a, [class*="paging"] a');
         for (const a of links) {
-          if (a.innerText?.trim() === String(num)) {
+          if (a.innerText?.trim() === String(nextNum)) {
             a.click();
             return true;
           }
         }
-        const next = document.querySelector('.pagination .next, .paging .next, [class*="next"]');
-        if (next) { next.click(); return true; }
+        // next/다음 버튼
+        const nextBtn = document.querySelector('[class*="next"], .btn_next, a:has-text("다음"), a:has-text(">")');
+        if (nextBtn) { nextBtn.click(); return true; }
         return false;
       }, pageNum);
 
@@ -916,24 +810,64 @@ async function getFinalSummaryDetail(perfIndex) {
     }
   }
 
-  if (orderDetails.length === 0) {
-    return `📋 "${selectedPerf}" 발송 내역을 찾지 못했습니다.`;
+  console.log(`   📦 총 ${allOrders.length}개 발송 내역 수집`);
+  return allOrders;
+}
+
+// 1단계: 공연 목록 보여주기
+async function getFinalSummaryList() {
+  const allOrders = await scrapePpurioResults();
+
+  // 공연(제목+날짜)별로 그룹핑
+  finalSummaryData = {};
+  for (const order of allOrders) {
+    // 공연 구분 키: 제목 + 날짜
+    const key = order.date ? `${order.title} | ${order.date}` : order.title;
+    if (!finalSummaryData[key]) {
+      finalSummaryData[key] = { 
+        title: order.title, 
+        date: order.date, 
+        venue: order.venue,
+        orders: [] 
+      };
+    }
+    finalSummaryData[key].orders.push(order);
   }
 
-  // 메시지 생성
+  // 키 목록 저장
+  finalSummaryKeys = Object.keys(finalSummaryData);
+
+  return finalSummaryKeys;
+}
+
+// 2단계: 선택한 공연 상세
+async function getFinalSummaryDetail(perfIndex) {
+  if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
+    return '❌ 잘못된 번호입니다. 1~' + finalSummaryKeys.length + ' 사이로 입력해주세요.';
+  }
+
+  const key = finalSummaryKeys[perfIndex];
+  const perf = finalSummaryData[key];
+
+  if (!perf || perf.orders.length === 0) {
+    return '📋 해당 공연의 발송 내역이 없습니다.';
+  }
+
   let msg = `📋 <b>최종결산</b>\n\n`;
-  msg += `🎫 <b>${selectedPerf}</b>\n`;
+  msg += `🎫 <b>${perf.title}</b>\n`;
+  if (perf.date) msg += `📅 ${perf.date}\n`;
+  if (perf.venue) msg += `📍 ${perf.venue}\n`;
   msg += `──────────────\n`;
 
   let totalQty = 0;
-  orderDetails.forEach((o, idx) => {
+  perf.orders.forEach((o, idx) => {
     const seatInfo = o.seatType ? `${o.seatType} ` : '';
-    msg += `${idx + 1}. ${o.buyerName || '(이름없음)'} (${o.lastFour}) - ${seatInfo}${o.qty}매\n`;
+    msg += `${idx + 1}. ${o.buyerName || '(이름없음)'} (${o.lastFour || '----'}) - ${seatInfo}${o.qty}매\n`;
     totalQty += o.qty;
   });
 
   msg += `\n━━━━━━━━━━━━━━\n`;
-  msg += `<b>총 합계: ${orderDetails.length}건 ${totalQty}매</b>`;
+  msg += `<b>총 합계: ${perf.orders.length}건 ${totalQty}매</b>`;
 
   return msg;
 }
@@ -1562,11 +1496,10 @@ async function handleMessage(msg) {
   // 최종결산 2단계: 숫자 선택 (공연 선택)
   if (text.startsWith('결산') && text.match(/결산\s*(\d+)/)) {
     const num = parseInt(text.match(/결산\s*(\d+)/)[1]);
-    if (finalSummaryPerfs.length === 0) {
+    if (finalSummaryKeys.length === 0) {
       await sendMessage('⚠️ 먼저 "최종결산"을 입력해서 공연 목록을 불러오세요.');
       return;
     }
-    await sendMessage(`📋 ${num}번 공연 상세 조회 중... 미리보기 확인하느라 시간이 걸려요.`);
     try {
       const report = await getFinalSummaryDetail(num - 1);
       await sendMessage(report);
@@ -1578,17 +1511,22 @@ async function handleMessage(msg) {
 
   // 최종결산 1단계: 공연 목록
   if (text === '최종결산') {
-    await sendMessage('📋 뿌리오 발송결과에서 공연 목록 조회 중...');
+    await sendMessage('📋 뿌리오 발송결과에서 공연 목록 조회 중...\n(모든 페이지 확인하느라 잠시 걸릴 수 있어요)');
     try {
-      const perfList = await getFinalSummaryList();
-      if (perfList.length === 0) {
+      const perfKeys = await getFinalSummaryList();
+      if (perfKeys.length === 0) {
         await sendMessage('📋 발송 내역이 없습니다.');
       } else {
         let msg = `📋 <b>최종결산 - 공연 목록</b>\n\n`;
-        perfList.forEach((perf, idx) => {
-          msg += `${idx + 1}. ${perf}\n`;
+        perfKeys.forEach((key, idx) => {
+          const perf = finalSummaryData[key];
+          const orderCount = perf.orders.length;
+          const totalQty = perf.orders.reduce((sum, o) => sum + o.qty, 0);
+          msg += `${idx + 1}. ${perf.title}`;
+          if (perf.date) msg += `\n   📅 ${perf.date}`;
+          msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `\n결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
