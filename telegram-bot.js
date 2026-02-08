@@ -905,7 +905,7 @@ async function searchNolticketPerformances() {
 
     // 인터파크 티켓 검색
     await page.goto('https://tickets.interpark.com/search?keyword=멜론', {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle',
     });
     await page.waitForTimeout(5000);
 
@@ -913,31 +913,63 @@ async function searchNolticketPerformances() {
     const performances = await page.evaluate(() => {
       const results = [];
       
-      // 검색 결과 항목들 찾기
-      const items = document.querySelectorAll('a[href*="/goods/"], a[href*="/play/"], .search-result-item a, [class*="item"] a, [class*="product"] a, li a');
-      
-      for (const item of items) {
-        const href = item.href || '';
-        const text = item.innerText?.trim() || '';
+      // 방법 1: 모든 a 태그에서 공연 링크 찾기
+      const allLinks = document.querySelectorAll('a');
+      for (const a of allLinks) {
+        const href = a.href || '';
+        const text = a.innerText?.trim() || '';
         
-        // 멜론 관련 공연만 필터
-        if (!text || !href) continue;
-        if (!text.includes('멜론') && !text.toLowerCase().includes('melon')) continue;
-        // 공연 상세 페이지 링크만
-        if (!href.includes('tickets.interpark.com')) continue;
+        // 공연 상세 페이지 링크 패턴
+        if (!href.includes('/goods/') && !href.includes('/play/')) continue;
+        if (!text) continue;
         
-        // 중복 제거를 위해 href 기준
-        const title = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-        if (title.length > 5) {
+        // MelON/멜론 관련만
+        const fullText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+        if (fullText.includes('MelON') || fullText.includes('멜론') || fullText.toLowerCase().includes('melon')) {
           results.push({
-            title: title.substring(0, 100),
+            title: fullText.substring(0, 150),
             url: href,
           });
         }
       }
       
+      // 방법 2: 방법 1 실패 시, 전체 텍스트에서 파싱
+      if (results.length === 0) {
+        const bodyText = document.body.innerText;
+        // "MelON" 포함된 줄 추출
+        const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes('MelON') || lines[i].includes('멜론')) {
+            // 주변 줄에서 날짜, 장소 정보 찾기
+            let date = '';
+            let venue = '';
+            let title = lines[i];
+            
+            // 위쪽 2줄에서 날짜/장소 찾기
+            for (let j = Math.max(0, i - 3); j < i; j++) {
+              if (lines[j].match(/^\d{4}\.\d{1,2}\.\d{1,2}/)) date = lines[j];
+              if (lines[j].includes('홀') || lines[j].includes('극장') || lines[j].includes('아트') || lines[j].includes('예술')) venue = lines[j];
+            }
+            
+            results.push({
+              title: title,
+              date: date,
+              venue: venue,
+              url: '',
+            });
+          }
+        }
+      }
+      
       return results;
     });
+
+    // 방법 2에서 URL이 없으면 검색 URL로 대체
+    for (const p of performances) {
+      if (!p.url) {
+        p.url = 'https://tickets.interpark.com/search?keyword=멜론';
+      }
+    }
 
     // URL 기준 중복 제거
     const seen = new Set();
@@ -956,9 +988,12 @@ async function searchNolticketPerformances() {
       return '🔍 멜론 관련 공연을 찾지 못했습니다.\n\n직접 확인: https://tickets.interpark.com/search?keyword=멜론';
     }
 
-    let msg = `🎫 <b>멜론 오케스트라 관련 공연</b>\n\n`;
+    let msg = `🎫 <b>멜론 오케스트라 관련 공연 (${unique.length}개)</b>\n\n`;
     unique.forEach((p, idx) => {
-      msg += `${idx + 1}. ${p.title}\n🔗 ${p.url}\n\n`;
+      msg += `${idx + 1}. <b>${p.title}</b>\n`;
+      if (p.date) msg += `   📅 ${p.date}\n`;
+      if (p.venue) msg += `   📍 ${p.venue}\n`;
+      msg += `   🔗 ${p.url}\n\n`;
     });
 
     return msg;
