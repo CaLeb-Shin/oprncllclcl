@@ -906,23 +906,31 @@ async function searchNolticketPerformances() {
     await page.goto(searchUrl, { waitUntil: 'networkidle' });
     await page.waitForTimeout(5000);
 
-    // 1단계: 검색 결과에서 MelON 관련 공연 제목/장소/날짜 + 개수 파악
-    const items = await page.evaluate(() => {
+    // <a> 태그의 data-prd-no 속성에서 상품 ID 직접 추출
+    // (href 속성 없음, headless에서 클릭 불가 → data 속성 활용)
+    // URL 패턴: https://tickets.interpark.com/goods/{data-prd-no}
+    const performances = await page.evaluate(() => {
       const results = [];
       const seen = new Set();
-      const allLinks = document.querySelectorAll('a');
+      const allLinks = document.querySelectorAll('a[data-prd-no]');
       
       for (const a of allLinks) {
+        const prdNo = a.dataset.prdNo;
+        const prdName = a.dataset.prdName || '';
         const text = a.innerText?.trim() || '';
-        if (!text) continue;
-        if (!text.includes('MelON') && !text.includes('멜론')) continue;
         
-        // 줄 단위로 분리해서 제목/장소/날짜 추출
+        if (!prdNo) continue;
+        if (!text.includes('MelON') && !text.includes('멜론') && 
+            !prdName.includes('MelON') && !prdName.includes('멜론')) continue;
+        if (seen.has(prdNo)) continue;
+        seen.add(prdNo);
+        
+        // 줄 단위로 제목/장소/날짜 분리
         const lines = text.split('\n').map(l => l.trim()).filter(l => l);
-        let title = '', venue = '', date = '';
+        let title = prdName || '', venue = '', date = '';
         
         for (const line of lines) {
-          if ((line.includes('MelON') || line.includes('멜론')) && !title) {
+          if (!title && (line.includes('MelON') || line.includes('멜론'))) {
             title = line;
           } else if (line.match(/^\d{4}\.\d{1,2}\.\d{1,2}/)) {
             date = line;
@@ -932,87 +940,25 @@ async function searchNolticketPerformances() {
           }
         }
         
-        if (!title) title = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-        if (seen.has(title)) continue;
-        seen.add(title);
-        
-        results.push({ title, venue, date });
+        results.push({
+          title: title || prdName,
+          venue,
+          date,
+          url: `https://tickets.interpark.com/goods/${prdNo}`,
+        });
       }
       
       return results;
     });
 
-    console.log(`   검색 결과: ${items.length}개 MelON 공연 발견`);
-
-    if (items.length === 0) {
-      await searchBrowser.close();
-      searchBrowser = null;
-      return `🔍 멜론 관련 공연을 찾지 못했습니다.\n\n직접 확인: ${searchUrl}`;
-    }
-
-    // 2단계: 각 공연을 Playwright 네이티브 클릭 → 이동된 URL 캡처
-    //   page.evaluate의 element.click()은 untrusted event라 React SPA가 무시함
-    //   반드시 Playwright ElementHandle.click() 사용 (실제 마우스 클릭 시뮬레이션)
-    const performances = [];
-
-    for (let i = 0; i < items.length; i++) {
-      try {
-        // 검색 페이지로 이동 (첫 번째는 이미 있음)
-        if (i > 0) {
-          await page.goto(searchUrl, { waitUntil: 'networkidle' });
-          await page.waitForTimeout(3000);
-        }
-
-        console.log(`   [${i + 1}/${items.length}] "${items[i].title.substring(0, 35)}..." 클릭 중...`);
-
-        // Playwright $$로 모든 <a> 가져온 뒤, MelON 포함하는 i번째 찾기
-        const allLinks = await page.$$('a');
-        let melonIdx = 0;
-        let targetLink = null;
-
-        for (const link of allLinks) {
-          const text = await link.innerText().catch(() => '');
-          if (text.includes('MelON') || text.includes('멜론')) {
-            if (melonIdx === i) {
-              targetLink = link;
-              break;
-            }
-            melonIdx++;
-          }
-        }
-
-        if (targetLink) {
-          // Playwright 네이티브 클릭 (trusted mouse event)
-          await targetLink.click();
-          
-          // 상세 페이지로 이동 대기
-          try {
-            await page.waitForURL(/\/goods\/|\/play\//, { timeout: 10000 });
-          } catch {
-            // timeout이어도 URL 확인
-          }
-          await page.waitForTimeout(1500);
-          
-          const detailUrl = page.url();
-          if (detailUrl.includes('/goods/') || detailUrl.includes('/play/')) {
-            console.log(`   ✅ → ${detailUrl}`);
-            performances.push({ ...items[i], url: detailUrl });
-          } else {
-            console.log(`   ⚠️ URL 변경 안됨: ${detailUrl}`);
-            performances.push({ ...items[i], url: searchUrl });
-          }
-        } else {
-          console.log(`   ⚠️ 클릭 대상 못 찾음`);
-          performances.push({ ...items[i], url: searchUrl });
-        }
-      } catch (err) {
-        console.log(`   ⚠️ [${i + 1}] 오류: ${err.message}`);
-        performances.push({ ...items[i], url: searchUrl });
-      }
-    }
-
     await searchBrowser.close();
     searchBrowser = null;
+
+    console.log(`   검색 결과: ${performances.length}개 MelON 공연 발견`);
+
+    if (performances.length === 0) {
+      return `🔍 멜론 관련 공연을 찾지 못했습니다.\n\n직접 확인: ${searchUrl}`;
+    }
 
     let msg = `🎫 <b>멜론 오케스트라 관련 공연 (${performances.length}개)</b>\n\n`;
     performances.forEach((p, idx) => {
