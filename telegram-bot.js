@@ -531,19 +531,21 @@ async function getNewOrders() {
           // 구매자: 셀[9]
           const buyerName = cells[9] || '';
           
-          // 수취인 찾기: 구매자(셀[9]) 이후에 나오는 한글 이름 (2~5글자)
-          // 구매자와 다른 이름만 수취인으로 인식
+          // 수취인 찾기: 구매자(셀[9]) 근처에서 한글 이름 (2~4글자)
+          // 스마트스토어 상태값/라벨 제외
           let recipientName = '';
-          // 한글 이름 패턴으로 전체 셀에서 검색 (구매자 다음부터)
-          const koreanNamePattern = /^[가-힣]{2,5}$/;
-          for (let j = 10; j < cells.length; j++) {
+          const koreanNamePattern = /^[가-힣]{2,4}$/;
+          const excludeWords = [
+            '발송대기', '발송완료', '발주확인', '결제완료', '배송중', '배송완료',
+            '구매확인', '수취확인', '교환반품', '취소완료', '반품완료', '환불완료',
+            '신규주문', '처리완료', '택배발송', '직접전달', '방문수령', '일반택배',
+            '선결제', '후결제', '무료배송', '유료배송', '착불배송',
+          ];
+          for (let j = 10; j <= 25; j++) {
             const cell = cells[j];
-            if (cell && cell !== buyerName && koreanNamePattern.test(cell)) {
-              // 연락처/상품명/숫자 등이 아닌 순수 이름인지 확인
-              if (!cell.match(/[0-9]/) && !cell.includes('석') && !cell.includes('택배') && !cell.includes('배송')) {
-                recipientName = cell;
-                break;
-              }
+            if (cell && cell !== buyerName && koreanNamePattern.test(cell) && !excludeWords.includes(cell)) {
+              recipientName = cell;
+              break;
             }
           }
           
