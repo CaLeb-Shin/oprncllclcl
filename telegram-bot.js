@@ -933,50 +933,52 @@ async function searchNolticketPerformances() {
         }
       }
       
-      // 방법 2: 방법 1 실패 시, 전체 텍스트에서 파싱
-      if (results.length === 0) {
-        const bodyText = document.body.innerText;
-        // "MelON" 포함된 줄 추출
-        const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes('MelON') || lines[i].includes('멜론')) {
-            // 주변 줄에서 날짜, 장소 정보 찾기
-            let date = '';
-            let venue = '';
-            let title = lines[i];
-            
-            // 위쪽 2줄에서 날짜/장소 찾기
-            for (let j = Math.max(0, i - 3); j < i; j++) {
-              if (lines[j].match(/^\d{4}\.\d{1,2}\.\d{1,2}/)) date = lines[j];
-              if (lines[j].includes('홀') || lines[j].includes('극장') || lines[j].includes('아트') || lines[j].includes('예술')) venue = lines[j];
-            }
-            
-            results.push({
-              title: title,
-              date: date,
-              venue: venue,
-              url: '',
-            });
+      // 방법 2: 전체 텍스트에서 파싱 (방법 1 결과와 합침)
+      const bodyText = document.body.innerText;
+      const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+      const existingTitles = new Set(results.map(r => r.title));
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if ((line.includes('MelON') || line.includes('멜론')) && 
+            (line.includes('콘서트') || line.includes('오케스트라') || line.includes('갈라'))) {
+          // 이미 방법1에서 잡은 건 스킵
+          if (existingTitles.has(line)) continue;
+          
+          // 위쪽 줄에서 날짜, 장소 찾기
+          let date = '';
+          let venue = '';
+          for (let j = Math.max(0, i - 3); j < i; j++) {
+            if (lines[j].match(/^\d{4}\.\d{1,2}\.\d{1,2}/)) date = lines[j];
+            if (lines[j].includes('홀') || lines[j].includes('극장') || lines[j].includes('아트') || lines[j].includes('예술') || lines[j].includes('회관')) venue = lines[j];
           }
+          
+          results.push({
+            title: line,
+            date: date,
+            venue: venue,
+            url: '',
+          });
+          existingTitles.add(line);
         }
       }
       
       return results;
     });
 
-    // 방법 2에서 URL이 없으면 검색 URL로 대체
+    // URL 없는 항목은 검색 URL로 대체
     for (const p of performances) {
       if (!p.url) {
         p.url = 'https://tickets.interpark.com/search?keyword=멜론';
       }
     }
 
-    // URL 기준 중복 제거
+    // 제목 기준 중복 제거
     const seen = new Set();
     const unique = [];
     for (const p of performances) {
-      if (!seen.has(p.url)) {
-        seen.add(p.url);
+      if (!seen.has(p.title)) {
+        seen.add(p.title);
         unique.push(p);
       }
     }
@@ -1736,6 +1738,29 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 도움말
+  if (['도움말', '명령어', '도움', 'help'].includes(text)) {
+    await sendMessage(
+      `📖 <b>사용 가능한 명령어</b>\n\n` +
+      `<b>📦 주문관리</b>\n` +
+      `• 체크 - 새 주문 확인\n` +
+      `• 발송완료 - 발송처리 완료\n\n` +
+      `<b>📊 매출</b>\n` +
+      `• 결산 - 놀티켓 + 네이버\n` +
+      `• 스토어 - 네이버 판매현황\n` +
+      `• 조회 - 놀티켓 판매현황\n\n` +
+      `<b>📋 결산</b>\n` +
+      `• 최종결산 - 공연별 발송 명단\n\n` +
+      `<b>🔍 검색</b>\n` +
+      `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
+      `<b>⚙️ 관리</b>\n` +
+      `• 봇재시작 - 브라우저 재초기화\n` +
+      `• 뿌리오로그인 - 뿌리오 재로그인\n` +
+      `• 도움말 - 이 안내 다시 보기`
+    );
+    return;
+  }
+
   // 봇 재시작 (브라우저 재초기화)
   if (['봇재시작', '재시작', 'restart'].includes(text)) {
     await sendMessage('🔄 브라우저 재초기화 중...');
@@ -1819,7 +1844,24 @@ async function startPolling() {
 
   console.log('📤 시작 알림 전송...');
   try {
-    await sendMessage('🤖 <b>통합 봇 시작!</b>\n\n📊 sales, 조회 - 인터파크\n📦 체크, 확인 - 스마트스토어');
+    await sendMessage(
+      `🤖 <b>통합 봇 시작!</b>\n\n` +
+      `<b>📦 주문관리</b>\n` +
+      `• 체크 - 새 주문 확인\n` +
+      `• 발송완료 - 발송처리 완료\n\n` +
+      `<b>📊 매출</b>\n` +
+      `• 결산 - 놀티켓 + 네이버\n` +
+      `• 스토어 - 네이버 판매현황\n` +
+      `• 조회 - 놀티켓 판매현황\n\n` +
+      `<b>📋 결산</b>\n` +
+      `• 최종결산 - 공연별 발송 명단\n\n` +
+      `<b>🔍 검색</b>\n` +
+      `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
+      `<b>⚙️ 관리</b>\n` +
+      `• 봇재시작 - 브라우저 재초기화\n` +
+      `• 뿌리오로그인 - 뿌리오 재로그인\n` +
+      `• 도움말 - 전체 명령어`
+    );
     console.log('✅ 시작 알림 전송 완료');
   } catch (e) {
     console.log('⚠️ 시작 알림 전송 실패:', e.message);
