@@ -909,7 +909,7 @@ async function getStoreSalesSummary() {
 // 텔레그램 승인 요청
 // ============================================================
 async function requestApproval(order) {
-  const qtyStr = order.qty && order.qty > 1 ? ` (${order.qty}매)` : '';
+  const qtyStr = ` (${order.qty || 1}매)`;
   const msg =
     `📦 <b>새 주문!</b>\n\n` +
     `🎫 공연: ${order.productName}${qtyStr}\n` +
@@ -1283,7 +1283,7 @@ async function handleMessage(msg) {
         for (const pd of pendingDelivery) {
           const seatMatch = pd.productName?.match(/,\s*(\S+석)\s*$/);
           const seat = seatMatch ? seatMatch[1] : '';
-          const qtyStr = pd.qty > 1 ? ` ${pd.qty}매` : '';
+          const qtyStr = ` ${pd.qty || 1}매`;
           msg += `\n• ${pd.buyerName} - ${seat}${qtyStr}`;
         }
         msg += '\n\n✅ 발송처리 완료 후 <b>발송완료</b> 입력';
