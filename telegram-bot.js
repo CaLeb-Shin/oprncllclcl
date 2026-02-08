@@ -890,6 +890,86 @@ async function getFinalSummaryDetail(perfIndex) {
 }
 
 // ============================================================
+// 놀티켓(인터파크) 멜론 오케스트라 공연 검색
+// ============================================================
+async function searchNolticketPerformances() {
+  console.log('🔍 놀티켓 공연 검색 중...');
+  
+  // 별도 브라우저 컨텍스트로 검색 (로그인 불필요)
+  let searchBrowser = null;
+  try {
+    searchBrowser = await chromium.launch({ headless: true });
+    const ctx = await searchBrowser.newContext();
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(30000);
+
+    // 인터파크 티켓 검색
+    await page.goto('https://tickets.interpark.com/search?keyword=멜론', {
+      waitUntil: 'domcontentloaded',
+    });
+    await page.waitForTimeout(5000);
+
+    // 검색 결과에서 공연 목록 추출
+    const performances = await page.evaluate(() => {
+      const results = [];
+      
+      // 검색 결과 항목들 찾기
+      const items = document.querySelectorAll('a[href*="/goods/"], a[href*="/play/"], .search-result-item a, [class*="item"] a, [class*="product"] a, li a');
+      
+      for (const item of items) {
+        const href = item.href || '';
+        const text = item.innerText?.trim() || '';
+        
+        // 멜론 관련 공연만 필터
+        if (!text || !href) continue;
+        if (!text.includes('멜론') && !text.toLowerCase().includes('melon')) continue;
+        // 공연 상세 페이지 링크만
+        if (!href.includes('tickets.interpark.com')) continue;
+        
+        // 중복 제거를 위해 href 기준
+        const title = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+        if (title.length > 5) {
+          results.push({
+            title: title.substring(0, 100),
+            url: href,
+          });
+        }
+      }
+      
+      return results;
+    });
+
+    // URL 기준 중복 제거
+    const seen = new Set();
+    const unique = [];
+    for (const p of performances) {
+      if (!seen.has(p.url)) {
+        seen.add(p.url);
+        unique.push(p);
+      }
+    }
+
+    await searchBrowser.close();
+    searchBrowser = null;
+
+    if (unique.length === 0) {
+      return '🔍 멜론 관련 공연을 찾지 못했습니다.\n\n직접 확인: https://tickets.interpark.com/search?keyword=멜론';
+    }
+
+    let msg = `🎫 <b>멜론 오케스트라 관련 공연</b>\n\n`;
+    unique.forEach((p, idx) => {
+      msg += `${idx + 1}. ${p.title}\n🔗 ${p.url}\n\n`;
+    });
+
+    return msg;
+
+  } catch (e) {
+    if (searchBrowser) await searchBrowser.close().catch(() => {});
+    throw e;
+  }
+}
+
+// ============================================================
 // 전체 주문 확인 플로우
 // ============================================================
 async function checkForNewOrders() {
@@ -1650,6 +1730,18 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 연관공연: 놀티켓에서 멜론 오케스트라 공연 검색
+  if (['연관공연', '공연링크', '공연검색'].includes(text)) {
+    await sendMessage('🔍 놀티켓에서 멜론 오케스트라 공연 검색 중...');
+    try {
+      const report = await searchNolticketPerformances();
+      await sendMessage(report);
+    } catch (err) {
+      await sendMessage(`❌ 공연 검색 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 도움말
   if (['help', '/help', '도움말'].includes(text)) {
     await sendMessage(
@@ -1662,6 +1754,7 @@ async function handleMessage(msg) {
       `<b>📦 스마트스토어</b>\n` +
       `• 체크, 확인 - 새 주문 확인\n` +
       `• 스토어, 네이버 - 판매현황 (오늘/어제)\n\n` +
+      `• <b>연관공연</b> - 놀티켓 멜론 공연 링크 검색\n\n` +
       `• help, 도움말 - 이 안내`
     );
   }
