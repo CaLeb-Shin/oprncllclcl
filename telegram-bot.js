@@ -403,7 +403,7 @@ async function ensureBrowser() {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
-      await smartstorePage.waitForTimeout(3000);
+      await smartstorePage.waitForTimeout(4000);
 
       ssLoggedIn = await smartstorePage.evaluate(() =>
         document.body.textContent.includes('판매관리') ||
@@ -414,7 +414,7 @@ async function ensureBrowser() {
       if (ssLoggedIn) break;
 
       // 로그인 안됐으면 좀 더 기다려보기
-      await smartstorePage.waitForTimeout(3000);
+      await smartstorePage.waitForTimeout(5000);
       ssLoggedIn = await smartstorePage.evaluate(() =>
         document.body.textContent.includes('판매관리') ||
         document.body.textContent.includes('정산관리') ||
@@ -424,15 +424,53 @@ async function ensureBrowser() {
       if (ssLoggedIn) break;
 
       console.log(`   ⚠️ 스마트스토어 로그인 확인 실패 (${attempt}/3)`);
+      
+      // 2번째 시도부터는 브라우저/컨텍스트 재생성
+      if (attempt < 3) {
+        console.log(`   🔄 컨텍스트 재생성 중... (${attempt + 1}/3)`);
+        await smartstorePage.close().catch(() => {});
+        await smartstoreCtx.close().catch(() => {});
+        smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
+        smartstorePage = await smartstoreCtx.newPage();
+        smartstorePage.setDefaultTimeout(60_000);
+        await smartstorePage.waitForTimeout(2000);
+      }
     } catch (e) {
       console.log(`   ⚠️ 스마트스토어 접속 오류 (${attempt}/3):`, e.message.substring(0, 50));
-      if (attempt < 3) await smartstorePage.waitForTimeout(5000);
+      if (attempt < 3) {
+        try {
+          await smartstorePage.close().catch(() => {});
+          await smartstoreCtx.close().catch(() => {});
+          smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
+          smartstorePage = await smartstoreCtx.newPage();
+          smartstorePage.setDefaultTimeout(60_000);
+        } catch {}
+        await smartstorePage.waitForTimeout(3000);
+      }
     }
   }
 
   if (!ssLoggedIn) {
-    await closeBrowser();
-    throw new Error('스마트스토어 세션 만료. smartlogin으로 재로그인하세요.');
+    // 마지막 시도: 주문 페이지 직접 접속해서 확인
+    console.log('   🔄 마지막 시도: 주문 페이지 직접 접속...');
+    try {
+      await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 30000 });
+      await smartstorePage.waitForTimeout(5000);
+      const orderPageOk = await smartstorePage.evaluate(() => 
+        document.body.textContent.includes('주문') || 
+        document.body.textContent.includes('배송') ||
+        document.body.textContent.includes('발주')
+      ).catch(() => false);
+      if (orderPageOk) {
+        ssLoggedIn = true;
+        console.log('   ✅ 주문 페이지 직접 접속 성공');
+      }
+    } catch {}
+    
+    if (!ssLoggedIn) {
+      await closeBrowser();
+      throw new Error('스마트스토어 세션 만료. 봇재시작 후 다시 시도해주세요.');
+    }
   }
   // 세션 갱신 저장
   await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
@@ -1698,7 +1736,20 @@ async function handleMessage(msg) {
       const storeReport = await getStoreSalesSummary();
       await sendMessage(storeReport);
     } catch (err) {
-      await sendMessage(`❌ 결산 조회 오류: ${err.message}`);
+      // 세션 만료면 재초기화 후 재시도
+      if (err.message.includes('세션 만료') || err.message.includes('Target closed') || err.message.includes('closed')) {
+        await sendMessage('🔄 세션 복구 중... 잠시만 기다려주세요.');
+        try {
+          await closeBrowser();
+          await ensureBrowser();
+          const storeReport = await getStoreSalesSummary();
+          await sendMessage(storeReport);
+        } catch (retryErr) {
+          await sendMessage(`❌ 결산 조회 오류: ${retryErr.message}\n\n<b>봇재시작</b> 후 다시 시도해주세요.`);
+        }
+      } else {
+        await sendMessage(`❌ 결산 조회 오류: ${err.message}`);
+      }
     }
     return;
   }
