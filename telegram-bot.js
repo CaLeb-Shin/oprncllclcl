@@ -432,7 +432,10 @@ async function ensureBrowser() {
   }
 
   console.log('🌐 브라우저 초기화...');
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ 
+    headless: true,
+    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--window-position=-9999,-9999'],
+  });
 
   // 스마트스토어
   if (!fs.existsSync(CONFIG.smartstoreStateFile)) {
@@ -1096,7 +1099,10 @@ async function searchNolticketPerformances() {
   
   let searchBrowser = null;
   try {
-    searchBrowser = await chromium.launch({ headless: true });
+    searchBrowser = await chromium.launch({ 
+      headless: true,
+      args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--window-position=-9999,-9999'],
+    });
     const ctx = await searchBrowser.newContext();
     const page = await ctx.newPage();
     page.setDefaultTimeout(30000);
@@ -1201,6 +1207,18 @@ async function checkForNewOrders() {
     }
 
     await checkCancelledOrders();
+
+    // 주문 확인 성공 → 세션 갱신 저장 (세션 만료 방지)
+    try {
+      if (smartstoreCtx) {
+        await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+      }
+      if (ppurioCtx) {
+        await ppurioCtx.storageState({ path: CONFIG.ppurioStateFile });
+      }
+    } catch (saveErr) {
+      console.log('   ⚠️ 세션 저장 실패 (무시):', saveErr.message);
+    }
 
     // 오래된 항목 정리
     pruneProcessed(CONFIG.processedOrdersFile);
@@ -2194,27 +2212,27 @@ function startAutoSmartstore() {
 }
 
 function startSmartstoreKeepAlive() {
-  // 15분마다 스마트스토어 세션 갱신 (세션 만료 방지)
+  // 10분마다 스마트스토어 세션 갱신 (세션 만료 방지 강화)
   setInterval(async () => {
     try {
       await smartstoreKeepAlive();
     } catch (err) {
       console.error('스마트스토어 keep-alive 오류:', err.message);
     }
-  }, 15 * 60 * 1000); // 15분
-  console.log('⏰ 스마트스토어 세션 15분 keep-alive 설정');
+  }, 10 * 60 * 1000); // 10분
+  console.log('⏰ 스마트스토어 세션 10분 keep-alive 설정');
 }
 
 function startPpurioKeepAlive() {
-  // 20분마다 뿌리오 세션 갱신 (세션 만료 방지)
+  // 10분마다 뿌리오 세션 갱신 (세션 만료 방지 강화)
   setInterval(async () => {
     try {
       await ppurioKeepAlive();
     } catch (err) {
       console.error('뿌리오 keep-alive 오류:', err.message);
     }
-  }, 20 * 60 * 1000); // 20분
-  console.log('⏰ 뿌리오 세션 20분 keep-alive 설정');
+  }, 10 * 60 * 1000); // 10분
+  console.log('⏰ 뿌리오 세션 10분 keep-alive 설정');
 }
 
 // ============================================================

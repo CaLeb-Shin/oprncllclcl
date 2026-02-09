@@ -70,6 +70,7 @@ async function sendTelegram(message) {
 async function scrapeSales() {
   const browser = await chromium.launch({ 
     headless: true,
+    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--window-position=-9999,-9999'],
   });
   
   const context = await browser.newContext();
