@@ -22,6 +22,8 @@ bot.log
 pending-orders.json
 pending-delivery.json
 processed-orders.json
+cancelled-orders.json
+processed-cancels.json
 
 # macOS
 .DS_Store

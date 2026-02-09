@@ -24,6 +24,7 @@ const CONFIG = {
   processedCancelsFile: path.join(__dirname, 'processed-cancels.json'),
   pendingOrdersFile: path.join(__dirname, 'pending-orders.json'),
   pendingDeliveryFile: path.join(__dirname, 'pending-delivery.json'),
+  cancelledOrdersFile: path.join(__dirname, 'cancelled-orders.json'),
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
@@ -619,10 +620,10 @@ async function getNewOrders() {
 }
 
 // ============================================================
-// 스마트스토어: 취소 주문 확인
+// 스마트스토어: 취소/반품 주문 확인
 // ============================================================
 async function checkCancelledOrders() {
-  console.log('   🔍 취소 주문 확인...');
+  console.log('   🔍 취소/반품 주문 확인...');
   try {
     await smartstorePage.goto(CONFIG.smartstore.cancelUrl);
     await smartstorePage.waitForTimeout(4000);
@@ -636,41 +637,97 @@ async function checkCancelledOrders() {
       f.url().includes('/sale/cancel') && !f.url().includes('#')
     );
 
-    const cancels = frame
-      ? await frame.evaluate(() => {
-          const items = [];
-          document.querySelectorAll('table tbody tr').forEach((row) => {
-            const text = row.innerText || '';
-            const m = text.match(/(\d{16,})/);
-            if (m) items.push({ orderId: m[1], info: text.substring(0, 100) });
-          });
-          return items;
-        })
-      : await smartstorePage.evaluate(() => {
-          const items = [];
-          document.querySelectorAll('table tbody tr, .order-item').forEach((row) => {
-            const text = row.innerText || '';
-            const m = text.match(/(\d{16,})/);
-            if (m) items.push({ orderId: m[1], info: text.substring(0, 100) });
-          });
-          return items;
+    const targetFrame = frame || smartstorePage;
+    
+    // 취소/반품 요청 건 추출 (주문번호, 구매자, 상품명, 연락처)
+    const cancels = await targetFrame.evaluate(() => {
+      const items = [];
+      const rows = document.querySelectorAll('table tbody tr');
+      const headerOrderIds = [];
+      const dataRows = [];
+
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+        if (cells.length === 0) continue;
+
+        // 주문번호 헤더행 (셀 3~10개, 16자리 숫자)
+        if (cells.length >= 3 && cells.length <= 10) {
+          const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
+          if (idCell) headerOrderIds.push(idCell);
+          continue;
+        }
+
+        // 데이터행 (셀 20개 이상)
+        if (cells.length >= 20) {
+          dataRows.push(cells);
+        }
+      }
+
+      // 매칭
+      for (let i = 0; i < dataRows.length; i++) {
+        const cells = dataRows[i];
+        const orderId = headerOrderIds[i] || '';
+        if (!orderId) continue;
+
+        // 상품명
+        const productName = cells.find((c) => c && c.match(/^\[.+\]/)) || '';
+        // 구매자
+        const buyerName = cells[9] || cells.find((c) => c && /^[가-힣]{2,4}$/.test(c)) || '';
+        // 연락처
+        const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
+        // 취소/반품 사유
+        const reason = cells.find((c) => c && (c.includes('취소') || c.includes('반품') || c.includes('환불'))) || '';
+
+        items.push({ orderId, productName, buyerName, phone, reason });
+      }
+
+      // 데이터행 매칭 실패 시 기존 방식 fallback
+      if (items.length === 0) {
+        document.querySelectorAll('table tbody tr, .order-item').forEach((row) => {
+          const text = row.innerText || '';
+          const m = text.match(/(\d{16,})/);
+          if (m) items.push({ orderId: m[1], productName: '', buyerName: '', phone: '', reason: text.substring(0, 100) });
         });
+      }
+
+      return items;
+    });
 
     const processed = readJson(CONFIG.processedCancelsFile);
     const newCancels = cancels.filter((c) => !processed.includes(c.orderId));
 
     for (const cancel of newCancels) {
-      await sendMessage(
-        `⚠️ <b>취소 요청!</b>\n\n주문번호: ${cancel.orderId}\n\n스마트스토어에서 직접 확인해주세요.`
-      );
+      // 상세 알림
+      let msg = `⚠️ <b>취소/반품 요청!</b>\n\n`;
+      msg += `📦 주문번호: ${cancel.orderId}\n`;
+      if (cancel.buyerName) msg += `👤 구매자: ${cancel.buyerName}\n`;
+      if (cancel.productName) msg += `🎫 상품: ${cancel.productName}\n`;
+      if (cancel.phone) msg += `📱 연락처: ${cancel.phone}\n`;
+      if (cancel.reason) msg += `📝 사유: ${cancel.reason}\n`;
+      msg += `\n스마트스토어에서 승인/거절해주세요.\n`;
+      msg += `승인 후 <b>취소확인</b> 입력하면 결산에서 제외됩니다.`;
+      await sendMessage(msg);
+
+      // 취소 목록에 저장 (최종결산 대조용)
+      const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
+      cancelledOrders.push({
+        orderId: cancel.orderId,
+        buyerName: cancel.buyerName,
+        phone: cancel.phone,
+        productName: cancel.productName,
+        lastFour: cancel.phone ? cancel.phone.slice(-4) : '',
+        cancelledAt: new Date().toISOString(),
+      });
+      writeJson(CONFIG.cancelledOrdersFile, cancelledOrders);
+
       processed.push(cancel.orderId);
     }
     if (newCancels.length > 0) {
       writeJson(CONFIG.processedCancelsFile, processed);
-      console.log(`   ⚠️ 새 취소 요청: ${newCancels.length}개`);
+      console.log(`   ⚠️ 새 취소/반품 요청: ${newCancels.length}개`);
     }
   } catch (e) {
-    console.log('   취소 확인 오류:', e.message);
+    console.log('   취소/반품 확인 오류:', e.message);
   }
 }
 
@@ -880,7 +937,7 @@ async function getFinalSummaryList() {
   return finalSummaryKeys;
 }
 
-// 2단계: 선택한 공연 상세
+// 2단계: 선택한 공연 상세 (취소 목록 대조 후 제외)
 async function getFinalSummaryDetail(perfIndex) {
   if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
     return '❌ 잘못된 번호입니다. 1~' + finalSummaryKeys.length + ' 사이로 입력해주세요.';
@@ -893,6 +950,31 @@ async function getFinalSummaryDetail(perfIndex) {
     return '📋 해당 공연의 발송 내역이 없습니다.';
   }
 
+  // 취소 목록 로드 → 이름+연락처뒷자리로 매칭
+  const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
+  
+  // 취소된 주문 매칭: 이름 + 연락처 뒷 4자리가 같으면 취소 건
+  function isCancelled(order) {
+    return cancelledOrders.some((c) => {
+      const nameMatch = c.buyerName && order.buyerName && 
+        (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
+      const phoneMatch = c.lastFour && order.lastFour && c.lastFour === order.lastFour;
+      // 이름 + 뒷자리 둘 다 매칭되면 취소 건
+      return nameMatch && phoneMatch;
+    });
+  }
+
+  const activeOrders = [];
+  const cancelledList = [];
+  
+  for (const o of perf.orders) {
+    if (isCancelled(o)) {
+      cancelledList.push(o);
+    } else {
+      activeOrders.push(o);
+    }
+  }
+
   let msg = `📋 <b>최종결산</b>\n\n`;
   msg += `🎫 <b>${perf.title}</b>\n`;
   if (perf.date) msg += `📅 ${perf.date}\n`;
@@ -900,14 +982,26 @@ async function getFinalSummaryDetail(perfIndex) {
   msg += `──────────────\n`;
 
   let totalQty = 0;
-  perf.orders.forEach((o, idx) => {
+  activeOrders.forEach((o, idx) => {
     const seatInfo = o.seatType ? `${o.seatType} ` : '';
     msg += `${idx + 1}. ${o.buyerName || '(이름없음)'} (${o.lastFour || '----'}) - ${seatInfo}${o.qty}매\n`;
     totalQty += o.qty;
   });
 
   msg += `\n━━━━━━━━━━━━━━\n`;
-  msg += `<b>총 합계: ${perf.orders.length}건 ${totalQty}매</b>`;
+  msg += `<b>총 합계: ${activeOrders.length}건 ${totalQty}매</b>`;
+
+  // 취소 건이 있으면 별도 표시
+  if (cancelledList.length > 0) {
+    let cancelQty = 0;
+    msg += `\n\n🚫 <b>취소/반품 제외 (${cancelledList.length}건)</b>\n`;
+    for (const c of cancelledList) {
+      const seatInfo = c.seatType ? `${c.seatType} ` : '';
+      msg += `<s>${c.buyerName || '(이름없음)'} (${c.lastFour || '----'}) - ${seatInfo}${c.qty}매</s>\n`;
+      cancelQty += c.qty;
+    }
+    msg += `\n<i>취소 전 원래 합계: ${perf.orders.length}건 ${totalQty + cancelQty}매</i>`;
+  }
 
   return msg;
 }
@@ -1662,6 +1756,62 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 취소 목록 확인
+  if (['취소목록', '취소리스트', '반품목록'].includes(text)) {
+    const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
+    if (cancelledOrders.length === 0) {
+      await sendMessage('📋 취소/반품 내역이 없습니다.');
+    } else {
+      let msg = `🚫 <b>취소/반품 목록 (${cancelledOrders.length}건)</b>\n\n`;
+      cancelledOrders.forEach((c, idx) => {
+        msg += `${idx + 1}. ${c.buyerName || '(이름없음)'} (${c.lastFour || '----'})`;
+        if (c.productName) msg += `\n   🎫 ${c.productName}`;
+        msg += `\n   📅 ${c.cancelledAt?.substring(0, 10) || ''}\n\n`;
+      });
+      msg += `삭제: <b>취소삭제 번호</b> (예: 취소삭제 1)`;
+      await sendMessage(msg);
+    }
+    return;
+  }
+
+  // 취소 목록에서 삭제 (잘못 등록된 경우 복구)
+  if (text.startsWith('취소삭제')) {
+    const numStr = text.replace('취소삭제', '').trim();
+    const num = parseInt(numStr);
+    const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
+    if (!num || num < 1 || num > cancelledOrders.length) {
+      await sendMessage(`❌ 1~${cancelledOrders.length} 사이 번호를 입력해주세요.`);
+    } else {
+      const removed = cancelledOrders.splice(num - 1, 1)[0];
+      writeJson(CONFIG.cancelledOrdersFile, cancelledOrders);
+      await sendMessage(`✅ 취소 목록에서 제거: ${removed.buyerName || '(이름없음)'} (${removed.lastFour || '----'})\n\n이제 최종결산에 다시 포함됩니다.`);
+    }
+    return;
+  }
+
+  // 수동 취소 등록 (이름 뒷자리 형식)
+  if (text.startsWith('취소등록')) {
+    const params = text.replace('취소등록', '').trim();
+    // 형식: 이름 뒷자리 (예: 취소등록 홍길동 1234)
+    const match = params.match(/^([가-힣]{2,4})\s+(\d{4})$/);
+    if (!match) {
+      await sendMessage('❌ 형식: <b>취소등록 이름 뒷자리</b>\n예: 취소등록 홍길동 1234');
+    } else {
+      const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
+      cancelledOrders.push({
+        orderId: '',
+        buyerName: match[1],
+        phone: '',
+        productName: '',
+        lastFour: match[2],
+        cancelledAt: new Date().toISOString(),
+      });
+      writeJson(CONFIG.cancelledOrdersFile, cancelledOrders);
+      await sendMessage(`✅ 취소 등록 완료: ${match[1]} (${match[2]})\n\n최종결산에서 자동 제외됩니다.`);
+    }
+    return;
+  }
+
   // 스마트스토어 주문 확인
   if (['check', '체크', '확인', '주문확인', '주문'].includes(text)) {
     await sendMessage('🔍 스마트스토어 주문 확인 중...');
@@ -1747,7 +1897,10 @@ async function handleMessage(msg) {
       `• 스토어 - 네이버 판매현황\n` +
       `• 조회 - 놀티켓 판매현황\n\n` +
       `<b>📋 결산</b>\n` +
-      `• 최종결산 - 공연별 발송 명단\n\n` +
+      `• 최종결산 - 공연별 발송 명단\n` +
+      `• 취소목록 - 취소/반품 목록 확인\n` +
+      `• 취소등록 이름 뒷자리 - 수동 취소\n` +
+      `• 취소삭제 번호 - 취소 목록에서 제거\n\n` +
       `<b>🔍 검색</b>\n` +
       `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
       `<b>⚙️ 관리</b>\n` +
@@ -1851,7 +2004,9 @@ async function startPolling() {
       `• 스토어 - 네이버 판매현황\n` +
       `• 조회 - 놀티켓 판매현황\n\n` +
       `<b>📋 결산</b>\n` +
-      `• 최종결산 - 공연별 발송 명단\n\n` +
+      `• 최종결산 - 공연별 발송 명단\n` +
+      `• 취소목록 - 취소/반품 목록 확인\n` +
+      `• 취소등록 이름 뒷자리 - 수동 취소 등록\n\n` +
       `<b>🔍 검색</b>\n` +
       `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
       `<b>⚙️ 관리</b>\n` +
