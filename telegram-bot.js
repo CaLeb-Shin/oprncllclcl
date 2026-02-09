@@ -1406,7 +1406,7 @@ async function getStoreSalesSummary() {
 
     const periodName = period === 'today' ? '오늘' : '어제';
     if (hasOrders) {
-      msg += `\n📅 <b>${periodName} (${periodLabel})</b> 합계 : <b>${periodTotal}매</b>\n`;
+      msg += `\n📅 <b>${periodName} (${periodLabel})</b> 💰 합계: <b>${periodTotal}매</b>\n`;
     } else {
       msg += `\n📅 <b>${periodName} (${periodLabel})</b> - 주문 없음\n`;
     }
