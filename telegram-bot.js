@@ -1392,29 +1392,35 @@ async function getStoreSalesSummary() {
 
   // 1) 오늘/어제 판매
   for (const [period, periodLabel] of [['today', todayLabel], ['yesterday', yesterdayLabel]]) {
-    msg += `\n📅 <b>${period === 'today' ? '오늘' : '어제'} (${periodLabel})</b>\n`;
-
+    // 먼저 합계 계산
     let periodTotal = 0;
     let hasOrders = false;
 
     for (const [, perf] of perfEntries) {
       const seats = Object.entries(perf[period]);
       if (seats.length === 0) continue;
-
       hasOrders = true;
       const perfTotal = seats.reduce((sum, [, q]) => sum + q, 0);
       periodTotal += perfTotal;
-
-      const dateLabel = perf.perfDate ? ` (${perf.perfDate})` : '';
-      const seatStr = seats.sort().map(([s, q]) => `${s} ${q}매`).join(', ');
-      msg += `  🎵 ${perf.perfName}${dateLabel}\n`;
-      msg += `      ${seatStr}\n`;
     }
 
-    if (!hasOrders) {
-      msg += `  주문 없음\n`;
+    const periodName = period === 'today' ? '오늘' : '어제';
+    if (hasOrders) {
+      msg += `\n📅 <b>${periodName} (${periodLabel}) - ${periodTotal}매</b>\n`;
     } else {
-      msg += `  💰 합계: <b>${periodTotal}매</b>\n`;
+      msg += `\n📅 <b>${periodName} (${periodLabel})</b> - 주문 없음\n`;
+    }
+
+    if (hasOrders) {
+      for (const [, perf] of perfEntries) {
+        const seats = Object.entries(perf[period]);
+        if (seats.length === 0) continue;
+
+        const dateLabel = perf.perfDate ? ` (${perf.perfDate})` : '';
+        const seatStr = seats.sort().map(([s, q]) => `${s} ${q}매`).join(', ');
+        msg += `  🎵 ${perf.perfName}${dateLabel}\n`;
+        msg += `      ${seatStr}\n`;
+      }
     }
   }
 
@@ -2236,6 +2242,83 @@ function startPpurioKeepAlive() {
 }
 
 // ============================================================
+// 매일 23:50 자동 결산
+// ============================================================
+function startDailyReport() {
+  function scheduleNext() {
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(23, 50, 0, 0);
+
+    // 이미 23:50 지났으면 내일로
+    if (now >= target) {
+      target.setDate(target.getDate() + 1);
+    }
+
+    const delay = target.getTime() - now.getTime();
+    const hours = Math.floor(delay / 3600000);
+    const mins = Math.floor((delay % 3600000) / 60000);
+    console.log(`⏰ 다음 자동결산: ${target.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (${hours}시간 ${mins}분 후)`);
+
+    setTimeout(async () => {
+      try {
+        console.log('🕐 23:50 자동 결산 시작...');
+        await sendMessage('🕐 <b>23:50 자동 결산 시작</b>');
+
+        // 1) 네이버 스토어 판매현황
+        try {
+          const storeReport = await getStoreSalesSummary();
+          await sendMessage(storeReport);
+        } catch (err) {
+          console.error('자동결산 - 스토어 오류:', err.message);
+          try {
+            await closeBrowser();
+            await ensureBrowser();
+            const storeReport = await getStoreSalesSummary();
+            await sendMessage(storeReport);
+          } catch (retryErr) {
+            await sendMessage(`❌ 스토어 결산 오류: ${retryErr.message}`);
+          }
+        }
+
+        // 2) 최종결산 (오늘 공연이 있으면 자동으로)
+        try {
+          const perfKeys = await getFinalSummaryList();
+          if (perfKeys && perfKeys.length > 0) {
+            // 오늘 날짜 공연 찾기
+            const today = new Date();
+            const todayStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, '0')}.${String(today.getDate()).padStart(2, '0')}`;
+            const todayShort = `${today.getMonth() + 1}/${today.getDate()}`;
+            const todayShort2 = `${today.getMonth() + 1}월 ${today.getDate()}일`;
+
+            for (let i = 0; i < perfKeys.length; i++) {
+              const key = perfKeys[i];
+              // 오늘 날짜가 포함된 공연만 자동 결산
+              if (key.includes(todayStr) || key.includes(todayShort) || key.includes(todayShort2)) {
+                const report = await getFinalSummaryDetail(i);
+                await sendMessage(report);
+              }
+            }
+          }
+        } catch (err) {
+          console.error('자동결산 - 최종결산 오류:', err.message);
+        }
+
+        await sendMessage('✅ <b>자동 결산 완료</b>');
+      } catch (err) {
+        console.error('자동결산 오류:', err.message);
+        await sendMessage(`❌ 자동 결산 오류: ${err.message}`);
+      }
+
+      // 다음 날 스케줄
+      scheduleNext();
+    }, delay);
+  }
+
+  scheduleNext();
+}
+
+// ============================================================
 // 프로세스 종료 처리
 // ============================================================
 async function gracefulShutdown(signal) {
@@ -2262,3 +2345,4 @@ startAutoSales();
 startAutoSmartstore();
 startSmartstoreKeepAlive();
 startPpurioKeepAlive();
+startDailyReport();
