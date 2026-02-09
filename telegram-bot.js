@@ -474,6 +474,21 @@ async function ensureBrowser() {
 // ============================================================
 async function getNewOrders() {
   console.log('📋 새 주문 확인 중...');
+  
+  // 로그인 상태 먼저 확인
+  const isLoggedIn = await smartstorePage.evaluate(() =>
+    document.body.textContent.includes('판매관리') ||
+    document.body.textContent.includes('정산관리') ||
+    document.body.textContent.includes('주문/배송') ||
+    document.body.textContent.includes('상품관리')
+  ).catch(() => false);
+  
+  if (!isLoggedIn) {
+    console.log('   ⚠️ 스마트스토어 로그인 상태 아님, 재로그인 시도...');
+    await closeBrowser();
+    await ensureBrowser();
+  }
+  
   await smartstorePage.goto(CONFIG.smartstore.orderUrl);
   await smartstorePage.waitForTimeout(5000);
 
@@ -481,8 +496,14 @@ async function getNewOrders() {
   try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
   await smartstorePage.waitForTimeout(1000);
 
-  // iframe 찾기
-  const frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  // iframe 찾기 (2차 시도 포함)
+  let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  if (!frame) {
+    console.log('   ⚠️ iframe 못 찾음, 페이지 새로고침...');
+    await smartstorePage.reload({ waitUntil: 'networkidle' });
+    await smartstorePage.waitForTimeout(5000);
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  }
   if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
 
   const allOrders = [];
@@ -1644,12 +1665,17 @@ async function handleMessage(msg) {
     await sendMessage('🔍 스마트스토어 주문 확인 중...');
     try {
       const newOrders = await checkForNewOrders();
-      if (newOrders.length === 0) {
-        await sendMessage('✅ 새 주문 없음');
+      
+      const pendingKeys = Object.keys(pendingOrders);
+      const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
+      
+      if (newOrders.length === 0 && pendingKeys.length === 0 && pendingDelivery.length === 0) {
+        await sendMessage('✅ 새 주문 없음\n\n주문이 있는데 안 보이면 <b>봇재시작</b> 후 다시 체크');
+      } else if (newOrders.length === 0) {
+        await sendMessage('✅ 신규 주문 없음 (대기 건 아래 참고)');
       }
 
       // 승인 대기 중인 주문 알림
-      const pendingKeys = Object.keys(pendingOrders);
       if (pendingKeys.length > 0) {
         let pendingMsg = `⏳ <b>승인 대기 (${pendingKeys.length}건)</b>\n승인/거절을 선택해주세요!\n`;
         for (const key of pendingKeys) {
@@ -1661,7 +1687,6 @@ async function handleMessage(msg) {
       }
 
       // 발송처리 대기 목록 알림
-      const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
       if (pendingDelivery.length > 0) {
         let msg = `📬 <b>발송처리 대기 (${pendingDelivery.length}건)</b>\n문자발송 완료, 발송처리 필요!\n`;
         for (const pd of pendingDelivery) {
@@ -1674,7 +1699,7 @@ async function handleMessage(msg) {
         await sendMessage(msg);
       }
     } catch (err) {
-      await sendMessage(`❌ 오류: ${err.message}\n\n세션 만료 시 smartlogin으로 재로그인하세요.`);
+      await sendMessage(`❌ 주문 확인 오류: ${err.message}\n\n<b>봇재시작</b> 입력 후 다시 시도해주세요.`);
     }
     return;
   }
