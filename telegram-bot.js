@@ -324,6 +324,50 @@ async function ppurioAutoRelogin() {
   }
 }
 
+// 스마트스토어 세션 keep-alive (페이지 방문 + 세션 갱신)
+async function smartstoreKeepAlive() {
+  if (!smartstorePage || !smartstoreCtx) return;
+
+  try {
+    // 페이지가 살아있는지 확인
+    await smartstorePage.evaluate(() => true);
+
+    // 스마트스토어 메인 페이지 방문 (세션 갱신)
+    await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(4000);
+
+    const isOk = await smartstorePage.evaluate(() =>
+      document.body.textContent.includes('판매관리') ||
+      document.body.textContent.includes('정산관리') ||
+      document.body.textContent.includes('주문/배송') ||
+      document.body.textContent.includes('상품관리')
+    );
+
+    if (isOk) {
+      // 세션 파일도 갱신
+      await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+      console.log('🔄 스마트스토어 세션 keep-alive OK');
+    } else {
+      console.log('⚠️ 스마트스토어 세션 만료 감지 (keep-alive)');
+      // 세션 만료 → 브라우저 재초기화 시도
+      await closeBrowser();
+      try {
+        await ensureBrowser();
+        console.log('🔄 스마트스토어 세션 자동 복구 성공');
+      } catch (e) {
+        await sendMessage('⚠️ <b>스마트스토어 세션 만료</b>\n\n서버에서 실행:\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code> 입력');
+      }
+    }
+  } catch (err) {
+    console.log('⚠️ 스마트스토어 keep-alive 오류:', err.message);
+    // 페이지가 죽었으면 재초기화
+    try {
+      await closeBrowser();
+      await ensureBrowser();
+    } catch {}
+  }
+}
+
 // 뿌리오 세션 keep-alive (페이지 새로고침 + 세션 갱신)
 async function ppurioKeepAlive() {
   if (!ppurioPage || !ppurioCtx) return;
@@ -2149,6 +2193,18 @@ function startAutoSmartstore() {
   console.log('⏰ 스마트스토어 1시간 자동 확인 설정');
 }
 
+function startSmartstoreKeepAlive() {
+  // 15분마다 스마트스토어 세션 갱신 (세션 만료 방지)
+  setInterval(async () => {
+    try {
+      await smartstoreKeepAlive();
+    } catch (err) {
+      console.error('스마트스토어 keep-alive 오류:', err.message);
+    }
+  }, 15 * 60 * 1000); // 15분
+  console.log('⏰ 스마트스토어 세션 15분 keep-alive 설정');
+}
+
 function startPpurioKeepAlive() {
   // 20분마다 뿌리오 세션 갱신 (세션 만료 방지)
   setInterval(async () => {
@@ -2186,4 +2242,5 @@ process.on('unhandledRejection', (err) => {
 startPolling();
 startAutoSales();
 startAutoSmartstore();
+startSmartstoreKeepAlive();
 startPpurioKeepAlive();
