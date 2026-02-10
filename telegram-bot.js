@@ -2416,6 +2416,56 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 스마트스토어 페이지 구조 진단 (1회성)
+  if (text === '진단') {
+    await sendMessage('🔍 스마트스토어 페이지 구조 진단 중...');
+    try {
+      await ensureBrowser();
+      const testUrls = [
+        ['주문통합검색', 'https://sell.smartstore.naver.com/#/naverpay/sale/order'],
+        ['발주확인', 'https://sell.smartstore.naver.com/#/naverpay/manage/order'],
+        ['배송현황', CONFIG.smartstore.orderUrl],
+      ];
+      let diagMsg = '🔍 <b>스마트스토어 진단 결과</b>\n';
+      for (const [label, url] of testUrls) {
+        diagMsg += `\n━━━ ${label} ━━━\n`;
+        diagMsg += `URL: ${url}\n`;
+        await smartstorePage.goto(url, { timeout: 20000, waitUntil: 'domcontentloaded' });
+        await smartstorePage.waitForTimeout(5000);
+        try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
+        await smartstorePage.waitForTimeout(1000);
+        const frameUrls = smartstorePage.frames().map((f) => f.url()).filter((u) => u !== 'about:blank');
+        diagMsg += `프레임 ${frameUrls.length}개:\n`;
+        for (const fu of frameUrls) diagMsg += `  ${fu.substring(0, 80)}\n`;
+        // iframe에서 UI 정보 추출
+        for (const fr of smartstorePage.frames()) {
+          const fUrl = fr.url();
+          if (!fUrl.includes('/o/') || fUrl.includes('#') || fUrl === 'about:blank') continue;
+          const info = await fr.evaluate(() => {
+            const t = document.body?.innerText || '';
+            const totalM = t.match(/총\s*([\d,]+)\s*건/);
+            const tables = document.querySelectorAll('table');
+            let rows = 0;
+            if (tables.length > 0) rows = tables[0].querySelectorAll('tbody tr').length;
+            const btns = Array.from(document.querySelectorAll('button, a, [role="tab"]'))
+              .map((b) => b.innerText?.trim()).filter((x) => x && x.length < 25);
+            const uniq = [...new Set(btns)].slice(0, 20);
+            return { total: totalM ? totalM[0] : null, tableCount: tables.length, rows, buttons: uniq };
+          }).catch((e) => ({ error: e.message }));
+          diagMsg += `iframe: ${fUrl.substring(0, 60)}\n`;
+          if (info.error) { diagMsg += `  에러: ${info.error}\n`; continue; }
+          diagMsg += `  총건수: ${info.total || '없음'}\n`;
+          diagMsg += `  테이블: ${info.tableCount}개, 행: ${info.rows}\n`;
+          diagMsg += `  버튼: ${info.buttons.join(', ')}\n`;
+        }
+      }
+      await sendMessage(diagMsg);
+    } catch (err) {
+      await sendMessage(`❌ 진단 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 스마트스토어 판매현황
   if (['스토어', '스토어현황', '네이버', 'store'].includes(text)) {
     await sendMessage('📦 스토어 판매현황 조회 중...');
