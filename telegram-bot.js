@@ -633,8 +633,8 @@ async function getNewOrders() {
     await ensureBrowser();
   }
   
-  await smartstorePage.goto(CONFIG.smartstore.orderUrl);
-  await smartstorePage.waitForTimeout(5000);
+  await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
+  await smartstorePage.waitForTimeout(4000);
 
   // 팝업 닫기
   try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
@@ -644,8 +644,8 @@ async function getNewOrders() {
   let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
   if (!frame) {
     console.log('   ⚠️ iframe 못 찾음, 페이지 새로고침...');
-    await smartstorePage.reload({ waitUntil: 'networkidle' });
-    await smartstorePage.waitForTimeout(5000);
+    await smartstorePage.reload({ timeout: 20000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(4000);
     frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
   }
   if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
@@ -778,12 +778,12 @@ async function checkCancelledOrders() {
 
     for (const url of cancelUrls) {
       try {
-        await smartstorePage.goto(url, { timeout: 20000, waitUntil: 'domcontentloaded' });
-        await smartstorePage.waitForTimeout(5000);
+        await smartstorePage.goto(url, { timeout: 15000, waitUntil: 'domcontentloaded' });
+        await smartstorePage.waitForTimeout(3000);
 
         // 팝업 닫기
-        try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
-        await smartstorePage.waitForTimeout(1000);
+        try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
+        await smartstorePage.waitForTimeout(500);
 
         // iframe 찾기 (여러 패턴 시도)
         const frame = smartstorePage.frames().find((f) => {
@@ -846,7 +846,7 @@ async function checkCancelledOrders() {
             if (!orderId) continue;
 
             // 상품명 (대괄호로 시작하거나 긴 텍스트)
-            const productName = cells.find((c) => c && (c.match(/^\[.+\]/) || (c.length > 20 && c.includes('멜론') || c.includes('MelON') || c.includes('콘서트') || c.includes('공연')))) || '';
+            const productName = cells.find((c) => c && (c.match(/^\[.+\]/) || (c.length > 20 && (c.includes('멜론') || c.includes('MelON') || c.includes('콘서트') || c.includes('공연'))))) || '';
             // 구매자 (2~4글자 한글)
             const buyerName = cells.find((c) => c && /^[가-힣]{2,4}$/.test(c)) || '';
             // 연락처
@@ -1341,7 +1341,17 @@ async function checkForNewOrders() {
       await requestApproval(order);
     }
 
-    await checkCancelledOrders();
+    // 취소/반품 확인은 별도로 (주문 확인 실패 방지)
+    try {
+      await Promise.race([
+        checkCancelledOrders(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('취소확인 30초 타임아웃')), 30000)),
+      ]);
+    } catch (cancelErr) {
+      console.log('   ⚠️ 취소/반품 확인 실패 (무시):', cancelErr.message);
+      // 주문 페이지 복귀
+      try { await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 10000 }); } catch {}
+    }
 
     // 주문 확인 성공 → 세션 갱신 저장 (세션 만료 방지)
     try {
@@ -2070,7 +2080,10 @@ async function handleMessage(msg) {
   if (['check', '체크', '확인', '주문확인', '주문'].includes(text)) {
     await sendMessage('🔍 스마트스토어 주문 확인 중...');
     try {
-      const newOrders = await checkForNewOrders();
+      const newOrders = await Promise.race([
+        checkForNewOrders(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('주문확인 2분 타임아웃')), 120000)),
+      ]);
       
       const pendingKeys = Object.keys(pendingOrders);
       const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
@@ -2105,7 +2118,13 @@ async function handleMessage(msg) {
         await sendMessage(msg);
       }
     } catch (err) {
-      await sendMessage(`❌ 주문 확인 오류: ${err.message}\n\n<b>봇재시작</b> 입력 후 다시 시도해주세요.`);
+      isSmartstoreRunning = false; // 타임아웃 시 플래그 강제 해제
+      if (err.message.includes('타임아웃')) {
+        await closeBrowser();
+        await sendMessage(`⏰ 주문 확인이 너무 오래 걸려서 중단했어요.\n다시 <b>체크</b> 해주세요.`);
+      } else {
+        await sendMessage(`❌ 주문 확인 오류: ${err.message}\n\n<b>봇재시작</b> 입력 후 다시 시도해주세요.`);
+      }
     }
     return;
   }
@@ -2344,9 +2363,19 @@ function startAutoSmartstore() {
   setInterval(async () => {
     console.log('\n⏰ 1시간 스마트스토어 확인...');
     try {
-      await checkForNewOrders();
+      await Promise.race([
+        checkForNewOrders(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('주문확인 2분 타임아웃')), 120000)),
+      ]);
     } catch (err) {
       console.error('스마트스토어 오류:', err.message);
+      // 타임아웃이면 isSmartstoreRunning 플래그 강제 해제
+      isSmartstoreRunning = false;
+      // 브라우저 상태 이상일 수 있으니 재초기화
+      if (err.message.includes('타임아웃')) {
+        console.log('   🔄 타임아웃으로 인한 브라우저 재초기화...');
+        await closeBrowser();
+      }
     }
   }, CONFIG.orderCheckInterval);
   console.log('⏰ 스마트스토어 1시간 자동 확인 설정');
