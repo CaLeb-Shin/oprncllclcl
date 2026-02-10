@@ -1344,7 +1344,11 @@ async function getNaverCancelledOrders() {
         const buyerName = cells[10] || '';
         const product = cells[7] || '';
         const qty = parseInt(cells[9]) || 1;
-        if (buyerName) cancelled.push({ buyerName, product, qty });
+        // 좌석 추출: 상품명 ", S석" 또는 옵션정보 ": S석"
+        const optInfo = cells[8] || '';
+        const seatM = product.match(/,\s*(\S+석)\s*$/) || optInfo.match(/:\s*(\S+석)\s*$/);
+        const seatType = seatM ? seatM[1] : '';
+        if (buyerName) cancelled.push({ buyerName, product, qty, seatType });
       }
       return cancelled;
     });
@@ -1408,10 +1412,14 @@ async function getFinalSummaryDetail(perfIndex) {
     });
     if (manualMatch) return true;
 
-    // 네이버 자동: 이름 매칭
+    // 네이버 자동: 이름 + 좌석 매칭 (같은 사람이 취소 후 다른 좌석 재주문 가능)
     return naverCancelled.some((c) => {
-      return c.buyerName && order.buyerName &&
+      const nameMatch = c.buyerName && order.buyerName &&
         (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
+      if (!nameMatch) return false;
+      // 좌석 정보가 있으면 좌석도 일치해야 제외
+      if (c.seatType && order.seatType) return c.seatType === order.seatType;
+      return true; // 좌석 정보 없으면 이름만으로 매칭
     });
   }
 
