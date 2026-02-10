@@ -608,7 +608,32 @@ async function ensureBrowser() {
     }
 
     if (ssOk && (ppOk || !ppurioPage)) {
-      return;  // 둘 다 정상
+      // 페이지는 살아있지만, 세션도 유효한지 확인 (다른 PC 로그인으로 세션 킥 감지)
+      try {
+        await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
+        await smartstorePage.waitForTimeout(3000);
+        const sessionValid = await smartstorePage.evaluate(() =>
+          document.body.textContent.includes('판매관리') ||
+          document.body.textContent.includes('정산관리') ||
+          document.body.textContent.includes('주문/배송') ||
+          document.body.textContent.includes('상품관리')
+        );
+        if (sessionValid) {
+          await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+          return;  // 세션도 정상
+        }
+        // 세션 킥됨 → 자동 재로그인
+        console.log('⚠️ 세션 킥 감지 (다른 기기 로그인?) → 자동 재로그인...');
+        const reloginOk = await smartstoreAutoRelogin();
+        if (reloginOk) {
+          console.log('✅ 자동 재로그인 성공!');
+          return;
+        }
+        // 재로그인 실패 → 아래 전체 재초기화로 진행
+        ssOk = false;
+      } catch {
+        ssOk = false;
+      }
     }
 
     // 하나라도 죽었으면 전체 재초기화
@@ -1505,13 +1530,28 @@ async function checkForNewOrders() {
     return newOrders;
   } catch (e) {
     console.error('   ❌ 주문 확인 오류:', e.message);
-    // 브라우저 문제면 다음에 재초기화
     const msg = e.message || '';
-    if (msg.includes('세션 만료') || msg.includes('Target closed') ||
+    const isSessionError = msg.includes('세션 만료') || msg.includes('Target closed') ||
         msg.includes('detached') || msg.includes('프레임') ||
-        msg.includes('Navigation') || msg.includes('Timeout') ||
-        msg.includes('closed') || msg.includes('crashed')) {
-      console.log('   🔄 브라우저 재초기화 예정...');
+        msg.includes('Navigation') || msg.includes('closed') || msg.includes('crashed');
+
+    if (isSessionError) {
+      // 세션/브라우저 오류 → 자동 재로그인 시도
+      console.log('   🔐 세션 오류 → 자동 재로그인 시도...');
+      try {
+        const reloginOk = await smartstoreAutoRelogin();
+        if (reloginOk) {
+          console.log('   ✅ 자동 재로그인 성공! 다음 주기에 정상 작동');
+        } else {
+          console.log('   ❌ 자동 재로그인 실패 → 브라우저 재초기화');
+          await closeBrowser();
+        }
+      } catch (reloginErr) {
+        console.log('   ❌ 재로그인 오류:', reloginErr.message);
+        await closeBrowser();
+      }
+    } else if (msg.includes('Timeout') || msg.includes('타임아웃')) {
+      console.log('   🔄 타임아웃 → 브라우저 재초기화 예정...');
       await closeBrowser();
     }
     throw e;
@@ -2503,12 +2543,20 @@ function startAutoSmartstore() {
       ]);
     } catch (err) {
       console.error('스마트스토어 오류:', err.message);
-      // 타임아웃이면 isSmartstoreRunning 플래그 강제 해제
       isSmartstoreRunning = false;
-      // 브라우저 상태 이상일 수 있으니 재초기화
-      if (err.message.includes('타임아웃')) {
+
+      const msg = err.message || '';
+      if (msg.includes('타임아웃')) {
         console.log('   🔄 타임아웃으로 인한 브라우저 재초기화...');
         await closeBrowser();
+      } else if (msg.includes('세션 만료') || msg.includes('Target closed') || msg.includes('closed') || msg.includes('crashed')) {
+        // 세션 오류 → 자동 재로그인 (checkForNewOrders에서 이미 시도했지만 한번 더)
+        console.log('   🔐 세션 오류 → 자동 재로그인 재시도...');
+        try {
+          const ok = await smartstoreAutoRelogin();
+          if (ok) console.log('   ✅ 재로그인 성공! 다음 주기 정상 작동');
+          else await closeBrowser();
+        } catch { await closeBrowser(); }
       }
     }
   }, CONFIG.orderCheckInterval);
