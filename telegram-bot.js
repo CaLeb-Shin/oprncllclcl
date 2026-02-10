@@ -1310,6 +1310,69 @@ async function getFinalSummaryList() {
   return finalSummaryKeys;
 }
 
+// 네이버 스토어에서 취소/반품 주문 자동 수집
+async function getNaverCancelledOrders() {
+  console.log('🔍 네이버 취소/반품 주문 수집...');
+  await ensureBrowser();
+
+  await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
+  await smartstorePage.waitForTimeout(5000);
+  try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+  await smartstorePage.waitForTimeout(1000);
+
+  let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+  if (!frame) return [];
+
+  try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
+  await frame.waitForTimeout(500);
+  await frame.evaluate(() => {
+    const btns = document.querySelectorAll('button, a, input[type="button"]');
+    for (const btn of btns) { if (btn.textContent.trim() === '검색') { btn.click(); return; } }
+  });
+  await smartstorePage.waitForTimeout(8000);
+  frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+  const scrapeCancelled = async () => {
+    return await frame.evaluate(() => {
+      const rows = document.querySelectorAll('table tbody tr');
+      const cancelled = [];
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+        if (cells.length < 15) continue;
+        const status = cells[1] || '';
+        if (!status.includes('취소') && !status.includes('반품')) continue;
+        const buyerName = cells[10] || '';
+        const product = cells[7] || '';
+        const qty = parseInt(cells[9]) || 1;
+        if (buyerName) cancelled.push({ buyerName, product, qty });
+      }
+      return cancelled;
+    });
+  };
+
+  const allCancelled = [];
+  allCancelled.push(...await scrapeCancelled());
+
+  for (let nextPage = 2; nextPage <= 10; nextPage++) {
+    const hasNext = await frame.evaluate((pageNum) => {
+      const links = document.querySelectorAll('a, button');
+      for (const link of links) {
+        if (link.textContent.trim() === String(pageNum)) { link.click(); return true; }
+      }
+      return false;
+    }, nextPage).catch(() => false);
+    if (!hasNext) break;
+    await smartstorePage.waitForTimeout(3000);
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+    const pageCancelled = await scrapeCancelled();
+    allCancelled.push(...pageCancelled);
+    if (pageCancelled.length === 0 && allCancelled.length === 0) break;
+  }
+
+  console.log(`   🚫 네이버 취소/반품: ${allCancelled.length}건`);
+  return allCancelled;
+}
+
 // 2단계: 선택한 공연 상세 (취소 목록 대조 후 제외)
 async function getFinalSummaryDetail(perfIndex) {
   if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
@@ -1323,17 +1386,32 @@ async function getFinalSummaryDetail(perfIndex) {
     return '📋 해당 공연의 발송 내역이 없습니다.';
   }
 
-  // 취소 목록 로드 → 이름+연락처뒷자리로 매칭
-  const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
-  
-  // 취소된 주문 매칭: 이름 + 연락처 뒷 4자리가 같으면 취소 건
+  // 1) 수동 취소 목록
+  const manualCancelled = readJson(CONFIG.cancelledOrdersFile, []);
+
+  // 2) 네이버 자동 취소/반품 목록
+  let naverCancelled = [];
+  try {
+    naverCancelled = await getNaverCancelledOrders();
+  } catch (e) {
+    console.log(`   ⚠️ 네이버 취소 목록 조회 실패: ${e.message}`);
+  }
+
+  // 취소된 주문 매칭
   function isCancelled(order) {
-    return cancelledOrders.some((c) => {
-      const nameMatch = c.buyerName && order.buyerName && 
+    // 수동 목록: 이름 + 뒷자리
+    const manualMatch = manualCancelled.some((c) => {
+      const nameMatch = c.buyerName && order.buyerName &&
         (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
       const phoneMatch = c.lastFour && order.lastFour && c.lastFour === order.lastFour;
-      // 이름 + 뒷자리 둘 다 매칭되면 취소 건
       return nameMatch && phoneMatch;
+    });
+    if (manualMatch) return true;
+
+    // 네이버 자동: 이름 매칭
+    return naverCancelled.some((c) => {
+      return c.buyerName && order.buyerName &&
+        (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
     });
   }
 
