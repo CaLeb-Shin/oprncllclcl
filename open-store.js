@@ -211,7 +211,7 @@ const fs = require('fs');
     const isDisney = o.product.includes('디즈니');
     const key = `${region}_${isDisney ? '디즈니' : '지브리'}`;
     const seatMatch = o.product.match(/,\s*(\S+석)\s*$/);
-    const optionSeatMatch = !seatMatch && o.optionInfo && o.optionInfo.match(/(\S*석)/);
+    const optionSeatMatch = !seatMatch && o.optionInfo && o.optionInfo.match(/:\s*(\S+석)\s*$/);
     const seat = seatMatch ? seatMatch[1] : optionSeatMatch ? optionSeatMatch[1] : '미분류';
 
     if (!perfTotals[key]) perfTotals[key] = {};

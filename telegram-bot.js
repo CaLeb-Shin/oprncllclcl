@@ -1582,7 +1582,8 @@ function parseProductInfo(productStr, optionInfo) {
 
   const seatMatch = productStr.match(/,\s*(\S+석)\s*$/);
   // fallback 1: 옵션정보(cells[8])에서 좌석 찾기 (초기 상품용)
-  const optionSeatMatch = !seatMatch && optionInfo && optionInfo.match(/(\S*석)/);
+  // "좌석선택 (50%할인): S석" → 끝의 ": S석" 추출
+  const optionSeatMatch = !seatMatch && optionInfo && optionInfo.match(/:\s*(\S+석)\s*$/);
   const seat = seatMatch ? seatMatch[1]
     : optionSeatMatch ? optionSeatMatch[1]
     : '미분류';
