@@ -1610,126 +1610,155 @@ async function getStoreSalesSummary() {
   console.log('📦 스토어 판매현황 조회...');
   await ensureBrowser();
 
-  // ★ 배송현황관리 페이지 사용 (모든 상태의 주문을 볼 수 있음)
-  // 기존 #/naverpay/manage/order는 미확인(결제완료) 주문만 보여줘서 총 판매가 줄어드는 버그 발생
-  await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
+  // ★ 주문통합검색 페이지 사용 → 3개월 조회, 취소/반품 제외, 공연별 합계
+  await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/sale/order', { timeout: 30000, waitUntil: 'domcontentloaded' });
   await smartstorePage.waitForTimeout(5000);
 
   // 팝업 닫기
   try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
   await smartstorePage.waitForTimeout(1000);
 
-  // 배송관리 iframe 찾기 (getNewOrders와 동일)
-  let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  // iframe 찾기 (디버그용 모든 프레임 URL 로깅)
+  const allFrameUrls = smartstorePage.frames().map((f) => f.url()).filter((u) => u !== 'about:blank');
+  console.log('   📋 프레임들:', allFrameUrls.join(' | '));
+
+  let frame = smartstorePage.frames().find((f) => {
+    const u = f.url();
+    return u.includes('/o/') && !u.includes('#') && u !== 'about:blank'
+      && !u.includes('/home/') && !u.includes('/dashboard');
+  });
   if (!frame) {
     console.log('   ⚠️ iframe 못 찾음, 페이지 새로고침...');
     await smartstorePage.reload({ timeout: 20000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(4000);
-    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+    await smartstorePage.waitForTimeout(5000);
+    const retryUrls = smartstorePage.frames().map((f) => f.url()).filter((u) => u !== 'about:blank');
+    console.log('   📋 재시도 프레임들:', retryUrls.join(' | '));
+    frame = smartstorePage.frames().find((f) => {
+      const u = f.url();
+      return u.includes('/o/') && !u.includes('#') && u !== 'about:blank'
+        && !u.includes('/home/') && !u.includes('/dashboard');
+    });
   }
-  if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
+  if (!frame) throw new Error('주문통합검색 프레임을 찾을 수 없습니다.');
+  console.log('   ✅ 프레임:', frame.url());
 
-  // ★ 상태 카드를 직접 클릭 (getNewOrders와 동일한 방식)
-  // 기간필터/조회 버튼 클릭 시 페이지가 검색모드로 전환되어 상태 카드가 사라지므로 하지 않음
-  const statusCards = [
-    '신규주문(발주 전)',
-    '신규주문(발주 후)',
-    '배송준비',
-    '배송중',
-    '배송완료',
-    '구매확인',
-  ];
+  // 기간: 3개월 클릭
+  try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
+  await frame.waitForTimeout(500);
 
+  // 검색 버튼 클릭
+  try {
+    await frame.click('button:has-text("검색")', { timeout: 3000 });
+  } catch {
+    try { await frame.click('.btn-search', { timeout: 2000 }); } catch {}
+  }
+  await smartstorePage.waitForTimeout(8000);
+
+  // 총 건수 확인 (디버그)
+  const totalText = await frame.evaluate(() => {
+    const t = document.body?.innerText || '';
+    const m = t.match(/총\s*([\d,]+)\s*건/);
+    return m ? m[0] : '건수 미확인';
+  }).catch(() => '건수 확인 실패');
+  console.log(`   📊 검색결과: ${totalText}`);
+
+  // 테이블 스크래핑 (페이지네이션 포함)
   const orders = [];
-  const seenOrderIds = new Set();
+  let pageNum = 1;
+  while (pageNum <= 50) {
+    const pageOrders = await frame.evaluate(() => {
+      const result = [];
+      const rows = document.querySelectorAll('table tbody tr');
 
-  for (const card of statusCards) {
-    try {
-      await frame.click(`text=${card}`, { timeout: 3000 });
-      await smartstorePage.waitForTimeout(3000);
-
-      // 페이지네이션 포함 스크래핑 (최대 10페이지)
-      let pageNum = 1;
-      while (pageNum <= 10) {
-        // 테이블에서 주문 데이터 추출 (getNewOrders와 동일한 구조)
-        const cardOrders = await frame.evaluate(() => {
-          const rows = document.querySelectorAll('table tbody tr');
-          const headerOrderIds = [];
-          const dataRows = [];
-
-          for (const tr of rows) {
-            const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-            if (cells.length === 0) continue;
-
-            // 주문번호 헤더행 (셀 3~10개, 16자리 숫자 포함)
-            if (cells.length >= 3 && cells.length <= 10) {
-              const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
-              if (idCell) headerOrderIds.push(idCell);
-              continue;
-            }
-
-            // 데이터행 (셀 30개 이상)
-            if (cells.length >= 30) {
-              dataRows.push(cells);
-            }
-          }
-
-          return dataRows.map((cells, i) => {
-            // 상품명: [지역] ... 석 패턴 (getNewOrders와 동일)
-            const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/))
-              || cells.find((c) => c && c.includes('콘서트') && c.includes('['))
-              || '';
-            // 수량: 셀[24] (getNewOrders와 동일)
-            const qty = parseInt(cells[24]) || 1;
-            // 날짜: 20XX.XX.XX 또는 20XX-XX-XX 패턴 검색
-            const dateCell = cells.find((c) => c && c.match(/^20\d{2}[\.\-]\d{2}[\.\-]\d{2}/)) || '';
-
-            return {
-              orderId: headerOrderIds[i] || '',
-              product: productName,
-              qty,
-              date: dateCell.replace(/-/g, '.').substring(0, 10),
-              status: '',
-            };
-          }).filter((o) => o.product);
-        });
-
-        if (cardOrders.length === 0) break;
-
-        // 중복 제거 (orderId 기준)
-        for (const order of cardOrders) {
-          if (order.orderId && seenOrderIds.has(order.orderId)) continue;
-          if (order.orderId) seenOrderIds.add(order.orderId);
-          orders.push(order);
+      // --- 방식 1: 복잡한 구조 (배송현황관리 스타일: 헤더행 + 데이터행 50셀+) ---
+      const headerOrderIds = [];
+      const dataRows = [];
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+        if (cells.length === 0) continue;
+        if (cells.length >= 3 && cells.length <= 10) {
+          const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
+          if (idCell) headerOrderIds.push(idCell);
+          continue;
         }
-
-        // 다음 페이지 확인
-        pageNum++;
-        const hasNext = await frame.evaluate((nextNum) => {
-          const allEls = document.querySelectorAll('a, button, span[onclick], li[onclick]');
-          for (const el of allEls) {
-            const t = el.innerText?.trim();
-            if (t === String(nextNum) && (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
-              el.click(); return true;
-            }
-          }
-          for (const el of allEls) {
-            const t = el.innerText?.trim();
-            if ((t === '다음' || t === '>' || t === '›' || t === '»') &&
-                (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
-              el.click(); return true;
-            }
-          }
-          return false;
-        }, pageNum);
-        if (!hasNext) break;
-        await frame.waitForTimeout(2000);
+        if (cells.length >= 30) dataRows.push(cells);
       }
 
-      console.log(`   📦 ${card}: 누계 ${orders.length}건`);
-    } catch (e) {
-      console.log(`   ⚠️ ${card} 확인 실패:`, e.message);
-    }
+      if (dataRows.length > 0) {
+        for (let i = 0; i < dataRows.length; i++) {
+          const cells = dataRows[i];
+          const product = cells.find((c) => c && c.match(/^\[.+\].*석$/))
+            || cells.find((c) => c && c.includes('콘서트') && c.includes('['))
+            || '';
+          const qty = parseInt(cells[24]) || 1;
+          const dateCell = cells.find((c) => c && c.match(/^20\d{2}[\.\-]\d{2}[\.\-]\d{2}/)) || '';
+          const statusCell = cells.find((c) => c && (
+            c.includes('취소') || c.includes('반품') || c.includes('배송') ||
+            c.includes('결제') || c.includes('발주') || c.includes('구매확인')
+          )) || '';
+          if (product) {
+            result.push({
+              date: dateCell.replace(/-/g, '.').substring(0, 10),
+              product,
+              qty,
+              status: statusCell,
+            });
+          }
+        }
+        return result;
+      }
+
+      // --- 방식 2: 표준 테이블 구조 ---
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+        if (cells.length < 3) continue;
+
+        const dateCell = cells.find((c) => c && c.match(/^20\d{2}[\.\-]\d{2}[\.\-]\d{2}/)) || '';
+        const product = cells.find((c) => c && c.match(/^\[.+\].*석$/))
+          || cells.find((c) => c && c.includes('콘서트') && c.includes('['))
+          || '';
+        const qtyCell = cells.find((c) => c && c.match(/^\d{1,3}$/) && parseInt(c) > 0);
+        const statusCell = cells.find((c) => c && (
+          c.includes('취소') || c.includes('반품') || c.includes('배송') ||
+          c.includes('결제') || c.includes('발주') || c.includes('구매확인')
+        )) || '';
+
+        if (product) {
+          result.push({
+            date: dateCell.replace(/-/g, '.').substring(0, 10),
+            product,
+            qty: qtyCell ? parseInt(qtyCell) : 1,
+            status: statusCell,
+          });
+        }
+      }
+      return result;
+    });
+
+    if (pageOrders.length === 0) break;
+    orders.push(...pageOrders);
+
+    // 다음 페이지
+    pageNum++;
+    const hasNext = await frame.evaluate((nextNum) => {
+      const allEls = document.querySelectorAll('a, button, span[onclick], li[onclick]');
+      for (const el of allEls) {
+        const t = el.innerText?.trim();
+        if (t === String(nextNum) && (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
+          el.click(); return true;
+        }
+      }
+      for (const el of allEls) {
+        const t = el.innerText?.trim();
+        if ((t === '다음' || t === '>' || t === '›' || t === '»') &&
+            (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
+          el.click(); return true;
+        }
+      }
+      return false;
+    }, pageNum);
+    if (!hasNext) break;
+    await frame.waitForTimeout(3000);
   }
 
   console.log(`   📦 총 ${orders.length}개 주문`);
