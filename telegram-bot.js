@@ -68,6 +68,7 @@ let lastUpdateId = 0;
 let isSalesRunning = false;
 let isSmartstoreRunning = false;
 let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
+let isEnsureBrowserRunning = false; // ensureBrowser 동시 호출 방지
 
 let browser = null;
 let smartstoreCtx = null;
@@ -367,6 +368,8 @@ async function ppurioAutoRelogin() {
 // 스마트스토어 세션 keep-alive (페이지 방문 + 세션 갱신)
 async function smartstoreKeepAlive() {
   if (!smartstorePage || !smartstoreCtx) return;
+  // 주문 확인 중이면 충돌 방지
+  if (isSmartstoreRunning) { console.log('🔄 keep-alive: 주문 확인 중 → 스킵'); return; }
 
   try {
     // 페이지가 살아있는지 확인
@@ -411,6 +414,7 @@ async function smartstoreKeepAlive() {
 // 뿌리오 세션 keep-alive (페이지 새로고침 + 세션 갱신)
 async function ppurioKeepAlive() {
   if (!ppurioPage || !ppurioCtx) return;
+  if (isSmartstoreRunning) { console.log('🔄 뿌리오 keep-alive: 작업 중 → 스킵'); return; }
 
   try {
     // 페이지가 살아있는지 확인
@@ -452,6 +456,20 @@ async function ppurioKeepAlive() {
 }
 
 async function ensureBrowser() {
+  // 동시 호출 방지: 다른 곳에서 이미 초기화 중이면 완료될 때까지 대기
+  if (isEnsureBrowserRunning) {
+    console.log('   ⏳ ensureBrowser 이미 실행 중, 대기...');
+    while (isEnsureBrowserRunning) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    // 다른 호출이 완료된 후 브라우저가 정상이면 리턴
+    if (browser && smartstorePage) {
+      try { await smartstorePage.evaluate(() => true); return; } catch {}
+    }
+  }
+  isEnsureBrowserRunning = true;
+
+  try {
   // 스마트스토어 + 뿌리오 둘 다 살아있는지 확인
   if (browser && smartstorePage) {
     let ssOk = false;
@@ -589,6 +607,9 @@ async function ensureBrowser() {
         await sendMessage('⚠️ <b>뿌리오 세션 만료</b>\n\n자동 재로그인 실패. 터미널에서 실행:\n<code>node setup-login.js ppurio</code>\n그 후 <code>봇재시작</code> 입력');
       }
     }
+  }
+  } finally {
+    isEnsureBrowserRunning = false;
   }
 }
 
@@ -1135,8 +1156,14 @@ async function searchNolticketPerformances() {
   console.log('🔍 놀티켓 공연 검색 중...');
   
   let searchBrowser = null;
+  // 60초 안전장치: 검색이 너무 오래 걸리면 브라우저 강제 종료
+  let searchTimeout = null;
   try {
     searchBrowser = await chromium.launch(getBrowserLaunchOptions());
+    searchTimeout = setTimeout(async () => {
+      console.log('⚠️ 연관공연 검색 60초 타임아웃 → 브라우저 강제 종료');
+      if (searchBrowser) { await searchBrowser.close().catch(() => {}); searchBrowser = null; }
+    }, 60000);
     const ctx = await searchBrowser.newContext();
     const page = await ctx.newPage();
     page.setDefaultTimeout(30000);
@@ -1190,6 +1217,7 @@ async function searchNolticketPerformances() {
       return results;
     });
 
+    if (searchTimeout) clearTimeout(searchTimeout);
     await searchBrowser.close();
     searchBrowser = null;
 
@@ -1210,6 +1238,7 @@ async function searchNolticketPerformances() {
     return msg;
 
   } catch (e) {
+    if (searchTimeout) clearTimeout(searchTimeout);
     if (searchBrowser) await searchBrowser.close().catch(() => {});
     throw e;
   }
@@ -2373,6 +2402,14 @@ process.on('unhandledRejection', (err) => {
 // ============================================================
 // 시작
 // ============================================================
+
+// Windows: 시작 시 이전 좀비 브라우저 프로세스 정리
+if (process.platform === 'win32') {
+  try {
+    execSync('taskkill /F /IM chrome-headless-shell.exe /T 2>nul', { timeout: 5000 });
+    console.log('🧹 시작 시 잔여 chrome-headless-shell 프로세스 정리');
+  } catch {}
+}
 
 startPolling();
 startAutoSales();
