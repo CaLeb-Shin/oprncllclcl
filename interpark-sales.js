@@ -1,4 +1,27 @@
 const { chromium } = require('playwright');
+const fs = require('fs');
+
+// Windows headless shell 콘솔 창 방지
+function getBrowserLaunchOptions() {
+  const opts = {
+    headless: true,
+    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'],
+  };
+  if (process.platform === 'win32') {
+    try {
+      const defaultPath = chromium.executablePath();
+      if (defaultPath.includes('headless_shell') || defaultPath.includes('chrome-headless-shell')) {
+        const fullChromePath = defaultPath
+          .replace(/chromium_headless_shell-(\d+)/, 'chromium-$1')
+          .replace(/chrome-headless-shell-win64[\\\/]chrome-headless-shell\.exe/i, 'chrome-win\\chrome.exe');
+        if (fs.existsSync(fullChromePath)) {
+          opts.executablePath = fullChromePath;
+        }
+      }
+    } catch {}
+  }
+  return opts;
+}
 
 // 설정
 const CONFIG = {
@@ -68,10 +91,7 @@ async function sendTelegram(message) {
 
 // 메인 스크래핑 함수
 async function scrapeSales() {
-  const browser = await chromium.launch({ 
-    headless: true,
-    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--window-position=-9999,-9999'],
-  });
+  const browser = await chromium.launch(getBrowserLaunchOptions());
   
   const context = await browser.newContext();
   const page = await context.newPage();

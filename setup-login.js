@@ -23,6 +23,23 @@ function waitForEnter(prompt) {
 const SMARTSTORE_STATE = path.join(__dirname, 'smartstore-state.json');
 const PPURIO_STATE = path.join(__dirname, 'ppurio-state.json');
 
+// Windows headless shell 콘솔 창 방지 (검증용)
+function getHeadlessOptions() {
+  const opts = { headless: true };
+  if (process.platform === 'win32') {
+    try {
+      const dp = chromium.executablePath();
+      if (dp.includes('headless_shell') || dp.includes('chrome-headless-shell')) {
+        const fp = dp
+          .replace(/chromium_headless_shell-(\d+)/, 'chromium-$1')
+          .replace(/chrome-headless-shell-win64[\\\/]chrome-headless-shell\.exe/i, 'chrome-win\\chrome.exe');
+        if (fs.existsSync(fp)) opts.executablePath = fp;
+      }
+    } catch {}
+  }
+  return opts;
+}
+
 const args = process.argv.slice(2);
 const forceAll = args.includes('--force');
 const onlySmartstore = args.includes('smartstore');
@@ -119,7 +136,7 @@ async function setupSmartStore() {
     // headless로 검증
     console.log('');
     console.log('🔬 저장된 세션 검증 중...');
-    const testBrowser = await chromium.launch({ headless: true });
+    const testBrowser = await chromium.launch(getHeadlessOptions());
     const testCtx = await testBrowser.newContext({ storageState: SMARTSTORE_STATE });
     const testPage = await testCtx.newPage();
     await testPage.goto('https://sell.smartstore.naver.com/#/home/dashboard', { waitUntil: 'domcontentloaded' });
@@ -236,7 +253,7 @@ async function isSessionValid(stateFile, url, checkFn) {
   
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch(getHeadlessOptions());
     const ctx = await browser.newContext({ storageState: stateFile });
     const page = await ctx.newPage();
     await page.goto(url);

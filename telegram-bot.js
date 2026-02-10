@@ -1,8 +1,37 @@
 const https = require('https');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+
+// Windows에서 chrome-headless-shell 콘솔 창 방지
+// → 일반 Chromium 실행파일 사용
+function getBrowserLaunchOptions() {
+  const opts = {
+    headless: true,
+    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'],
+  };
+
+  if (process.platform === 'win32') {
+    try {
+      const defaultPath = chromium.executablePath();
+      if (defaultPath.includes('headless_shell') || defaultPath.includes('chrome-headless-shell')) {
+        // chrome-headless-shell → 일반 chromium 경로로 변환
+        const fullChromePath = defaultPath
+          .replace(/chromium_headless_shell-(\d+)/, 'chromium-$1')
+          .replace(/chrome-headless-shell-win64[\\\/]chrome-headless-shell\.exe/i, 'chrome-win\\chrome.exe');
+        if (fs.existsSync(fullChromePath)) {
+          opts.executablePath = fullChromePath;
+          console.log('🌐 Windows: 일반 Chromium 사용 (콘솔 창 방지)');
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ Chromium 경로 확인 실패, 기본값 사용');
+    }
+  }
+
+  return opts;
+}
 
 // ============================================================
 // 설정
@@ -198,6 +227,17 @@ async function closeBrowser() {
   smartstorePage = null;
   ppurioCtx = null;
   ppurioPage = null;
+
+  // Windows: 혹시 남아있는 chrome-headless-shell 프로세스 정리
+  if (process.platform === 'win32') {
+    try {
+      execSync('taskkill /F /IM chrome-headless-shell.exe /T 2>nul', { timeout: 5000 });
+      console.log('🧹 잔여 chrome-headless-shell 프로세스 정리');
+    } catch {} // 실행 중인 프로세스 없으면 무시
+    try {
+      execSync('taskkill /F /IM chrome.exe /FI "WINDOWTITLE eq about:blank" /T 2>nul', { timeout: 5000 });
+    } catch {}
+  }
 }
 
 // 뿌리오 로그인 상태 확인 (정확한 판별)
@@ -432,10 +472,7 @@ async function ensureBrowser() {
   }
 
   console.log('🌐 브라우저 초기화...');
-  browser = await chromium.launch({ 
-    headless: true,
-    args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--window-position=-9999,-9999'],
-  });
+  browser = await chromium.launch(getBrowserLaunchOptions());
 
   // 스마트스토어
   if (!fs.existsSync(CONFIG.smartstoreStateFile)) {
@@ -1099,10 +1136,7 @@ async function searchNolticketPerformances() {
   
   let searchBrowser = null;
   try {
-    searchBrowser = await chromium.launch({ 
-      headless: true,
-      args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--window-position=-9999,-9999'],
-    });
+    searchBrowser = await chromium.launch(getBrowserLaunchOptions());
     const ctx = await searchBrowser.newContext();
     const page = await ctx.newPage();
     page.setDefaultTimeout(30000);
