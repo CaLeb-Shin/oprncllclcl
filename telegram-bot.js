@@ -1575,13 +1575,17 @@ const PERFORMANCES = {
   '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬' },
 };
 
-function parseProductInfo(productStr) {
+function parseProductInfo(productStr, optionInfo) {
   // "[대구] MelON(멜론) 디즈니 + 지브리 오케스트라 콘서트 [비지정석] 대구, S석"
   const regionMatch = productStr.match(/^\[([^\]]+)\]/);
   const region = regionMatch ? regionMatch[1] : '기타';
 
   const seatMatch = productStr.match(/,\s*(\S+석)\s*$/);
-  const seat = seatMatch ? seatMatch[1] : '미분류';
+  // fallback 1: 옵션정보(cells[8])에서 좌석 찾기 (초기 상품용)
+  const optionSeatMatch = !seatMatch && optionInfo && optionInfo.match(/(\S*석)/);
+  const seat = seatMatch ? seatMatch[1]
+    : optionSeatMatch ? optionSeatMatch[1]
+    : '미분류';
 
   // 공연 종류 판별
   const isDisney = productStr.includes('디즈니');
@@ -1668,7 +1672,8 @@ async function getStoreSalesSummary() {
 
         const qty = parseInt(cells[9]) || 1;
 
-        orders.push({ date: date.substring(0, 10), product, qty });
+        const optionInfo = cells[8] || '';
+        orders.push({ date: date.substring(0, 10), product, qty, optionInfo });
       }
       return orders;
     });
@@ -1714,7 +1719,7 @@ async function getStoreSalesSummary() {
   const summary = {};
 
   for (const order of allOrders) {
-    const info = parseProductInfo(order.product);
+    const info = parseProductInfo(order.product, order.optionInfo);
 
     // 오늘 이후 공연만 포함
     if (!isPerfFuture(info.perfKey)) continue;

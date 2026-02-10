@@ -89,19 +89,54 @@ const fs = require('fs');
     console.log(`행 ${h.rowIdx} (${h.cellCount}셀): ${h.cells.join(' | ')}`);
   }
 
-  // 데이터행 전체 셀 출력
+  // 데이터행 전체 셀 출력 (최근 2개 + 대구 주문)
   console.log('\n========== 데이터행 (전체 셀) ==========\n');
   for (const d of analysis.dataRows) {
     console.log(`행 ${d.rowIdx} (${d.cellCount}셀):`);
     for (let j = 0; j < d.cells.length; j++) {
       const val = (d.cells[j] || '(빈값)').substring(0, 80);
-      // 중요 데이터 하이라이트
       let marker = '';
       if (val.match(/^20\d{2}\.\d{2}\.\d{2}/)) marker = ' ← 날짜!';
       if (val.match(/^\[.+\]/)) marker = ' ← 상품명!';
       if (val.match(/^[1-9]\d?$/) && !marker) marker = ' ← 수량?';
       if (val.includes('배송') || val.includes('결제') || val.includes('취소') || val.includes('구매확인')) marker = ' ← 상태!';
+      if (val.includes('석') && !marker) marker = ' ← 좌석?';
       console.log(`  [${j}] ${val}${marker}`);
+    }
+    console.log('');
+  }
+
+  // 미분류 주문 찾기: 상품명에 ", ~석" 없는 주문의 cells[8] 확인
+  console.log('========== 미분류(좌석없음) 주문 찾기 ==========\n');
+  const unclassifiedRows = await frame.evaluate(() => {
+    const rows = document.querySelectorAll('table tbody tr');
+    const result = [];
+    for (let i = 0; i < rows.length; i++) {
+      const cells = Array.from(rows[i].querySelectorAll('td')).map((td) => td.innerText?.trim());
+      if (cells.length >= 15) {
+        const product = cells[7] || '';
+        const hasSeatInName = /,\s*\S+석\s*$/.test(product);
+        if (product.match(/^\[.+\]/) && !hasSeatInName) {
+          if (result.length < 5) result.push({ rowIdx: i, product, cell8: cells[8], allCells: cells });
+        }
+      }
+    }
+    return result;
+  });
+  if (unclassifiedRows.length === 0) {
+    console.log('  미분류 주문 없음 (이 페이지에는)');
+  }
+  for (const d of unclassifiedRows) {
+    console.log(`행 ${d.rowIdx}:`);
+    console.log(`  상품명[7]: ${d.product}`);
+    console.log(`  옵션[8]: ${d.cell8 || '(빈값)'}`);
+    // 모든 셀 중 "석" 포함하는 것 찾기
+    for (let j = 0; j < d.allCells.length; j++) {
+      if (j === 7) continue; // 상품명 스킵
+      const val = d.allCells[j] || '';
+      if (val.includes('석')) {
+        console.log(`  cells[${j}]: ${val} ← 좌석 발견!`);
+      }
     }
     console.log('');
   }
@@ -153,7 +188,8 @@ const fs = require('fs');
       const isCancelled = cells.some((c) => c && (c.startsWith('취소완료') || c.startsWith('반품완료')));
 
       if (productName && date && !isCancelled) {
-        result.push({ orderId, product: productName.substring(0, 50), qty, date });
+        const optionInfo = cells[prodIdx >= 0 ? prodIdx + 1 : 8] || cells[8] || '';
+        result.push({ orderId, product: productName.substring(0, 50), qty, date, optionInfo });
       }
     }
     return { orders: result, headerCount: headerOrderIds.length, dataCount: dataRows.length };
@@ -175,7 +211,8 @@ const fs = require('fs');
     const isDisney = o.product.includes('디즈니');
     const key = `${region}_${isDisney ? '디즈니' : '지브리'}`;
     const seatMatch = o.product.match(/,\s*(\S+석)\s*$/);
-    const seat = seatMatch ? seatMatch[1] : '미분류';
+    const optionSeatMatch = !seatMatch && o.optionInfo && o.optionInfo.match(/(\S*석)/);
+    const seat = seatMatch ? seatMatch[1] : optionSeatMatch ? optionSeatMatch[1] : '미분류';
 
     if (!perfTotals[key]) perfTotals[key] = {};
     perfTotals[key][seat] = (perfTotals[key][seat] || 0) + o.qty;
