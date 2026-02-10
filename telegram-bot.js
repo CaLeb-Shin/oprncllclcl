@@ -1624,13 +1624,34 @@ async function getStoreSalesSummary() {
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
 
+  // 주문상태: "전체" 선택 (배송완료/구매확인 주문도 포함되도록)
+  try {
+    let statusSet = false;
+    // 1) 셀렉트 박스 방식
+    const statusSelect = await frame.$('select[name="orderStatus"], select[name="status"], select[title*="상태"]');
+    if (statusSelect) {
+      await statusSelect.selectOption({ value: '' }).catch(() =>
+        statusSelect.selectOption({ label: '전체' }).catch(() => {})
+      );
+      statusSet = true;
+    }
+    // 2) 탭/버튼 방식 - "전체" 탭 클릭
+    if (!statusSet) {
+      try { await frame.click('a:has-text("전체"), button:has-text("전체"), [role="tab"]:has-text("전체")', { timeout: 2000 }); statusSet = true; } catch {}
+    }
+    // 3) 라디오/체크박스 방식
+    if (!statusSet) {
+      try { await frame.click('label:has-text("전체"), input[value="ALL"], input[value=""]', { timeout: 2000 }); } catch {}
+    }
+    await frame.waitForTimeout(500);
+  } catch {}
+
   // 페이지당 표시 건수 최대화 (500건)
   try {
     const pageSizeSelect = await frame.$('select[name="pageSize"], select[class*="page"], select[title*="건씩"]');
     if (pageSizeSelect) {
       await pageSizeSelect.selectOption({ value: '500' }).catch(() => {});
     } else {
-      // select가 없으면 텍스트로 찾기
       await frame.click('text=500건씩 보기', { timeout: 2000 }).catch(() => {});
     }
     await frame.waitForTimeout(500);
