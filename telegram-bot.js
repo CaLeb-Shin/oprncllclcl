@@ -378,7 +378,96 @@ async function ppurioAutoRelogin() {
   }
 }
 
-// 스마트스토어 세션 keep-alive (페이지 방문 + 세션 갱신)
+// 스마트스토어 자동 재로그인 (네이버 NID 쿠키가 살아있으면 자동 복구)
+async function smartstoreAutoRelogin() {
+  console.log('🔐 스마트스토어 자동 재로그인 시도...');
+
+  // 기존 스마트스토어 컨텍스트 정리
+  if (smartstorePage && !smartstorePage.isClosed()) await smartstorePage.close().catch(() => {});
+  if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+  smartstorePage = null;
+  smartstoreCtx = null;
+
+  if (!browser) return false;
+  if (!fs.existsSync(CONFIG.smartstoreStateFile)) return false;
+
+  try {
+    // 저장된 세션(네이버 NID 쿠키 포함)으로 새 컨텍스트
+    smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
+    smartstorePage = await smartstoreCtx.newPage();
+    smartstorePage.setDefaultTimeout(60_000);
+
+    // 1. 먼저 네이버 로그인 상태 확인/갱신 (NID 쿠키 리프레시)
+    console.log('   🔄 네이버 쿠키 확인 중...');
+    await smartstorePage.goto('https://nid.naver.com/nidlogin.login', { timeout: 20000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(2000);
+
+    // 네이버 로그인 상태면 자동 리다이렉트됨 (로그인 폼이 안 보임)
+    const naverUrl = smartstorePage.url();
+    const naverLoggedIn = !naverUrl.includes('nidlogin.login') || await smartstorePage.evaluate(() => {
+      return document.body.textContent.includes('로그아웃') ||
+             document.querySelector('#gnb_logout_button') !== null ||
+             document.querySelector('.MyView-module__btn_logout') !== null;
+    }).catch(() => false);
+
+    if (!naverLoggedIn) {
+      console.log('   ❌ 네이버 NID 쿠키 만료됨 - 수동 재로그인 필요');
+      await smartstorePage.close().catch(() => {});
+      smartstorePage = null;
+      if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+      smartstoreCtx = null;
+      return false;
+    }
+    console.log('   ✅ 네이버 쿠키 유효');
+
+    // 2. 스마트스토어 로그인 페이지 접속 (네이버 SSO로 자동 로그인)
+    await smartstorePage.goto('https://sell.smartstore.naver.com/', { timeout: 30000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(5000);
+
+    // 3. "로그인하기" 버튼이 있으면 클릭
+    try {
+      const loginBtn = await smartstorePage.$('a[href*="login"], button:has-text("로그인"), .login-btn, [class*="login"]');
+      if (loginBtn) {
+        await loginBtn.click();
+        await smartstorePage.waitForTimeout(5000);
+      }
+    } catch {}
+
+    // 4. 대시보드 확인
+    await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(5000);
+
+    const ssLoggedIn = await smartstorePage.evaluate(() =>
+      document.body.textContent.includes('판매관리') ||
+      document.body.textContent.includes('정산관리') ||
+      document.body.textContent.includes('주문/배송') ||
+      document.body.textContent.includes('상품관리')
+    );
+
+    if (ssLoggedIn) {
+      // 세션 파일 갱신
+      await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+      console.log('   ✅ 스마트스토어 자동 재로그인 성공! 세션 갱신됨');
+      return true;
+    }
+
+    console.log('   ❌ 스마트스토어 자동 재로그인 실패 (대시보드 접근 불가)');
+    await smartstorePage.close().catch(() => {});
+    smartstorePage = null;
+    if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+    smartstoreCtx = null;
+    return false;
+  } catch (err) {
+    console.error('   ❌ 스마트스토어 재로그인 오류:', err.message);
+    if (smartstorePage) await smartstorePage.close().catch(() => {});
+    smartstorePage = null;
+    if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+    smartstoreCtx = null;
+    return false;
+  }
+}
+
+// 스마트스토어 세션 keep-alive (페이지 방문 + 네이버 쿠키 갱신 + 세션 갱신)
 async function smartstoreKeepAlive() {
   if (!smartstorePage || !smartstoreCtx) return;
   // 주문 확인 중이면 충돌 방지
@@ -389,7 +478,16 @@ async function smartstoreKeepAlive() {
     // 페이지가 살아있는지 확인
     await smartstorePage.evaluate(() => true);
 
-    // 스마트스토어 메인 페이지 방문 (세션 갱신)
+    // 1. 네이버 쿠키 리프레시 (NID 쿠키 서버측 만료 방지)
+    try {
+      await smartstorePage.goto('https://nid.naver.com/nidlogin.login', { timeout: 15000, waitUntil: 'domcontentloaded' });
+      await smartstorePage.waitForTimeout(2000);
+      console.log('🔄 네이버 쿠키 리프레시 OK');
+    } catch (e) {
+      console.log('⚠️ 네이버 쿠키 리프레시 실패:', e.message.substring(0, 50));
+    }
+
+    // 2. 스마트스토어 메인 페이지 방문 (세션 갱신)
     await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
     await smartstorePage.waitForTimeout(4000);
 
@@ -401,29 +499,31 @@ async function smartstoreKeepAlive() {
     );
 
     if (isOk) {
-      // 세션 파일도 갱신
+      // 세션 파일도 갱신 (갱신된 네이버+스마트스토어 쿠키 모두 저장)
       await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
       console.log('🔄 스마트스토어 세션 keep-alive OK');
     } else {
-      console.log('⚠️ 스마트스토어 세션 만료 감지 (keep-alive)');
-      // 세션 만료 → 브라우저 재초기화 시도
-      await closeBrowser();
-      try {
-        await ensureBrowser();
-        console.log('🔄 스마트스토어 세션 자동 복구 성공');
-      } catch (e) {
-        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>스마트스토어 세션 만료</b>\n\n서버에서 실행:\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code> 입력');
+      console.log('⚠️ 스마트스토어 세션 만료 감지 (keep-alive) → 자동 재로그인 시도');
+      // 세션 만료 → 자동 재로그인 시도 (네이버 NID 쿠키로)
+      const ok = await smartstoreAutoRelogin();
+      if (!ok) {
+        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>스마트스토어 세션 만료</b>\n\n자동 재로그인 실패. 서버에서 실행:\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code> 입력');
+      } else {
+        console.log('🔐 스마트스토어 자동 재로그인 성공!');
       }
     }
   } catch (err) {
     console.log('⚠️ 스마트스토어 keep-alive 오류:', err.message);
-    // 페이지가 죽었으면 재초기화 (최대 60초)
+    // 페이지가 죽었으면 자동 재로그인 시도
     try {
-      await closeBrowser();
-      await Promise.race([
-        ensureBrowser(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('keep-alive 복구 타임아웃')), 60000)),
-      ]);
+      const ok = await smartstoreAutoRelogin();
+      if (!ok) {
+        await closeBrowser();
+        await Promise.race([
+          ensureBrowser(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('keep-alive 복구 타임아웃')), 60000)),
+        ]);
+      }
     } catch (e) {
       console.log('⚠️ keep-alive 복구 실패:', e.message);
       isEnsureBrowserRunning = false;
@@ -597,8 +697,14 @@ async function ensureBrowser() {
     } catch {}
     
     if (!ssLoggedIn) {
-      await closeBrowser(true);
-      throw new Error('스마트스토어 세션 만료. 봇재시작 후 다시 시도해주세요.');
+      // 마지막 수단: 네이버 NID 쿠키로 자동 재로그인 시도
+      console.log('   🔐 자동 재로그인 시도...');
+      const reloginOk = await smartstoreAutoRelogin();
+      if (!reloginOk) {
+        await closeBrowser(true);
+        throw new Error('스마트스토어 세션 만료. 자동 재로그인 실패.');
+      }
+      console.log('   ✅ 자동 재로그인 성공!');
     }
   }
   // 세션 갱신 저장
@@ -2417,8 +2523,8 @@ function startSmartstoreKeepAlive() {
     } catch (err) {
       console.error('스마트스토어 keep-alive 오류:', err.message);
     }
-  }, 10 * 60 * 1000); // 10분
-  console.log('⏰ 스마트스토어 세션 10분 keep-alive 설정');
+  }, 5 * 60 * 1000); // 5분
+  console.log('⏰ 스마트스토어 세션 5분 keep-alive 설정');
 }
 
 function startPpurioKeepAlive() {
