@@ -1624,6 +1624,18 @@ async function getStoreSalesSummary() {
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
 
+  // 페이지당 표시 건수 최대화 (500건)
+  try {
+    const pageSizeSelect = await frame.$('select[name="pageSize"], select[class*="page"], select[title*="건씩"]');
+    if (pageSizeSelect) {
+      await pageSizeSelect.selectOption({ value: '500' }).catch(() => {});
+    } else {
+      // select가 없으면 텍스트로 찾기
+      await frame.click('text=500건씩 보기', { timeout: 2000 }).catch(() => {});
+    }
+    await frame.waitForTimeout(500);
+  } catch {}
+
   // 검색
   try { await frame.click('.btn-search', { timeout: 3000 }); } catch {}
   try { await smartstorePage.click('.btn-search', { timeout: 2000 }); } catch {}
@@ -1632,27 +1644,64 @@ async function getStoreSalesSummary() {
   const frame2 = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
   const targetFrame = frame2 || frame;
 
-  // 테이블에서 주문 추출
-  const orders = await targetFrame.evaluate(() => {
-    const tables = document.querySelectorAll('table');
-    const result = [];
-    for (const table of tables) {
-      for (const tr of table.querySelectorAll('tbody tr')) {
-        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-        const dateCell = cells.find((c) => c && c.match(/^20\d{2}\.\d{2}\.\d{2}/));
-        if (!dateCell) continue;
-        const productCell = cells.reduce((a, b) => (a.length > b.length ? a : b), '');
-        const qtyCell = cells.find((c) => c && c.match(/^\d{1,2}$/) && parseInt(c) > 0);
-        const statusCell = cells.find((c) =>
-          c && (c.includes('배송') || c.includes('결제') || c.includes('취소') || c.includes('발송'))
-        );
-        result.push({ date: dateCell, product: productCell, qty: qtyCell ? parseInt(qtyCell) : 1, status: statusCell || '' });
-      }
-    }
-    return result;
-  });
+  // 모든 페이지에서 주문 추출
+  const orders = [];
+  let pageNum = 1;
+  const maxPages = 50;
 
-  console.log(`   📦 총 ${orders.length}개 주문`);
+  while (pageNum <= maxPages) {
+    // 현재 페이지 테이블에서 주문 추출
+    const pageOrders = await targetFrame.evaluate(() => {
+      const tables = document.querySelectorAll('table');
+      const result = [];
+      for (const table of tables) {
+        for (const tr of table.querySelectorAll('tbody tr')) {
+          const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+          const dateCell = cells.find((c) => c && c.match(/^20\d{2}\.\d{2}\.\d{2}/));
+          if (!dateCell) continue;
+          const productCell = cells.reduce((a, b) => (a.length > b.length ? a : b), '');
+          const qtyCell = cells.find((c) => c && c.match(/^\d{1,2}$/) && parseInt(c) > 0);
+          const statusCell = cells.find((c) =>
+            c && (c.includes('배송') || c.includes('결제') || c.includes('취소') || c.includes('발송'))
+          );
+          result.push({ date: dateCell, product: productCell, qty: qtyCell ? parseInt(qtyCell) : 1, status: statusCell || '' });
+        }
+      }
+      return result;
+    });
+
+    orders.push(...pageOrders);
+
+    if (pageOrders.length === 0 && pageNum > 1) break;
+
+    // 다음 페이지로 이동
+    pageNum++;
+    const hasNext = await targetFrame.evaluate((nextNum) => {
+      // 페이지네이션에서 다음 페이지 번호 클릭
+      const pageLinks = document.querySelectorAll('.pagination a, .paging a, [class*="page"] a, [class*="paging"] a, a[class*="btn_page"]');
+      for (const el of pageLinks) {
+        const t = el.innerText?.trim();
+        if (t === String(nextNum)) { el.click(); return true; }
+      }
+      // "다음" / ">" 버튼
+      for (const el of pageLinks) {
+        const t = el.innerText?.trim();
+        if (t === '다음' || t === '>' || t === '›' || t === '»') { el.click(); return true; }
+      }
+      // 일반 a/button에서도 찾기
+      const allClickable = document.querySelectorAll('a, button');
+      for (const el of allClickable) {
+        const t = el.innerText?.trim();
+        if (t === String(nextNum) && el.closest('[class*="pag"]')) { el.click(); return true; }
+      }
+      return false;
+    }, pageNum);
+
+    if (!hasNext) break;
+    await targetFrame.waitForTimeout(3000);
+  }
+
+  console.log(`   📦 총 ${orders.length}개 주문 (${pageNum - 1}페이지)`);
 
   const today = new Date();
   const todayStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, '0')}.${String(today.getDate()).padStart(2, '0')}`;
@@ -1664,7 +1713,7 @@ async function getStoreSalesSummary() {
   const summary = {};
 
   for (const order of orders) {
-    if (order.status.includes('취소')) continue;
+    if (order.status?.includes('취소')) continue;
 
     const datePrefix = order.date.substring(0, 10);
     const info = parseProductInfo(order.product);
