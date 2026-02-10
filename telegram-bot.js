@@ -403,11 +403,17 @@ async function smartstoreKeepAlive() {
     }
   } catch (err) {
     console.log('⚠️ 스마트스토어 keep-alive 오류:', err.message);
-    // 페이지가 죽었으면 재초기화
+    // 페이지가 죽었으면 재초기화 (최대 60초)
     try {
       await closeBrowser();
-      await ensureBrowser();
-    } catch {}
+      await Promise.race([
+        ensureBrowser(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('keep-alive 복구 타임아웃')), 60000)),
+      ]);
+    } catch (e) {
+      console.log('⚠️ keep-alive 복구 실패:', e.message);
+      isEnsureBrowserRunning = false;
+    }
   }
 }
 
@@ -456,11 +462,17 @@ async function ppurioKeepAlive() {
 }
 
 async function ensureBrowser() {
-  // 동시 호출 방지: 다른 곳에서 이미 초기화 중이면 완료될 때까지 대기
+  // 동시 호출 방지: 다른 곳에서 이미 초기화 중이면 최대 30초 대기
   if (isEnsureBrowserRunning) {
     console.log('   ⏳ ensureBrowser 이미 실행 중, 대기...');
-    while (isEnsureBrowserRunning) {
+    let waited = 0;
+    while (isEnsureBrowserRunning && waited < 30000) {
       await new Promise(r => setTimeout(r, 2000));
+      waited += 2000;
+    }
+    if (isEnsureBrowserRunning) {
+      console.log('   ⚠️ ensureBrowser 30초 대기 초과, 강제 진행');
+      isEnsureBrowserRunning = false;
     }
     // 다른 호출이 완료된 후 브라우저가 정상이면 리턴
     if (browser && smartstorePage) {
