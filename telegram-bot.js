@@ -1610,90 +1610,149 @@ async function getStoreSalesSummary() {
   console.log('📦 스토어 판매현황 조회...');
   await ensureBrowser();
 
-  // 원본 그대로: 발주(주문)확인 페이지 → 오늘/어제 판매 정확히 표시됨
-  await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
-  await smartstorePage.waitForTimeout(5000);
+  // 배송현황 페이지 → 3개월 검색으로 전체 주문(모든 상태) 조회
+  await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
+  await smartstorePage.waitForTimeout(4000);
 
   // 팝업 닫기
   try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
   await smartstorePage.waitForTimeout(1000);
 
-  const frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
-  if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
+  // iframe 찾기 (/o/v3/n/sale/delivery)
+  let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  if (!frame) {
+    await smartstorePage.reload({ timeout: 20000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(4000);
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery'));
+  }
+  if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
 
-  // 기간: 3개월 (전체 누계를 위해)
+  // 3개월 기간 선택 → 검색 (진단으로 확인된 버튼)
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
+  try { await frame.click('.btn-search', { timeout: 3000 }); } catch {
+    try { await frame.click('button:has-text("검색")', { timeout: 2000 }); } catch {}
+  }
+  await smartstorePage.waitForTimeout(6000);
 
-  // 검색
-  try { await frame.click('.btn-search', { timeout: 3000 }); } catch {}
-  try { await smartstorePage.click('.btn-search', { timeout: 2000 }); } catch {}
-  await smartstorePage.waitForTimeout(8000);
+  // 프레임 재획득 (검색 후 갱신될 수 있음)
+  frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/n/sale/delivery')) || frame;
 
-  const frame2 = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
-  const targetFrame = frame2 || frame;
+  // 전체 주문 수집 (페이지네이션 포함)
+  const allOrders = [];
+  let pageNum = 1;
 
-  // 테이블에서 주문 추출 (원본 그대로)
-  const orders = await targetFrame.evaluate(() => {
-    const tables = document.querySelectorAll('table');
-    const result = [];
-    for (const table of tables) {
-      for (const tr of table.querySelectorAll('tbody tr')) {
+  while (pageNum <= 10) {
+    const pageData = await frame.evaluate(() => {
+      const rows = document.querySelectorAll('table tbody tr');
+      const headerOrderIds = [];
+      const dataRows = [];
+
+      for (const tr of rows) {
         const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-        const dateCell = cells.find((c) => c && c.match(/^20\d{2}\.\d{2}\.\d{2}/));
-        if (!dateCell) continue;
-        const productCell = cells.reduce((a, b) => (a.length > b.length ? a : b), '');
-        const qtyCell = cells.find((c) => c && c.match(/^\d{1,2}$/) && parseInt(c) > 0);
-        const statusCell = cells.find((c) =>
-          c && (c.includes('배송') || c.includes('결제') || c.includes('취소') || c.includes('발송'))
-        );
-        result.push({ date: dateCell, product: productCell, qty: qtyCell ? parseInt(qtyCell) : 1, status: statusCell || '' });
+        if (cells.length === 0) continue;
+
+        // 헤더행: 3~10개 셀, 16자리 주문번호 포함
+        if (cells.length >= 3 && cells.length <= 10) {
+          const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
+          if (idCell) headerOrderIds.push(idCell);
+          continue;
+        }
+
+        // 데이터행: 50개+ 셀
+        if (cells.length >= 50) {
+          dataRows.push(cells);
+        }
       }
+
+      const orders = [];
+      for (let i = 0; i < dataRows.length; i++) {
+        const cells = dataRows[i];
+        const orderId = headerOrderIds[i] || `row_${i}`;
+
+        // 상품명: [지역] ... 석 패턴
+        let productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) || '';
+        if (!productName) {
+          productName = cells.find((c) => c && c.match(/^\[.+\]/) && c.length > 20) || '';
+        }
+        // 수량: 셀[24]
+        const qty = parseInt(cells[24]) || 1;
+        // 날짜: YYYY.MM.DD 패턴 (결제일)
+        const dateCell = cells.find((c) => c && c.match(/^20\d{2}\.\d{2}\.\d{2}/));
+        const date = dateCell ? dateCell.substring(0, 10) : '';
+        // 취소/반품 완료 여부 (정확한 상태값만 체크)
+        const cancelStatuses = ['취소완료', '반품완료', '환불완료'];
+        const isCancelled = cells.some((c) => c && cancelStatuses.some((s) => c.startsWith(s)));
+
+        if (productName) {
+          orders.push({ orderId, productName, qty, date, cancelled: isCancelled });
+        }
+      }
+
+      // 총 건수 (디버그용)
+      const bodyText = document.body?.innerText || '';
+      const totalMatch = bodyText.match(/총\s*([\d,]+)\s*건/);
+
+      return {
+        orders,
+        totalText: totalMatch ? totalMatch[0] : '',
+        debug: { headers: headerOrderIds.length, dataRows: dataRows.length, totalRows: rows.length },
+      };
+    });
+
+    const validOrders = pageData.orders.filter((o) => !o.cancelled);
+    allOrders.push(...validOrders);
+    console.log(`   📦 페이지 ${pageNum}: ${validOrders.length}건 (취소제외) ${pageData.totalText} [H:${pageData.debug.headers} D:${pageData.debug.dataRows}]`);
+
+    if (pageData.debug.dataRows === 0) break;
+
+    // 다음 페이지 이동
+    pageNum++;
+    const hasNext = await frame.evaluate((targetPage) => {
+      // 페이지네이션 컨테이너 안에서 페이지 번호 클릭
+      const pagingContainers = document.querySelectorAll('[class*="paging"], [class*="pagination"]');
+      for (const container of pagingContainers) {
+        const links = container.querySelectorAll('a, button');
+        for (const link of links) {
+          if (link.textContent.trim() === String(targetPage)) {
+            link.click();
+            return true;
+          }
+        }
+      }
+      // 폴백: "다음" 버튼
+      const allLinks = document.querySelectorAll('a, button');
+      for (const link of allLinks) {
+        const text = link.textContent.trim();
+        if ((text === '다음' || text === '>' || text === '›') &&
+            !link.classList.contains('disabled') && !link.hasAttribute('disabled')) {
+          link.click();
+          return true;
+        }
+      }
+      return false;
+    }, pageNum).catch(() => false);
+
+    if (!hasNext) {
+      console.log(`   📦 마지막 페이지`);
+      break;
     }
-    return result;
-  });
-
-  console.log(`   📦 페이지 주문: ${orders.length}개`);
-
-  // ★ 판매 이력 누적 저장 (총 판매가 줄어들지 않도록)
-  // 이 페이지는 결제완료(미확인) 주문만 표시하므로, 처리된 주문은 사라짐.
-  // 하지만 이력 파일에 저장해두면 총 판매는 줄어들지 않음.
-  const salesHistoryFile = path.join(__dirname, 'sales-history.json');
-  let salesHistory = {};
-  try { salesHistory = JSON.parse(fs.readFileSync(salesHistoryFile, 'utf8')); } catch {}
-
-  // 현재 페이지 주문을 날짜|공연|좌석별로 집계
-  const pageAgg = {};
-  for (const order of orders) {
-    if ((order.status || '').includes('취소')) continue;
-    const datePrefix = order.date.substring(0, 10);
-    const info = parseProductInfo(order.product);
-    const key = `${datePrefix}|${info.perfKey}|${info.seat}`;
-    pageAgg[key] = (pageAgg[key] || 0) + order.qty;
+    await smartstorePage.waitForTimeout(3000);
   }
 
-  // 이력 업데이트: 현재값이 더 크면 갱신 (한번 올라간 수치는 내려가지 않음)
-  for (const [key, qty] of Object.entries(pageAgg)) {
-    if (!salesHistory[key] || qty > salesHistory[key]) {
-      salesHistory[key] = qty;
-    }
-  }
-  try { fs.writeFileSync(salesHistoryFile, JSON.stringify(salesHistory)); } catch {}
+  console.log(`   📦 전체 유효 주문: ${allOrders.length}건`);
 
+  // --- 오늘/어제/총 판매 집계 ---
   const today = new Date();
   const todayStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, '0')}.${String(today.getDate()).padStart(2, '0')}`;
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = `${yesterday.getFullYear()}.${String(yesterday.getMonth() + 1).padStart(2, '0')}.${String(yesterday.getDate()).padStart(2, '0')}`;
 
-  // 오늘/어제: 현재 페이지 데이터 사용 (원본 그대로)
   const summary = {};
 
-  for (const order of orders) {
-    if ((order.status || '').includes('취소')) continue;
-
-    const datePrefix = order.date.substring(0, 10);
-    const info = parseProductInfo(order.product);
+  for (const order of allOrders) {
+    const info = parseProductInfo(order.productName);
 
     if (!summary[info.perfKey]) {
       summary[info.perfKey] = {
@@ -1706,38 +1765,15 @@ async function getStoreSalesSummary() {
     }
 
     // 오늘/어제
-    let period = null;
-    if (datePrefix === todayStr) period = 'today';
-    else if (datePrefix === yesterdayStr) period = 'yesterday';
-    if (period) {
-      if (!summary[info.perfKey][period][info.seat]) summary[info.perfKey][period][info.seat] = 0;
-      summary[info.perfKey][period][info.seat] += order.qty;
+    if (order.date === todayStr) {
+      summary[info.perfKey].today[info.seat] = (summary[info.perfKey].today[info.seat] || 0) + order.qty;
+    } else if (order.date === yesterdayStr) {
+      summary[info.perfKey].yesterday[info.seat] = (summary[info.perfKey].yesterday[info.seat] || 0) + order.qty;
     }
+
+    // 총 판매 (전체 3개월 데이터)
+    summary[info.perfKey].total[info.seat] = (summary[info.perfKey].total[info.seat] || 0) + order.qty;
   }
-
-  // ★ 총 판매: 누적 이력에서 계산 (처리된 주문도 포함 → 절대 줄어들지 않음)
-  for (const [key, qty] of Object.entries(salesHistory)) {
-    const parts = key.split('|');
-    const perfKey = parts[1];
-    const seat = parts[2];
-    if (!perfKey || !seat) continue;
-
-    if (!summary[perfKey]) {
-      const perfInfo = PERFORMANCES[perfKey];
-      summary[perfKey] = {
-        perfName: perfInfo ? perfInfo.name : perfKey,
-        perfDate: perfInfo ? perfInfo.date : '',
-        today: {},
-        yesterday: {},
-        total: {},
-      };
-    }
-    if (!summary[perfKey].total[seat]) summary[perfKey].total[seat] = 0;
-    summary[perfKey].total[seat] += qty;
-  }
-
-  const historyTotal = Object.values(salesHistory).reduce((s, q) => s + q, 0);
-  console.log(`   📊 누적 이력: ${Object.keys(salesHistory).length}개 항목, 총 ${historyTotal}매`);
 
   // 메시지 생성
   const getDayName = (d) => ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
@@ -1754,7 +1790,7 @@ async function getStoreSalesSummary() {
     return msg;
   }
 
-  // 1) 오늘/어제 판매 (현재 페이지 데이터 - 원본 그대로)
+  // 1) 오늘/어제 판매
   for (const [period, periodLabel] of [['today', todayLabel], ['yesterday', yesterdayLabel]]) {
     let periodTotal = 0;
     let hasOrders = false;
@@ -1763,8 +1799,7 @@ async function getStoreSalesSummary() {
       const seats = Object.entries(perf[period]);
       if (seats.length === 0) continue;
       hasOrders = true;
-      const perfTotal = seats.reduce((sum, [, q]) => sum + q, 0);
-      periodTotal += perfTotal;
+      periodTotal += seats.reduce((sum, [, q]) => sum + q, 0);
     }
 
     const periodName = period === 'today' ? '오늘' : '어제';
@@ -1787,7 +1822,7 @@ async function getStoreSalesSummary() {
     }
   }
 
-  // 2) 공연별 총 판매 (누적 이력 기반 - 절대 줄어들지 않음)
+  // 2) 공연별 총 판매 (3개월 전체 데이터 기반 - 실제 주문 합계)
   msg += `\n━━━━━━━━━━━━━━━━\n`;
   msg += `📊 <b>공연별 총 판매 (취소 제외)</b>\n`;
 
