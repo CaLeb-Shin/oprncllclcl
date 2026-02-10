@@ -1624,38 +1624,32 @@ async function getStoreSalesSummary() {
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
 
-  // 주문상태: "전체" 선택 (배송완료/구매확인 주문도 포함되도록)
-  try {
-    let statusSet = false;
-    // 1) 셀렉트 박스 방식
-    const statusSelect = await frame.$('select[name="orderStatus"], select[name="status"], select[title*="상태"]');
-    if (statusSelect) {
-      await statusSelect.selectOption({ value: '' }).catch(() =>
-        statusSelect.selectOption({ label: '전체' }).catch(() => {})
-      );
-      statusSet = true;
-    }
-    // 2) 탭/버튼 방식 - "전체" 탭 클릭
-    if (!statusSet) {
-      try { await frame.click('a:has-text("전체"), button:has-text("전체"), [role="tab"]:has-text("전체")', { timeout: 2000 }); statusSet = true; } catch {}
-    }
-    // 3) 라디오/체크박스 방식
-    if (!statusSet) {
-      try { await frame.click('label:has-text("전체"), input[value="ALL"], input[value=""]', { timeout: 2000 }); } catch {}
-    }
-    await frame.waitForTimeout(500);
-  } catch {}
+  // 검색 전: 페이지에서 필터 상태를 JS로 직접 조작 (안전하게)
+  await frame.evaluate(() => {
+    // 모든 select 요소 검사 → 주문상태 select 찾아서 "전체"로, 페이지사이즈 select 찾아서 최대값으로
+    const selects = document.querySelectorAll('select');
+    for (const sel of selects) {
+      const opts = Array.from(sel.options);
+      const optTexts = opts.map(o => o.text);
 
-  // 페이지당 표시 건수 최대화 (500건)
-  try {
-    const pageSizeSelect = await frame.$('select[name="pageSize"], select[class*="page"], select[title*="건씩"]');
-    if (pageSizeSelect) {
-      await pageSizeSelect.selectOption({ value: '500' }).catch(() => {});
-    } else {
-      await frame.click('text=500건씩 보기', { timeout: 2000 }).catch(() => {});
+      // 페이지사이즈 select 감지 (숫자 옵션들: 10, 20, 50, 100, 500...)
+      const numericOpts = opts.filter(o => /^\d+$/.test(o.value) && parseInt(o.value) >= 10);
+      if (numericOpts.length >= 2) {
+        const maxOpt = numericOpts.reduce((a, b) => parseInt(a.value) > parseInt(b.value) ? a : b);
+        sel.value = maxOpt.value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        continue;
+      }
+
+      // 주문상태 select 감지 ("전체" 옵션이 있는 select)
+      const allOpt = opts.find(o => o.text.includes('전체') || o.value === '' || o.value === 'ALL');
+      if (allOpt && (optTexts.some(t => t.includes('결제') || t.includes('배송') || t.includes('발송')))) {
+        sel.value = allOpt.value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     }
-    await frame.waitForTimeout(500);
-  } catch {}
+  });
+  await frame.waitForTimeout(500);
 
   // 검색
   try { await frame.click('.btn-search', { timeout: 3000 }); } catch {}
@@ -1665,14 +1659,47 @@ async function getStoreSalesSummary() {
   const frame2 = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
   const targetFrame = frame2 || frame;
 
+  // 검색 후: 실제 표시된 건수 vs 전체 건수 확인 후 페이지 사이즈 재조정
+  const pageInfo = await targetFrame.evaluate(() => {
+    const bodyText = document.body.innerText;
+    // "총 N건", "N건", "전체 N건" 등에서 숫자 추출
+    const totalMatch = bodyText.match(/(?:총|전체)\s*(\d+)\s*건/) || bodyText.match(/(\d+)\s*건/);
+    const totalCount = totalMatch ? parseInt(totalMatch[1]) : 0;
+    const rowCount = document.querySelectorAll('tbody tr').length;
+    return { totalCount, rowCount };
+  });
+  console.log(`   📊 페이지 표시: ${pageInfo.rowCount}행 / 전체: ${pageInfo.totalCount}건`);
+
+  // 전체 건수가 현재 표시보다 많으면 → 페이지 사이즈 최대로 변경 후 재검색
+  if (pageInfo.totalCount > pageInfo.rowCount) {
+    console.log(`   🔄 전체 ${pageInfo.totalCount}건 로드를 위해 페이지사이즈 최대화 후 재검색...`);
+    await targetFrame.evaluate(() => {
+      const selects = document.querySelectorAll('select');
+      for (const sel of selects) {
+        const opts = Array.from(sel.options);
+        const numericOpts = opts.filter(o => /^\d+$/.test(o.value) && parseInt(o.value) >= 10);
+        if (numericOpts.length >= 2) {
+          const maxOpt = numericOpts.reduce((a, b) => parseInt(a.value) > parseInt(b.value) ? a : b);
+          sel.value = maxOpt.value;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+    });
+    await targetFrame.waitForTimeout(500);
+    try { await targetFrame.click('.btn-search', { timeout: 3000 }); } catch {}
+    await smartstorePage.waitForTimeout(8000);
+  }
+
+  // 최종 프레임
+  const finalFrame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || targetFrame;
+
   // 모든 페이지에서 주문 추출
   const orders = [];
   let pageNum = 1;
   const maxPages = 50;
 
   while (pageNum <= maxPages) {
-    // 현재 페이지 테이블에서 주문 추출
-    const pageOrders = await targetFrame.evaluate(() => {
+    const pageOrders = await finalFrame.evaluate(() => {
       const tables = document.querySelectorAll('table');
       const result = [];
       for (const table of tables) {
@@ -1683,7 +1710,7 @@ async function getStoreSalesSummary() {
           const productCell = cells.reduce((a, b) => (a.length > b.length ? a : b), '');
           const qtyCell = cells.find((c) => c && c.match(/^\d{1,2}$/) && parseInt(c) > 0);
           const statusCell = cells.find((c) =>
-            c && (c.includes('배송') || c.includes('결제') || c.includes('취소') || c.includes('발송'))
+            c && (c.includes('배송') || c.includes('결제') || c.includes('취소') || c.includes('발송') || c.includes('구매확인'))
           );
           result.push({ date: dateCell, product: productCell, qty: qtyCell ? parseInt(qtyCell) : 1, status: statusCell || '' });
         }
@@ -1691,38 +1718,35 @@ async function getStoreSalesSummary() {
       return result;
     });
 
+    if (pageOrders.length === 0) break;
     orders.push(...pageOrders);
 
-    if (pageOrders.length === 0 && pageNum > 1) break;
-
-    // 다음 페이지로 이동
+    // 다음 페이지 이동 시도
     pageNum++;
-    const hasNext = await targetFrame.evaluate((nextNum) => {
-      // 페이지네이션에서 다음 페이지 번호 클릭
-      const pageLinks = document.querySelectorAll('.pagination a, .paging a, [class*="page"] a, [class*="paging"] a, a[class*="btn_page"]');
-      for (const el of pageLinks) {
+    const hasNext = await finalFrame.evaluate((nextNum) => {
+      // 페이지네이션 영역에서 다음 번호 또는 다음 버튼 클릭
+      const allEls = document.querySelectorAll('a, button, span[onclick], li[onclick]');
+      for (const el of allEls) {
         const t = el.innerText?.trim();
-        if (t === String(nextNum)) { el.click(); return true; }
+        if (t === String(nextNum) && (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
+          el.click(); return true;
+        }
       }
-      // "다음" / ">" 버튼
-      for (const el of pageLinks) {
+      for (const el of allEls) {
         const t = el.innerText?.trim();
-        if (t === '다음' || t === '>' || t === '›' || t === '»') { el.click(); return true; }
-      }
-      // 일반 a/button에서도 찾기
-      const allClickable = document.querySelectorAll('a, button');
-      for (const el of allClickable) {
-        const t = el.innerText?.trim();
-        if (t === String(nextNum) && el.closest('[class*="pag"]')) { el.click(); return true; }
+        if ((t === '다음' || t === '>' || t === '›' || t === '»' || t === 'Next') &&
+            (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
+          el.click(); return true;
+        }
       }
       return false;
     }, pageNum);
 
     if (!hasNext) break;
-    await targetFrame.waitForTimeout(3000);
+    await finalFrame.waitForTimeout(3000);
   }
 
-  console.log(`   📦 총 ${orders.length}개 주문 (${pageNum - 1}페이지)`);
+  console.log(`   📦 총 ${orders.length}개 주문 (${pageNum - 1 || 1}페이지)`);
 
   const today = new Date();
   const todayStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, '0')}.${String(today.getDate()).padStart(2, '0')}`;
