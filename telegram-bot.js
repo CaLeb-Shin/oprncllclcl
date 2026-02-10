@@ -1629,13 +1629,8 @@ async function getStoreSalesSummary() {
   }
   if (!frame) throw new Error('배송관리 프레임을 찾을 수 없습니다.');
 
-  // 기간 필터: 3개월로 설정 (가능한 경우)
-  try { await frame.click('text=3개월', { timeout: 2000 }); } catch {}
-  await frame.waitForTimeout(500);
-  try { await frame.click('.btn-search, button:has-text("조회")', { timeout: 2000 }); } catch {}
-  await smartstorePage.waitForTimeout(3000);
-
-  // ★ 모든 상태 카드를 순회하며 주문 수집 (결제완료 → 구매확인까지 전체)
+  // ★ 상태 카드를 직접 클릭 (getNewOrders와 동일한 방식)
+  // 기간필터/조회 버튼 클릭 시 페이지가 검색모드로 전환되어 상태 카드가 사라지므로 하지 않음
   const statusCards = [
     '신규주문(발주 전)',
     '신규주문(발주 후)',
