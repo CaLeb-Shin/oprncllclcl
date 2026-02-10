@@ -1666,7 +1666,7 @@ async function getStoreSalesSummary() {
         if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
 
         const status = cells[1] || '';
-        if (status.includes('취소')) continue;
+        if (status.includes('취소') || status.includes('반품')) continue;
 
         const product = cells[7] || '';
         if (!product) continue;
