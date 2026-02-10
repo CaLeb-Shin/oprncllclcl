@@ -69,6 +69,14 @@ let isSalesRunning = false;
 let isSmartstoreRunning = false;
 let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
 let isEnsureBrowserRunning = false; // ensureBrowser 동시 호출 방지
+let lastSessionExpireNotice = 0;  // 세션 만료 알림 쿨다운
+
+function shouldNotifySessionExpire() {
+  const now = Date.now();
+  if (now - lastSessionExpireNotice < 30 * 60 * 1000) return false; // 30분 쿨다운
+  lastSessionExpireNotice = now;
+  return true;
+}
 
 let browser = null;
 let smartstoreCtx = null;
@@ -215,7 +223,12 @@ function runSalesScript() {
 // ============================================================
 // 브라우저 관리 (안전한 초기화 + 복구)
 // ============================================================
-async function closeBrowser() {
+async function closeBrowser(force = false) {
+  // ensureBrowser 실행 중에는 외부 closeBrowser 차단 (경쟁 상태 방지)
+  if (!force && isEnsureBrowserRunning) {
+    console.log('⚠️ closeBrowser: 브라우저 초기화 중 → 스킵');
+    return;
+  }
   try {
     if (smartstorePage && !smartstorePage.isClosed()) await smartstorePage.close().catch(() => {});
     if (ppurioPage && !ppurioPage.isClosed()) await ppurioPage.close().catch(() => {});
@@ -370,6 +383,7 @@ async function smartstoreKeepAlive() {
   if (!smartstorePage || !smartstoreCtx) return;
   // 주문 확인 중이면 충돌 방지
   if (isSmartstoreRunning) { console.log('🔄 keep-alive: 주문 확인 중 → 스킵'); return; }
+  if (wasDisconnected) { console.log('🔄 keep-alive: 인터넷 끊김 → 스킵'); return; }
 
   try {
     // 페이지가 살아있는지 확인
@@ -398,7 +412,7 @@ async function smartstoreKeepAlive() {
         await ensureBrowser();
         console.log('🔄 스마트스토어 세션 자동 복구 성공');
       } catch (e) {
-        await sendMessage('⚠️ <b>스마트스토어 세션 만료</b>\n\n서버에서 실행:\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code> 입력');
+        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>스마트스토어 세션 만료</b>\n\n서버에서 실행:\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code> 입력');
       }
     }
   } catch (err) {
@@ -421,6 +435,7 @@ async function smartstoreKeepAlive() {
 async function ppurioKeepAlive() {
   if (!ppurioPage || !ppurioCtx) return;
   if (isSmartstoreRunning) { console.log('🔄 뿌리오 keep-alive: 작업 중 → 스킵'); return; }
+  if (wasDisconnected) { console.log('🔄 뿌리오 keep-alive: 인터넷 끊김 → 스킵'); return; }
 
   try {
     // 페이지가 살아있는지 확인
@@ -447,7 +462,7 @@ async function ppurioKeepAlive() {
       console.log('⚠️ 뿌리오 세션 만료 감지 (keep-alive) → 자동 재로그인 시도');
       const ok = await ppurioAutoRelogin();
       if (!ok) {
-        await sendMessage('⚠️ <b>뿌리오 세션 만료</b>\n\n자동 재로그인 실패. 터미널에서 실행:\n<code>node setup-login.js ppurio</code>\n그 후 <code>봇재시작</code> 입력');
+        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>뿌리오 세션 만료</b>\n\n자동 재로그인 실패. 터미널에서 실행:\n<code>node setup-login.js ppurio</code>\n그 후 <code>봇재시작</code> 입력');
       } else {
         console.log('🔐 뿌리오 자동 재로그인 성공!');
       }
@@ -498,7 +513,7 @@ async function ensureBrowser() {
 
     // 하나라도 죽었으면 전체 재초기화
     console.log(`⚠️ 브라우저 연결 끊김 (스토어: ${ssOk ? 'OK' : 'FAIL'}, 뿌리오: ${ppOk ? 'OK' : 'FAIL'}), 재초기화...`);
-    await closeBrowser();
+    await closeBrowser(true);
   }
 
   console.log('🌐 브라우저 초기화...');
@@ -582,7 +597,7 @@ async function ensureBrowser() {
     } catch {}
     
     if (!ssLoggedIn) {
-      await closeBrowser();
+      await closeBrowser(true);
       throw new Error('스마트스토어 세션 만료. 봇재시작 후 다시 시도해주세요.');
     }
   }
@@ -616,7 +631,7 @@ async function ensureBrowser() {
         console.log('   ✅ 뿌리오 자동 재로그인 성공!');
       } else {
         console.log('   ❌ 뿌리오 자동 재로그인 실패 - 수동 재로그인 필요');
-        await sendMessage('⚠️ <b>뿌리오 세션 만료</b>\n\n자동 재로그인 실패. 터미널에서 실행:\n<code>node setup-login.js ppurio</code>\n그 후 <code>봇재시작</code> 입력');
+        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>뿌리오 세션 만료</b>\n\n자동 재로그인 실패. 터미널에서 실행:\n<code>node setup-login.js ppurio</code>\n그 후 <code>봇재시작</code> 입력');
       }
     }
   }
@@ -2200,7 +2215,7 @@ async function handleMessage(msg) {
   if (['봇재시작', '재시작', 'restart'].includes(text)) {
     await sendMessage('🔄 브라우저 재초기화 중...');
     try {
-      await closeBrowser();
+      await closeBrowser(true);
       await ensureBrowser();
       const ppStatus = ppurioPage ? '✅ 로그인됨' : '❌ 세션 만료';
       await sendMessage(`🔄 재시작 완료!\n\n📦 스마트스토어: ✅\n💬 뿌리오: ${ppStatus}`);
@@ -2311,8 +2326,8 @@ async function startPolling() {
     try {
       const res = await getUpdates(lastUpdateId + 1, 30);
 
-      if (res.ok && res.result.length > 0) {
-        // 인터넷 복구 감지 → 브라우저 재초기화
+      if (res.ok) {
+        // 인터넷 복구 감지 → 브라우저 재초기화 (메시지 없어도 복구)
         if (wasDisconnected) {
           wasDisconnected = false;
           console.log('🌐 인터넷 복구 감지! 브라우저 재초기화...');
@@ -2373,7 +2388,8 @@ function startAutoSales() {
 
 function startAutoSmartstore() {
   setInterval(async () => {
-    console.log('\n⏰ 1시간 스마트스토어 확인...');
+    console.log('\n⏰ 3분 스마트스토어 자동 확인...');
+    if (wasDisconnected) { console.log('   인터넷 끊김 → 스킵'); return; }
     try {
       await Promise.race([
         checkForNewOrders(),
@@ -2390,7 +2406,7 @@ function startAutoSmartstore() {
       }
     }
   }, CONFIG.orderCheckInterval);
-  console.log('⏰ 스마트스토어 1시간 자동 확인 설정');
+  console.log('⏰ 스마트스토어 3분 자동 확인 설정');
 }
 
 function startSmartstoreKeepAlive() {
@@ -2499,7 +2515,7 @@ function startDailyReport() {
 // ============================================================
 async function gracefulShutdown(signal) {
   console.log(`\n${signal} 수신, 종료 중...`);
-  await closeBrowser();
+  await closeBrowser(true);
   process.exit(0);
 }
 
