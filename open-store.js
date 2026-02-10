@@ -1,6 +1,5 @@
-// 스마트스토어 테이블 파싱 검증 스크립트
+// 스마트스토어 테이블 파싱 검증 스크립트 v3
 // 실행: node open-store.js
-// 종료: Ctrl+C
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
@@ -24,25 +23,18 @@ const fs = require('fs');
   });
   await page.waitForTimeout(5000);
 
-  // 팝업 닫기
   try { await page.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
   await page.waitForTimeout(1000);
 
-  // iframe에서 3개월 + 검색
   let frame = page.frames().find((f) => f.url().includes('/o/v3/manage/order'));
   if (!frame) {
-    console.log('⚠️ iframe 못 찾음, 새로고침...');
     await page.reload({ timeout: 20000, waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(4000);
     frame = page.frames().find((f) => f.url().includes('/o/v3/manage/order'));
   }
-  if (!frame) {
-    console.log('❌ iframe 없음');
-    await new Promise(() => {});
-    return;
-  }
+  if (!frame) { console.log('❌ iframe 없음'); return; }
 
-  console.log('✅ iframe 찾음 → 3개월 + 검색 클릭');
+  console.log('✅ iframe 찾음 → 3개월 + 검색');
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
   await frame.evaluate(() => {
@@ -52,79 +44,132 @@ const fs = require('fs');
     }
   });
   await page.waitForTimeout(8000);
-
-  // 프레임 재획득
   frame = page.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
 
-  console.log('\n========== 테이블 파싱 테스트 ==========\n');
+  console.log('\n========== 행별 셀 수 분포 ==========\n');
 
-  // 1단계: 테이블 구조 확인
-  const debug = await frame.evaluate(() => {
+  // 모든 행의 셀 수 분포 확인
+  const analysis = await frame.evaluate(() => {
     const rows = document.querySelectorAll('table tbody tr');
-    const info = { totalRows: rows.length, rowSamples: [] };
-    for (let i = 0; i < Math.min(rows.length, 3); i++) {
+    const cellCountMap = {};
+    const headerRows = [];  // 주문번호 포함 행
+    const dataRows = [];    // 데이터 행
+
+    for (let i = 0; i < rows.length; i++) {
       const cells = Array.from(rows[i].querySelectorAll('td')).map((td) => td.innerText?.trim());
-      info.rowSamples.push({ cellCount: cells.length, cells: cells.slice(0, 16) });
+      const count = cells.length;
+      cellCountMap[count] = (cellCountMap[count] || 0) + 1;
+
+      // 주문번호 헤더행 (16자리 숫자 포함)
+      if (count >= 2 && count <= 10) {
+        const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
+        if (idCell && headerRows.length < 3) {
+          headerRows.push({ rowIdx: i, cellCount: count, cells });
+        }
+      }
+
+      // 데이터행 (20셀 이상)
+      if (count >= 15 && dataRows.length < 2) {
+        dataRows.push({ rowIdx: i, cellCount: count, cells });
+      }
     }
-    // 총 건수
-    const bodyText = document.body?.innerText || '';
-    const totalMatch = bodyText.match(/총\s*([\d,]+)\s*개/);
-    info.totalText = totalMatch ? totalMatch[0] : 'N/A';
-    return info;
+
+    return { cellCountMap, headerRows, dataRows, totalRows: rows.length };
   });
 
-  console.log(`📊 총 건수: ${debug.totalText}`);
-  console.log(`📊 테이블 행 수: ${debug.totalRows}`);
-  console.log('');
+  // 셀 수 분포
+  console.log('셀 수 → 행 수:');
+  for (const [count, num] of Object.entries(analysis.cellCountMap).sort((a, b) => Number(a[0]) - Number(b[0]))) {
+    console.log(`  ${count}셀: ${num}행`);
+  }
 
-  for (let i = 0; i < debug.rowSamples.length; i++) {
-    const sample = debug.rowSamples[i];
-    console.log(`--- 행 ${i} (셀 ${sample.cellCount}개) ---`);
-    for (let j = 0; j < sample.cells.length; j++) {
-      const val = sample.cells[j] || '(빈값)';
-      console.log(`  cells[${j}]: ${val.substring(0, 60)}`);
+  // 헤더행 샘플
+  console.log('\n========== 헤더행 (주문번호) ==========\n');
+  for (const h of analysis.headerRows) {
+    console.log(`행 ${h.rowIdx} (${h.cellCount}셀): ${h.cells.join(' | ')}`);
+  }
+
+  // 데이터행 전체 셀 출력
+  console.log('\n========== 데이터행 (전체 셀) ==========\n');
+  for (const d of analysis.dataRows) {
+    console.log(`행 ${d.rowIdx} (${d.cellCount}셀):`);
+    for (let j = 0; j < d.cells.length; j++) {
+      const val = (d.cells[j] || '(빈값)').substring(0, 80);
+      // 중요 데이터 하이라이트
+      let marker = '';
+      if (val.match(/^20\d{2}\.\d{2}\.\d{2}/)) marker = ' ← 날짜!';
+      if (val.match(/^\[.+\]/)) marker = ' ← 상품명!';
+      if (val.match(/^[1-9]\d?$/) && !marker) marker = ' ← 수량?';
+      if (val.includes('배송') || val.includes('결제') || val.includes('취소') || val.includes('구매확인')) marker = ' ← 상태!';
+      console.log(`  [${j}] ${val}${marker}`);
     }
     console.log('');
   }
 
-  // 2단계: 실제 파싱 테스트 (스크린샷에서 확인한 인덱스)
-  console.log('========== 파싱 결과 ==========\n');
+  // getNewOrders 방식으로 파싱 테스트
+  console.log('========== getNewOrders 방식 파싱 ==========\n');
 
   const orders = await frame.evaluate(() => {
     const rows = document.querySelectorAll('table tbody tr');
-    const result = [];
+    const headerOrderIds = [];
+    const dataRows = [];
+
     for (const tr of rows) {
       const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-      if (cells.length < 13) continue;
-
-      const date = cells[3] || '';
-      if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
-
-      const status = cells[4] || '';
-      const claimStatus = cells[7] || '';
-      if (status.includes('취소') || claimStatus.includes('취소')) continue;
-
-      const product = cells[10] || '';
-      if (!product) continue;
-
-      const qty = parseInt(cells[12]) || 1;
-
-      result.push({ date: date.substring(0, 10), product: product.substring(0, 50), qty, status });
+      if (cells.length === 0) continue;
+      if (cells.length >= 2 && cells.length <= 10) {
+        const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
+        if (idCell) headerOrderIds.push(idCell);
+        continue;
+      }
+      if (cells.length >= 15) {
+        dataRows.push(cells);
+      }
     }
-    return result;
+
+    const result = [];
+    for (let i = 0; i < dataRows.length; i++) {
+      const cells = dataRows[i];
+      const orderId = headerOrderIds[i] || '';
+
+      const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) ||
+        cells.find((c) => c && c.match(/^\[.+\]/) && c.length > 15) || '';
+      const dateCell = cells.find((c) => c && c.match(/^20\d{2}\.\d{2}\.\d{2}/));
+      const date = dateCell ? dateCell.substring(0, 10) : '';
+
+      // 수량: 상품명 근처에서 1-2자리 숫자 찾기
+      let qty = 1;
+      const prodIdx = cells.findIndex((c) => c && c.match(/^\[.+\]/));
+      if (prodIdx >= 0) {
+        for (let j = prodIdx + 1; j < Math.min(prodIdx + 10, cells.length); j++) {
+          if (cells[j] && /^[1-9]\d?$/.test(cells[j])) {
+            qty = parseInt(cells[j]);
+            break;
+          }
+        }
+      }
+
+      // 취소 체크
+      const isCancelled = cells.some((c) => c && (c.startsWith('취소완료') || c.startsWith('반품완료')));
+
+      if (productName && date && !isCancelled) {
+        result.push({ orderId, product: productName.substring(0, 50), qty, date });
+      }
+    }
+    return { orders: result, headerCount: headerOrderIds.length, dataCount: dataRows.length };
   });
 
-  console.log(`✅ 파싱된 주문: ${orders.length}건\n`);
+  console.log(`헤더행: ${orders.headerCount}개, 데이터행: ${orders.dataCount}개`);
+  console.log(`파싱된 주문: ${orders.orders.length}건\n`);
 
-  // 처음 5건 샘플 출력
-  for (let i = 0; i < Math.min(orders.length, 5); i++) {
-    const o = orders[i];
-    console.log(`  ${i + 1}. ${o.date} | ${o.product} | ${o.qty}매 | ${o.status}`);
+  for (let i = 0; i < Math.min(orders.orders.length, 5); i++) {
+    const o = orders.orders[i];
+    console.log(`  ${i + 1}. ${o.date} | ${o.product} | ${o.qty}매`);
   }
 
   // 공연별 집계
   const perfTotals = {};
-  for (const o of orders) {
+  for (const o of orders.orders) {
     const regionMatch = o.product.match(/^\[([^\]]+)\]/);
     const region = regionMatch ? regionMatch[1] : '기타';
     const isDisney = o.product.includes('디즈니');
@@ -140,6 +185,6 @@ const fs = require('fs');
   }
   console.log(`\n  🎯 전체 합계: ${grandTotal}매`);
 
-  console.log('\n✅ 브라우저 열린 상태. Ctrl+C로 종료');
+  console.log('\n✅ Ctrl+C로 종료');
   await new Promise(() => {});
 })().catch((e) => console.error('❌ 오류:', e.message));
