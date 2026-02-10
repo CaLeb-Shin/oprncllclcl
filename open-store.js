@@ -167,21 +167,27 @@ const fs = require('fs');
     console.log(`  ${i + 1}. ${o.date} | ${o.product} | ${o.qty}매`);
   }
 
-  // 공연별 집계
+  // 공연별 + 좌석별 집계
   const perfTotals = {};
   for (const o of orders.orders) {
     const regionMatch = o.product.match(/^\[([^\]]+)\]/);
     const region = regionMatch ? regionMatch[1] : '기타';
     const isDisney = o.product.includes('디즈니');
     const key = `${region}_${isDisney ? '디즈니' : '지브리'}`;
-    perfTotals[key] = (perfTotals[key] || 0) + o.qty;
+    const seatMatch = o.product.match(/,\s*(\S+석)\s*$/);
+    const seat = seatMatch ? seatMatch[1] : '미분류';
+
+    if (!perfTotals[key]) perfTotals[key] = {};
+    perfTotals[key][seat] = (perfTotals[key][seat] || 0) + o.qty;
   }
 
-  console.log('\n========== 공연별 총 판매 ==========\n');
+  console.log('\n========== 공연별 총 판매 (좌석별) ==========\n');
   let grandTotal = 0;
-  for (const [key, total] of Object.entries(perfTotals).sort()) {
-    console.log(`  🎵 ${key}: ${total}매`);
-    grandTotal += total;
+  for (const [key, seats] of Object.entries(perfTotals).sort()) {
+    const perfTotal = Object.values(seats).reduce((s, q) => s + q, 0);
+    grandTotal += perfTotal;
+    const seatStr = Object.entries(seats).sort().map(([s, q]) => `${s} ${q}매`).join(', ');
+    console.log(`  🎵 ${key}: ${perfTotal}매 (${seatStr})`);
   }
   console.log(`\n  🎯 전체 합계: ${grandTotal}매`);
 
