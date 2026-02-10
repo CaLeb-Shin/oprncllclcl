@@ -2296,6 +2296,7 @@ async function handleMessage(msg) {
       return;
     }
     try {
+      await sendMessage('📋 결산 조회 중... (네이버 취소 확인 포함)');
       const report = await getFinalSummaryDetail(num - 1);
       await sendMessage(report);
     } catch (err) {
