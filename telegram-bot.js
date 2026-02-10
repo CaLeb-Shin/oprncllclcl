@@ -1610,158 +1610,75 @@ async function getStoreSalesSummary() {
   console.log('📦 스토어 판매현황 조회...');
   await ensureBrowser();
 
-  // ★ 주문통합검색 페이지 사용 → 3개월 조회, 취소/반품 제외, 공연별 합계
-  await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/sale/order', { timeout: 30000, waitUntil: 'domcontentloaded' });
+  // 원본 그대로: 발주(주문)확인 페이지 → 오늘/어제 판매 정확히 표시됨
+  await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
   await smartstorePage.waitForTimeout(5000);
 
   // 팝업 닫기
   try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
   await smartstorePage.waitForTimeout(1000);
 
-  // iframe 찾기 (디버그용 모든 프레임 URL 로깅)
-  const allFrameUrls = smartstorePage.frames().map((f) => f.url()).filter((u) => u !== 'about:blank');
-  console.log('   📋 프레임들:', allFrameUrls.join(' | '));
+  const frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+  if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
 
-  let frame = smartstorePage.frames().find((f) => {
-    const u = f.url();
-    return u.includes('/o/') && !u.includes('#') && u !== 'about:blank'
-      && !u.includes('/home/') && !u.includes('/dashboard');
-  });
-  if (!frame) {
-    console.log('   ⚠️ iframe 못 찾음, 페이지 새로고침...');
-    await smartstorePage.reload({ timeout: 20000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(5000);
-    const retryUrls = smartstorePage.frames().map((f) => f.url()).filter((u) => u !== 'about:blank');
-    console.log('   📋 재시도 프레임들:', retryUrls.join(' | '));
-    frame = smartstorePage.frames().find((f) => {
-      const u = f.url();
-      return u.includes('/o/') && !u.includes('#') && u !== 'about:blank'
-        && !u.includes('/home/') && !u.includes('/dashboard');
-    });
-  }
-  if (!frame) throw new Error('주문통합검색 프레임을 찾을 수 없습니다.');
-  console.log('   ✅ 프레임:', frame.url());
-
-  // 기간: 3개월 클릭
+  // 기간: 3개월 (전체 누계를 위해)
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
 
-  // 검색 버튼 클릭
-  try {
-    await frame.click('button:has-text("검색")', { timeout: 3000 });
-  } catch {
-    try { await frame.click('.btn-search', { timeout: 2000 }); } catch {}
-  }
+  // 검색
+  try { await frame.click('.btn-search', { timeout: 3000 }); } catch {}
+  try { await smartstorePage.click('.btn-search', { timeout: 2000 }); } catch {}
   await smartstorePage.waitForTimeout(8000);
 
-  // 총 건수 확인 (디버그)
-  const totalText = await frame.evaluate(() => {
-    const t = document.body?.innerText || '';
-    const m = t.match(/총\s*([\d,]+)\s*건/);
-    return m ? m[0] : '건수 미확인';
-  }).catch(() => '건수 확인 실패');
-  console.log(`   📊 검색결과: ${totalText}`);
+  const frame2 = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+  const targetFrame = frame2 || frame;
 
-  // 테이블 스크래핑 (페이지네이션 포함)
-  const orders = [];
-  let pageNum = 1;
-  while (pageNum <= 50) {
-    const pageOrders = await frame.evaluate(() => {
-      const result = [];
-      const rows = document.querySelectorAll('table tbody tr');
-
-      // --- 방식 1: 복잡한 구조 (배송현황관리 스타일: 헤더행 + 데이터행 50셀+) ---
-      const headerOrderIds = [];
-      const dataRows = [];
-      for (const tr of rows) {
+  // 테이블에서 주문 추출 (원본 그대로)
+  const orders = await targetFrame.evaluate(() => {
+    const tables = document.querySelectorAll('table');
+    const result = [];
+    for (const table of tables) {
+      for (const tr of table.querySelectorAll('tbody tr')) {
         const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-        if (cells.length === 0) continue;
-        if (cells.length >= 3 && cells.length <= 10) {
-          const idCell = cells.find((c) => c && c.match(/^\d{16,}$/));
-          if (idCell) headerOrderIds.push(idCell);
-          continue;
-        }
-        if (cells.length >= 30) dataRows.push(cells);
+        const dateCell = cells.find((c) => c && c.match(/^20\d{2}\.\d{2}\.\d{2}/));
+        if (!dateCell) continue;
+        const productCell = cells.reduce((a, b) => (a.length > b.length ? a : b), '');
+        const qtyCell = cells.find((c) => c && c.match(/^\d{1,2}$/) && parseInt(c) > 0);
+        const statusCell = cells.find((c) =>
+          c && (c.includes('배송') || c.includes('결제') || c.includes('취소') || c.includes('발송'))
+        );
+        result.push({ date: dateCell, product: productCell, qty: qtyCell ? parseInt(qtyCell) : 1, status: statusCell || '' });
       }
+    }
+    return result;
+  });
 
-      if (dataRows.length > 0) {
-        for (let i = 0; i < dataRows.length; i++) {
-          const cells = dataRows[i];
-          const product = cells.find((c) => c && c.match(/^\[.+\].*석$/))
-            || cells.find((c) => c && c.includes('콘서트') && c.includes('['))
-            || '';
-          const qty = parseInt(cells[24]) || 1;
-          const dateCell = cells.find((c) => c && c.match(/^20\d{2}[\.\-]\d{2}[\.\-]\d{2}/)) || '';
-          const statusCell = cells.find((c) => c && (
-            c.includes('취소') || c.includes('반품') || c.includes('배송') ||
-            c.includes('결제') || c.includes('발주') || c.includes('구매확인')
-          )) || '';
-          if (product) {
-            result.push({
-              date: dateCell.replace(/-/g, '.').substring(0, 10),
-              product,
-              qty,
-              status: statusCell,
-            });
-          }
-        }
-        return result;
-      }
+  console.log(`   📦 페이지 주문: ${orders.length}개`);
 
-      // --- 방식 2: 표준 테이블 구조 ---
-      for (const tr of rows) {
-        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-        if (cells.length < 3) continue;
+  // ★ 판매 이력 누적 저장 (총 판매가 줄어들지 않도록)
+  // 이 페이지는 결제완료(미확인) 주문만 표시하므로, 처리된 주문은 사라짐.
+  // 하지만 이력 파일에 저장해두면 총 판매는 줄어들지 않음.
+  const salesHistoryFile = path.join(__dirname, 'sales-history.json');
+  let salesHistory = {};
+  try { salesHistory = JSON.parse(fs.readFileSync(salesHistoryFile, 'utf8')); } catch {}
 
-        const dateCell = cells.find((c) => c && c.match(/^20\d{2}[\.\-]\d{2}[\.\-]\d{2}/)) || '';
-        const product = cells.find((c) => c && c.match(/^\[.+\].*석$/))
-          || cells.find((c) => c && c.includes('콘서트') && c.includes('['))
-          || '';
-        const qtyCell = cells.find((c) => c && c.match(/^\d{1,3}$/) && parseInt(c) > 0);
-        const statusCell = cells.find((c) => c && (
-          c.includes('취소') || c.includes('반품') || c.includes('배송') ||
-          c.includes('결제') || c.includes('발주') || c.includes('구매확인')
-        )) || '';
-
-        if (product) {
-          result.push({
-            date: dateCell.replace(/-/g, '.').substring(0, 10),
-            product,
-            qty: qtyCell ? parseInt(qtyCell) : 1,
-            status: statusCell,
-          });
-        }
-      }
-      return result;
-    });
-
-    if (pageOrders.length === 0) break;
-    orders.push(...pageOrders);
-
-    // 다음 페이지
-    pageNum++;
-    const hasNext = await frame.evaluate((nextNum) => {
-      const allEls = document.querySelectorAll('a, button, span[onclick], li[onclick]');
-      for (const el of allEls) {
-        const t = el.innerText?.trim();
-        if (t === String(nextNum) && (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
-          el.click(); return true;
-        }
-      }
-      for (const el of allEls) {
-        const t = el.innerText?.trim();
-        if ((t === '다음' || t === '>' || t === '›' || t === '»') &&
-            (el.closest('[class*="pag"]') || el.closest('nav') || el.closest('[class*="page"]'))) {
-          el.click(); return true;
-        }
-      }
-      return false;
-    }, pageNum);
-    if (!hasNext) break;
-    await frame.waitForTimeout(3000);
+  // 현재 페이지 주문을 날짜|공연|좌석별로 집계
+  const pageAgg = {};
+  for (const order of orders) {
+    if ((order.status || '').includes('취소')) continue;
+    const datePrefix = order.date.substring(0, 10);
+    const info = parseProductInfo(order.product);
+    const key = `${datePrefix}|${info.perfKey}|${info.seat}`;
+    pageAgg[key] = (pageAgg[key] || 0) + order.qty;
   }
 
-  console.log(`   📦 총 ${orders.length}개 주문`);
+  // 이력 업데이트: 현재값이 더 크면 갱신 (한번 올라간 수치는 내려가지 않음)
+  for (const [key, qty] of Object.entries(pageAgg)) {
+    if (!salesHistory[key] || qty > salesHistory[key]) {
+      salesHistory[key] = qty;
+    }
+  }
+  try { fs.writeFileSync(salesHistoryFile, JSON.stringify(salesHistory)); } catch {}
 
   const today = new Date();
   const todayStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, '0')}.${String(today.getDate()).padStart(2, '0')}`;
@@ -1769,12 +1686,11 @@ async function getStoreSalesSummary() {
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = `${yesterday.getFullYear()}.${String(yesterday.getMonth() + 1).padStart(2, '0')}.${String(yesterday.getDate()).padStart(2, '0')}`;
 
-  // 공연별 > 날짜별 > 좌석별 집계 + 전체 누계
+  // 오늘/어제: 현재 페이지 데이터 사용 (원본 그대로)
   const summary = {};
 
   for (const order of orders) {
-    const st = (order.status || '').toUpperCase();
-    if (st.includes('취소') || st.includes('CANCEL') || st.includes('RETURN') || st.includes('반품')) continue;
+    if ((order.status || '').includes('취소')) continue;
 
     const datePrefix = order.date.substring(0, 10);
     const info = parseProductInfo(order.product);
@@ -1785,13 +1701,9 @@ async function getStoreSalesSummary() {
         perfDate: info.perfDate,
         today: {},
         yesterday: {},
-        total: {},  // 전체 누계 (좌석별)
+        total: {},
       };
     }
-
-    // 전체 누계 (취소 제외 모든 기간)
-    if (!summary[info.perfKey].total[info.seat]) summary[info.perfKey].total[info.seat] = 0;
-    summary[info.perfKey].total[info.seat] += order.qty;
 
     // 오늘/어제
     let period = null;
@@ -1802,6 +1714,30 @@ async function getStoreSalesSummary() {
       summary[info.perfKey][period][info.seat] += order.qty;
     }
   }
+
+  // ★ 총 판매: 누적 이력에서 계산 (처리된 주문도 포함 → 절대 줄어들지 않음)
+  for (const [key, qty] of Object.entries(salesHistory)) {
+    const parts = key.split('|');
+    const perfKey = parts[1];
+    const seat = parts[2];
+    if (!perfKey || !seat) continue;
+
+    if (!summary[perfKey]) {
+      const perfInfo = PERFORMANCES[perfKey];
+      summary[perfKey] = {
+        perfName: perfInfo ? perfInfo.name : perfKey,
+        perfDate: perfInfo ? perfInfo.date : '',
+        today: {},
+        yesterday: {},
+        total: {},
+      };
+    }
+    if (!summary[perfKey].total[seat]) summary[perfKey].total[seat] = 0;
+    summary[perfKey].total[seat] += qty;
+  }
+
+  const historyTotal = Object.values(salesHistory).reduce((s, q) => s + q, 0);
+  console.log(`   📊 누적 이력: ${Object.keys(salesHistory).length}개 항목, 총 ${historyTotal}매`);
 
   // 메시지 생성
   const getDayName = (d) => ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
@@ -1818,9 +1754,8 @@ async function getStoreSalesSummary() {
     return msg;
   }
 
-  // 1) 오늘/어제 판매
+  // 1) 오늘/어제 판매 (현재 페이지 데이터 - 원본 그대로)
   for (const [period, periodLabel] of [['today', todayLabel], ['yesterday', yesterdayLabel]]) {
-    // 먼저 합계 계산
     let periodTotal = 0;
     let hasOrders = false;
 
@@ -1852,7 +1787,7 @@ async function getStoreSalesSummary() {
     }
   }
 
-  // 2) 공연별 총 판매 (취소 제외, 좌석별)
+  // 2) 공연별 총 판매 (누적 이력 기반 - 절대 줄어들지 않음)
   msg += `\n━━━━━━━━━━━━━━━━\n`;
   msg += `📊 <b>공연별 총 판매 (취소 제외)</b>\n`;
 
