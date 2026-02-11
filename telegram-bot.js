@@ -1401,33 +1401,40 @@ async function getFinalSummaryDetail(perfIndex) {
     console.log(`   ⚠️ 네이버 취소 목록 조회 실패: ${e.message}`);
   }
 
-  // 취소된 주문 매칭
-  function isCancelled(order) {
-    // 수동 목록: 이름 + 뒷자리
-    const manualMatch = manualCancelled.some((c) => {
+  // 네이버 취소 건수 카운터: "이름_좌석" → 남은 취소 횟수
+  const cancelCount = {};
+  for (const c of naverCancelled) {
+    const key = `${c.buyerName}_${c.seatType || ''}`;
+    cancelCount[key] = (cancelCount[key] || 0) + 1;
+  }
+
+  // 수동 취소 매칭
+  function isManualCancelled(order) {
+    return manualCancelled.some((c) => {
       const nameMatch = c.buyerName && order.buyerName &&
         (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
       const phoneMatch = c.lastFour && order.lastFour && c.lastFour === order.lastFour;
       return nameMatch && phoneMatch;
     });
-    if (manualMatch) return true;
+  }
 
-    // 네이버 자동: 이름 + 좌석 매칭 (같은 사람이 취소 후 다른 좌석 재주문 가능)
-    return naverCancelled.some((c) => {
-      const nameMatch = c.buyerName && order.buyerName &&
-        (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
-      if (!nameMatch) return false;
-      // 좌석 정보가 있으면 좌석도 일치해야 제외
-      if (c.seatType && order.seatType) return c.seatType === order.seatType;
-      return true; // 좌석 정보 없으면 이름만으로 매칭
-    });
+  // 네이버 자동 취소: 건수 기반 (같은 사람이 취소→재주문→취소→재주문 가능)
+  function isNaverCancelled(order) {
+    const key = `${order.buyerName}_${order.seatType || ''}`;
+    if (cancelCount[key] && cancelCount[key] > 0) {
+      cancelCount[key]--;
+      return true;
+    }
+    return false;
   }
 
   const activeOrders = [];
   const cancelledList = [];
-  
+
   for (const o of perf.orders) {
-    if (isCancelled(o)) {
+    if (isManualCancelled(o)) {
+      cancelledList.push(o);
+    } else if (isNaverCancelled(o)) {
       cancelledList.push(o);
     } else {
       activeOrders.push(o);
