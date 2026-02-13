@@ -480,8 +480,11 @@ async function smartstoreKeepAlive() {
 
     // 1. 네이버 쿠키 리프레시 (NID 쿠키 서버측 만료 방지)
     try {
-      await smartstorePage.goto('https://nid.naver.com/nidlogin.login', { timeout: 15000, waitUntil: 'domcontentloaded' });
-      await smartstorePage.waitForTimeout(2000);
+      // 네이버 메인 → 마이페이지 순서로 방문 (NID 쿠키 확실히 갱신)
+      await smartstorePage.goto('https://www.naver.com', { timeout: 15000, waitUntil: 'domcontentloaded' });
+      await smartstorePage.waitForTimeout(1500);
+      await smartstorePage.goto('https://nid.naver.com/user2/help/myInfo', { timeout: 15000, waitUntil: 'domcontentloaded' });
+      await smartstorePage.waitForTimeout(1500);
       console.log('🔄 네이버 쿠키 리프레시 OK');
     } catch (e) {
       console.log('⚠️ 네이버 쿠키 리프레시 실패:', e.message.substring(0, 50));
