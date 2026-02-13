@@ -30,7 +30,7 @@ const CONFIG = {
   username: 'iproduc1',
   password: '1314jjys!!',
   telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
-  telegramChatId: '7718215110',
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || '7718215110',
 };
 
 // 오늘 날짜 (YYYYMMDD 형식)

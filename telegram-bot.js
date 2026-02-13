@@ -39,6 +39,7 @@ function getBrowserLaunchOptions() {
 const CONFIG = {
   telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
   telegramChatId: '7718215110',
+  telegramGroupId: '',  // 그룹 채팅 ID (그룹 만든 후 입력)
 
   smartstore: {
     mainUrl: 'https://sell.smartstore.naver.com/#/home/dashboard',
@@ -171,6 +172,10 @@ function sendMessage(text, replyMarkup = null) {
   return telegramRequest('sendMessage', body);
 }
 
+function sendMessageTo(chatId, text) {
+  return telegramRequest('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' });
+}
+
 function getUpdates(offset, timeout = 30) {
   return telegramRequest(
     'getUpdates',
@@ -189,7 +194,7 @@ function answerCallbackQuery(callbackQueryId, text = '') {
 // ============================================================
 // 인터파크 판매현황
 // ============================================================
-function runSalesScript() {
+function runSalesScript(targetChatId) {
   return new Promise((resolve, reject) => {
     if (isSalesRunning) {
       resolve('이미 조회 중입니다.');
@@ -203,6 +208,7 @@ function runSalesScript() {
       env: {
         ...process.env,
         PATH: `/Users/erwin_shin/.nvm/versions/node/v22.20.0/bin:${process.env.PATH}`,
+        TELEGRAM_CHAT_ID: targetChatId || CONFIG.telegramChatId,
       },
     });
 
@@ -2264,7 +2270,25 @@ async function handleMessage(msg) {
   const text = msg.text?.toLowerCase()?.trim();
   if (!text) return;
 
-  if (String(msg.chat.id) !== CONFIG.telegramChatId) return;
+  const chatId = String(msg.chat.id);
+  const isGroup = CONFIG.telegramGroupId && chatId === CONFIG.telegramGroupId;
+  const isPersonal = chatId === CONFIG.telegramChatId;
+
+  // 그룹: 놀티켓 명령어만 허용
+  if (isGroup) {
+    if (['sales', '/sales', '조회', '판매현황', '놀티켓'].includes(text)) {
+      await sendMessageTo(chatId, '🔍 판매현황 조회 중... 약 1분 소요됩니다.');
+      try {
+        await runSalesScript(chatId);
+      } catch (err) {
+        await sendMessageTo(chatId, `❌ 오류: ${err.message}`);
+      }
+    }
+    return;
+  }
+
+  // 개인: 본인만 허용
+  if (!isPersonal) return;
 
   console.log(`📩 메시지: "${text}"`);
 
