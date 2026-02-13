@@ -39,7 +39,7 @@ function getBrowserLaunchOptions() {
 const CONFIG = {
   telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
   telegramChatId: '7718215110',
-  telegramGroupId: '',  // 그룹 채팅 ID (그룹 만든 후 입력)
+  telegramGroupId: '-5176942774',  // 멜론 OS 그룹
 
   smartstore: {
     mainUrl: 'https://sell.smartstore.naver.com/#/home/dashboard',
