@@ -2276,18 +2276,32 @@ async function handleMessage(msg) {
   const isGroup = CONFIG.telegramGroupId && chatId === CONFIG.telegramGroupId;
   const isPersonal = chatId === CONFIG.telegramChatId;
 
-  // 그룹: 놀티켓 명령어만 허용
+  // 그룹: /놀티켓, /네이버 명령어만 허용
   if (isGroup) {
-    const cmd = text.replace(/^\//, '');  // 슬래시 제거
-    if (['sales', '조회', '판매현황', '놀티켓'].includes(cmd)) {
-      console.log(`📩 그룹 메시지: "${text}" from ${msg.from?.first_name || ''}`);
-      await sendMessageTo(chatId, '🔍 판매현황 조회 중... 약 1분 소요됩니다.');
+    if (!text.startsWith('/')) return;  // 슬래시 명령어만 반응
+    const cmd = text.replace(/^\//, '');
+
+    if (cmd === '놀티켓') {
+      console.log(`📩 그룹: /놀티켓 from ${msg.from?.first_name || ''}`);
+      await sendMessageTo(chatId, '🔍 놀티켓 판매현황 조회 중... 약 2분 소요됩니다.');
       try {
         await runSalesScript(chatId);
       } catch (err) {
         await sendMessageTo(chatId, `❌ 오류: ${err.message}`);
       }
     }
+
+    if (cmd === '네이버') {
+      console.log(`📩 그룹: /네이버 from ${msg.from?.first_name || ''}`);
+      await sendMessageTo(chatId, '📦 네이버 스토어 판매현황 조회 중...');
+      try {
+        const storeReport = await getStoreSalesSummary();
+        await sendMessageTo(chatId, storeReport);
+      } catch (err) {
+        await sendMessageTo(chatId, `❌ 오류: ${err.message}`);
+      }
+    }
+
     return;
   }
 
