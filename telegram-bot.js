@@ -179,7 +179,7 @@ function sendMessageTo(chatId, text) {
 function getUpdates(offset, timeout = 30) {
   return telegramRequest(
     'getUpdates',
-    { offset, timeout },
+    { offset, timeout, allowed_updates: ['message', 'callback_query'] },
     (timeout + 10) * 1000  // 텔레그램 long poll 시간 + 여유
   );
 }
@@ -2267,8 +2267,10 @@ async function handleCallbackQuery(cq) {
 // 메시지 처리
 // ============================================================
 async function handleMessage(msg) {
-  const text = msg.text?.toLowerCase()?.trim();
+  // 그룹에서 @봇이름 제거 처리
+  let text = msg.text?.trim();
   if (!text) return;
+  text = text.replace(/@\S+/g, '').trim().toLowerCase();
 
   const chatId = String(msg.chat.id);
   const isGroup = CONFIG.telegramGroupId && chatId === CONFIG.telegramGroupId;
@@ -2276,7 +2278,9 @@ async function handleMessage(msg) {
 
   // 그룹: 놀티켓 명령어만 허용
   if (isGroup) {
-    if (['sales', '/sales', '조회', '판매현황', '놀티켓'].includes(text)) {
+    const cmd = text.replace(/^\//, '');  // 슬래시 제거
+    if (['sales', '조회', '판매현황', '놀티켓'].includes(cmd)) {
+      console.log(`📩 그룹 메시지: "${text}" from ${msg.from?.first_name || ''}`);
       await sendMessageTo(chatId, '🔍 판매현황 조회 중... 약 1분 소요됩니다.');
       try {
         await runSalesScript(chatId);
