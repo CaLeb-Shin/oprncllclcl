@@ -2288,7 +2288,10 @@ async function handleMessage(msg) {
   }
 
   // 개인: 본인만 허용
-  if (!isPersonal) return;
+  if (!isPersonal) {
+    console.log(`📩 알 수 없는 chatId: ${chatId} (${msg.chat.title || msg.chat.username || ''})`);
+    return;
+  }
 
   console.log(`📩 메시지: "${text}"`);
 
