@@ -468,11 +468,14 @@ async function smartstoreAutoRelogin() {
 }
 
 // 스마트스토어 세션 keep-alive (페이지 방문 + 네이버 쿠키 갱신 + 세션 갱신)
+let isKeepAliveRunning = false;
 async function smartstoreKeepAlive() {
   if (!smartstorePage || !smartstoreCtx) return;
-  // 주문 확인 중이면 충돌 방지
-  if (isSmartstoreRunning) { console.log('🔄 keep-alive: 주문 확인 중 → 스킵'); return; }
+  // 주문 확인/결산 중이면 충돌 방지
+  if (isSmartstoreRunning) { console.log('🔄 keep-alive: 스토어 작업 중 → 스킵'); return; }
+  if (isKeepAliveRunning) return;
   if (wasDisconnected) { console.log('🔄 keep-alive: 인터넷 끊김 → 스킵'); return; }
+  isKeepAliveRunning = true;
 
   try {
     // 페이지가 살아있는지 확인
@@ -531,6 +534,8 @@ async function smartstoreKeepAlive() {
       console.log('⚠️ keep-alive 복구 실패:', e.message);
       isEnsureBrowserRunning = false;
     }
+  } finally {
+    isKeepAliveRunning = false;
   }
 }
 
@@ -1315,6 +1320,10 @@ async function getFinalSummaryList() {
 
 // 네이버 스토어에서 취소/반품 주문 자동 수집
 async function getNaverCancelledOrders() {
+  // keep-alive 끝날 때까지 대기
+  while (isKeepAliveRunning) {
+    await new Promise((r) => setTimeout(r, 2000));
+  }
   console.log('🔍 네이버 취소/반품 주문 수집...');
   await ensureBrowser();
 
@@ -1713,9 +1722,9 @@ function isPerfFuture(perfKey) {
 }
 
 async function getStoreSalesSummary() {
-  // 주문 확인과 동시 실행 방지
-  while (isSmartstoreRunning) {
-    console.log('   ⏳ 주문 확인 완료 대기 중...');
+  // 주문 확인 / keep-alive 동시 실행 방지
+  while (isSmartstoreRunning || isKeepAliveRunning) {
+    console.log('   ⏳ 스토어 작업 완료 대기 중...');
     await new Promise((r) => setTimeout(r, 3000));
   }
   isSmartstoreRunning = true;
