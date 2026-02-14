@@ -24,20 +24,34 @@ const SMARTSTORE_DATA_DIR = path.join(__dirname, 'smartstore-data');
 const SMARTSTORE_STATE = path.join(__dirname, 'smartstore-state.json');  // 레거시
 const PPURIO_STATE = path.join(__dirname, 'ppurio-state.json');
 
-// Windows headless shell 콘솔 창 방지 (검증용)
-function getHeadlessOptions() {
-  const opts = { headless: true };
-  if (process.platform === 'win32') {
-    try {
-      const dp = chromium.executablePath();
-      if (dp.includes('headless_shell') || dp.includes('chrome-headless-shell')) {
-        const fp = dp
-          .replace(/chromium_headless_shell-(\d+)/, 'chromium-$1')
-          .replace(/chrome-headless-shell-win64[\\\/]chrome-headless-shell\.exe/i, 'chrome-win\\chrome.exe');
-        if (fs.existsSync(fp)) opts.executablePath = fp;
+// Windows: 일반 Chromium 실행파일 찾기 (chrome-headless-shell은 persistent context 미지원)
+function findFullChromium() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const dp = chromium.executablePath();
+    if (!dp.includes('headless_shell') && !dp.includes('chrome-headless-shell')) return dp;
+    // browsers 디렉토리에서 chromium-* 폴더 직접 탐색
+    const browsersDir = dp.replace(/[\\\/]chromium_headless_shell-[^\\\/]+[\\\/].*/i, '');
+    if (fs.existsSync(browsersDir)) {
+      const entries = fs.readdirSync(browsersDir);
+      for (const entry of entries) {
+        if (/^chromium-\d+$/.test(entry)) {
+          const fullPath = path.join(browsersDir, entry, 'chrome-win', 'chrome.exe');
+          if (fs.existsSync(fullPath)) {
+            console.log('🌐 Windows: 일반 Chromium 발견 →', entry);
+            return fullPath;
+          }
+        }
       }
-    } catch {}
-  }
+    }
+  } catch {}
+  return null;
+}
+
+function getHeadlessOptions() {
+  const opts = { headless: true, args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'] };
+  const fullChromium = findFullChromium();
+  if (fullChromium) opts.executablePath = fullChromium;
   return opts;
 }
 
@@ -141,9 +155,17 @@ async function setupSmartStore() {
     console.log('');
     console.log('🔬 저장된 세션 검증 중...');
     await context.close();  // 먼저 닫아야 다시 열 수 있음
+    await new Promise(r => setTimeout(r, 2000));  // 프로필 데이터 디스크 플러시 대기
 
-    const testCtx = await chromium.launchPersistentContext(SMARTSTORE_DATA_DIR, getHeadlessOptions());
+    const headlessOpts = getHeadlessOptions();
+    console.log('   실행파일:', headlessOpts.executablePath || '(기본값 - chrome-headless-shell)');
+    const testCtx = await chromium.launchPersistentContext(SMARTSTORE_DATA_DIR, headlessOpts);
     const testPage = await testCtx.newPage();
+
+    // 쿠키 로드 확인
+    const testCookies = await testCtx.cookies();
+    console.log(`   로드된 쿠키: ${testCookies.length}개`);
+    console.log(`   NID 쿠키: ${testCookies.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES') ? '있음' : '없음'}`);
     await testPage.goto('https://sell.smartstore.naver.com/#/home/dashboard', { waitUntil: 'domcontentloaded' });
     await testPage.waitForTimeout(5000);
     const testOk = await testPage.evaluate(() =>

@@ -4,30 +4,48 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// Windows에서 chrome-headless-shell 콘솔 창 방지
-// → 일반 Chromium 실행파일 사용
+// Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell은 persistent context 미지원)
+function findFullChromium() {
+  if (process.platform !== 'win32') return null;
+
+  try {
+    const defaultPath = chromium.executablePath();
+    // 이미 일반 Chromium이면 그대로 사용
+    if (!defaultPath.includes('headless_shell') && !defaultPath.includes('chrome-headless-shell')) {
+      return defaultPath;
+    }
+
+    // browsers 디렉토리에서 chromium-* 폴더 직접 탐색
+    // (headless_shell과 chromium의 리비전 번호가 다를 수 있으므로 regex 변환 대신 스캔)
+    const browsersDir = defaultPath.replace(/[\\\/]chromium_headless_shell-[^\\\/]+[\\\/].*/i, '');
+    if (fs.existsSync(browsersDir)) {
+      const entries = fs.readdirSync(browsersDir);
+      for (const entry of entries) {
+        if (/^chromium-\d+$/.test(entry)) {
+          const fullPath = path.join(browsersDir, entry, 'chrome-win', 'chrome.exe');
+          if (fs.existsSync(fullPath)) {
+            console.log('🌐 Windows: 일반 Chromium 발견 →', entry);
+            return fullPath;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Chromium 경로 탐색 실패:', e.message);
+  }
+
+  return null;
+}
+
 function getBrowserLaunchOptions() {
   const opts = {
     headless: true,
     args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'],
   };
 
-  if (process.platform === 'win32') {
-    try {
-      const defaultPath = chromium.executablePath();
-      if (defaultPath.includes('headless_shell') || defaultPath.includes('chrome-headless-shell')) {
-        // chrome-headless-shell → 일반 chromium 경로로 변환
-        const fullChromePath = defaultPath
-          .replace(/chromium_headless_shell-(\d+)/, 'chromium-$1')
-          .replace(/chrome-headless-shell-win64[\\\/]chrome-headless-shell\.exe/i, 'chrome-win\\chrome.exe');
-        if (fs.existsSync(fullChromePath)) {
-          opts.executablePath = fullChromePath;
-          console.log('🌐 Windows: 일반 Chromium 사용 (콘솔 창 방지)');
-        }
-      }
-    } catch (e) {
-      console.log('⚠️ Chromium 경로 확인 실패, 기본값 사용');
-    }
+  const fullChromium = findFullChromium();
+  if (fullChromium) {
+    opts.executablePath = fullChromium;
   }
 
   return opts;
