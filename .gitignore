@@ -1,6 +1,7 @@
 # 세션 파일 (민감정보 - 절대 올리면 안됨)
 smartstore-state.json
 ppurio-state.json
+naver-credentials.json
 
 # Node.js
 node_modules/
