@@ -4,7 +4,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell은 persistent context 미지원)
+// Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell 콘솔 창 방지)
 function findFullChromium() {
   if (process.platform !== 'win32') return null;
 
@@ -66,8 +66,7 @@ const CONFIG = {
   },
 
   baseDir: path.resolve(__dirname),
-  smartstoreUserDataDir: path.join(__dirname, 'smartstore-data'),
-  smartstoreStateFile: path.join(__dirname, 'smartstore-state.json'),  // 마이그레이션용 (레거시)
+  smartstoreStateFile: path.join(__dirname, 'smartstore-state.json'),
   ppurioStateFile: path.join(__dirname, 'ppurio-state.json'),
   processedOrdersFile: path.join(__dirname, 'processed-orders.json'),
   processedCancelsFile: path.join(__dirname, 'processed-cancels.json'),
@@ -98,21 +97,11 @@ function shouldNotifySessionExpire() {
   return true;
 }
 
-let browser = null;  // ppurio 전용 브라우저
+let browser = null;
 let smartstoreCtx = null;
 let smartstorePage = null;
 let ppurioCtx = null;
 let ppurioPage = null;
-
-// 스마트스토어 쿠키 명시 저장 (session-only 쿠키 보존용)
-async function saveSmartStoreCookies() {
-  if (!smartstoreCtx) return;
-  try {
-    const cookies = await smartstoreCtx.cookies();
-    const cookieFile = path.join(CONFIG.smartstoreUserDataDir, 'saved-cookies.json');
-    fs.writeFileSync(cookieFile, JSON.stringify(cookies));
-  } catch {}
-}
 
 // ============================================================
 // 유틸: JSON 파일 읽기/쓰기 (안전)
@@ -267,12 +256,11 @@ async function closeBrowser(force = false) {
   try {
     if (smartstorePage && !smartstorePage.isClosed()) await smartstorePage.close().catch(() => {});
     if (ppurioPage && !ppurioPage.isClosed()) await ppurioPage.close().catch(() => {});
-    // smartstoreCtx는 persistent context → close()하면 브라우저도 함께 종료
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
     if (ppurioCtx) await ppurioCtx.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});  // ppurio 전용 브라우저
+    if (browser) await browser.close().catch(() => {});
   } catch {}
-  browser = null;  // ppurio 전용 브라우저
+  browser = null;
   smartstoreCtx = null;
   smartstorePage = null;
   ppurioCtx = null;
@@ -414,17 +402,21 @@ async function ppurioAutoRelogin() {
   }
 }
 
-// 스마트스토어 자동 재로그인 (persistent context → 페이지만 재생성)
 async function smartstoreAutoRelogin() {
   console.log('🔐 스마트스토어 자동 재로그인 시도...');
 
-  // 기존 페이지만 정리 (persistent context는 유지 → 쿠키 자동 보존)
+  // 기존 스마트스토어 컨텍스트 정리
   if (smartstorePage && !smartstorePage.isClosed()) await smartstorePage.close().catch(() => {});
+  if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
   smartstorePage = null;
+  smartstoreCtx = null;
 
-  if (!smartstoreCtx) return false;
+  if (!browser) return false;
+  if (!fs.existsSync(CONFIG.smartstoreStateFile)) return false;
 
   try {
+    // 저장된 세션(네이버 NID 쿠키 포함)으로 새 컨텍스트
+    smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
     smartstorePage = await smartstoreCtx.newPage();
     smartstorePage.setDefaultTimeout(60_000);
 
@@ -450,6 +442,8 @@ async function smartstoreAutoRelogin() {
         console.log('   ❌ naver-credentials.json 없음 - 수동 재로그인 필요');
         await smartstorePage.close().catch(() => {});
         smartstorePage = null;
+        if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+        smartstoreCtx = null;
         return false;
       }
 
@@ -485,24 +479,31 @@ async function smartstoreAutoRelogin() {
           const afterUrl = smartstorePage.url();
           const loginSuccess = !afterUrl.includes('nidlogin.login') && !afterUrl.includes('error');
           if (loginSuccess) {
-            console.log('   ✅ 네이버 아이디/비밀번호 로그인 성공! (persistent context 자동 저장)');
+            console.log('   ✅ 네이버 아이디/비밀번호 로그인 성공!');
+            await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
           } else {
             console.log('   ❌ 네이버 로그인 실패 (캡차 또는 2단계 인증 필요)');
             if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>네이버 자동 로그인 실패</b>\n\n서버에서 실행:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>');
             await smartstorePage.close().catch(() => {});
             smartstorePage = null;
+            if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+            smartstoreCtx = null;
             return false;
           }
         } else {
           console.log('   ❌ 로그인 폼을 찾을 수 없음');
           await smartstorePage.close().catch(() => {});
           smartstorePage = null;
+          if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+          smartstoreCtx = null;
           return false;
         }
       } catch (loginErr) {
         console.log('   ❌ 네이버 로그인 오류:', loginErr.message);
         await smartstorePage.close().catch(() => {});
         smartstorePage = null;
+        if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+        smartstoreCtx = null;
         return false;
       }
     } else {
@@ -534,19 +535,24 @@ async function smartstoreAutoRelogin() {
     );
 
     if (ssLoggedIn) {
-      console.log('   ✅ 스마트스토어 자동 재로그인 성공!');
-      await saveSmartStoreCookies();
+      // 세션 파일 갱신
+      await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+      console.log('   ✅ 스마트스토어 자동 재로그인 성공! 세션 갱신됨');
       return true;
     }
 
     console.log('   ❌ 스마트스토어 자동 재로그인 실패 (대시보드 접근 불가)');
     await smartstorePage.close().catch(() => {});
     smartstorePage = null;
+    if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+    smartstoreCtx = null;
     return false;
   } catch (err) {
     console.error('   ❌ 스마트스토어 재로그인 오류:', err.message);
     if (smartstorePage) await smartstorePage.close().catch(() => {});
     smartstorePage = null;
+    if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+    smartstoreCtx = null;
     return false;
   }
 }
@@ -589,8 +595,9 @@ async function smartstoreKeepAlive() {
     );
 
     if (isOk) {
+      // 세션 파일도 갱신 (갱신된 네이버+스마트스토어 쿠키 모두 저장)
+      await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
       console.log('🔄 스마트스토어 세션 keep-alive OK');
-      await saveSmartStoreCookies();
     } else {
       console.log('⚠️ 스마트스토어 세션 만료 감지 (keep-alive) → 자동 재로그인 시도');
       // 세션 만료 → 자동 재로그인 시도 (네이버 NID 쿠키로)
@@ -681,7 +688,7 @@ async function ensureBrowser() {
       isEnsureBrowserRunning = false;
     }
     // 다른 호출이 완료된 후 브라우저가 정상이면 리턴
-    if (smartstoreCtx && smartstorePage) {
+    if (browser && smartstorePage) {
       try { await smartstorePage.evaluate(() => true); return; } catch {}
     }
   }
@@ -689,7 +696,7 @@ async function ensureBrowser() {
 
   try {
   // 스마트스토어 + 뿌리오 둘 다 살아있는지 확인
-  if (smartstoreCtx && smartstorePage) {
+  if (browser && smartstorePage) {
     let ssOk = false;
     let ppOk = false;
 
@@ -710,7 +717,8 @@ async function ensureBrowser() {
           document.body.textContent.includes('상품관리')
         );
         if (sessionValid) {
-          return;  // 세션 정상 (persistent context 자동 저장)
+          await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+          return;  // 세션도 정상
         }
         // 세션 킥됨 → 자동 재로그인
         console.log('⚠️ 세션 킥 감지 (다른 기기 로그인?) → 자동 재로그인...');
@@ -732,41 +740,15 @@ async function ensureBrowser() {
   }
 
   console.log('🌐 브라우저 초기화...');
+  browser = await chromium.launch(getBrowserLaunchOptions());
 
-  // 스마트스토어 (persistent context → 쿠키/IndexedDB/캐시 모두 자동 영구 저장)
-  const launchOpts = getBrowserLaunchOptions();
-  smartstoreCtx = await chromium.launchPersistentContext(CONFIG.smartstoreUserDataDir, launchOpts);
+  // 스마트스토어
+  if (!fs.existsSync(CONFIG.smartstoreStateFile)) {
+    throw new Error('smartstore-state.json 없음. node setup-login.js 실행하세요.');
+  }
+  smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
   smartstorePage = await smartstoreCtx.newPage();
   smartstorePage.setDefaultTimeout(60_000);
-
-  // 세션 전용 쿠키 복원 (persistent context는 session-only 쿠키를 디스크에 안 남김)
-  const savedCookieFile = path.join(CONFIG.smartstoreUserDataDir, 'saved-cookies.json');
-  if (fs.existsSync(savedCookieFile)) {
-    try {
-      const savedCookies = JSON.parse(fs.readFileSync(savedCookieFile, 'utf8'));
-      if (savedCookies.length > 0) {
-        await smartstoreCtx.addCookies(savedCookies);
-        console.log(`   🍪 저장된 쿠키 ${savedCookies.length}개 복원`);
-      }
-    } catch (e) {
-      console.log('   ⚠️ 쿠키 복원 실패:', e.message);
-    }
-  }
-
-  // 레거시 storageState 파일에서 쿠키 마이그레이션 (최초 1회)
-  if (fs.existsSync(CONFIG.smartstoreStateFile)) {
-    try {
-      const state = JSON.parse(fs.readFileSync(CONFIG.smartstoreStateFile, 'utf8'));
-      if (state.cookies && state.cookies.length > 0) {
-        await smartstoreCtx.addCookies(state.cookies);
-        console.log(`   🔄 기존 세션에서 쿠키 ${state.cookies.length}개 마이그레이션`);
-      }
-      fs.unlinkSync(CONFIG.smartstoreStateFile);
-      console.log('   🗑️ 기존 smartstore-state.json 삭제 (마이그레이션 완료)');
-    } catch (e) {
-      console.log('   ⚠️ 쿠키 마이그레이션 실패:', e.message);
-    }
-  }
 
   // 스마트스토어 로그인 확인 (최대 3회 시도, 페이지 로딩 느릴 수 있음)
   let ssLoggedIn = false;
@@ -795,10 +777,12 @@ async function ensureBrowser() {
 
       console.log(`   ⚠️ 스마트스토어 로그인 확인 실패 (${attempt}/3)`);
 
-      // persistent context는 컨텍스트 재생성 불가 → 페이지만 재생성
+      // 2번째 시도부터는 컨텍스트 재생성
       if (attempt < 3) {
-        console.log(`   🔄 페이지 재생성 중... (${attempt + 1}/3)`);
+        console.log(`   🔄 컨텍스트 재생성 중... (${attempt + 1}/3)`);
         await smartstorePage.close().catch(() => {});
+        await smartstoreCtx.close().catch(() => {});
+        smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
         smartstorePage = await smartstoreCtx.newPage();
         smartstorePage.setDefaultTimeout(60_000);
         await smartstorePage.waitForTimeout(2000);
@@ -808,6 +792,8 @@ async function ensureBrowser() {
       if (attempt < 3) {
         try {
           await smartstorePage.close().catch(() => {});
+          await smartstoreCtx.close().catch(() => {});
+          smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
           smartstorePage = await smartstoreCtx.newPage();
           smartstorePage.setDefaultTimeout(60_000);
         } catch {}
@@ -844,12 +830,12 @@ async function ensureBrowser() {
       console.log('   ✅ 자동 재로그인 성공!');
     }
   }
-  await saveSmartStoreCookies();
-  console.log('   ✅ 스마트스토어 로그인 OK (persistent context)');
+  // 세션 갱신 저장
+  await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+  console.log('   ✅ 스마트스토어 로그인 OK');
 
-  // 뿌리오 (별도 브라우저 + storageState 방식 유지)
+  // 뿌리오
   if (fs.existsSync(CONFIG.ppurioStateFile)) {
-    browser = await chromium.launch(getBrowserLaunchOptions());
     ppurioCtx = await browser.newContext({ storageState: CONFIG.ppurioStateFile });
     ppurioPage = await ppurioCtx.newPage();
     ppurioPage.setDefaultTimeout(30_000);
@@ -1722,7 +1708,7 @@ async function checkForNewOrders() {
 
     // 주문 확인 성공 → 세션 갱신 저장
     try {
-      await saveSmartStoreCookies();
+      await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
       if (ppurioCtx) {
         await ppurioCtx.storageState({ path: CONFIG.ppurioStateFile });
       }

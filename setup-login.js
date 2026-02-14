@@ -1,6 +1,6 @@
 /**
  * 로그인 설정 스크립트
- * 
+ *
  * 사용법:
  *   node setup-login.js           # 만료된 세션만 재설정
  *   node setup-login.js --force   # 모든 세션 강제 재설정
@@ -20,11 +20,10 @@ function waitForEnter(prompt) {
   });
 }
 
-const SMARTSTORE_DATA_DIR = path.join(__dirname, 'smartstore-data');
-const SMARTSTORE_STATE = path.join(__dirname, 'smartstore-state.json');  // 레거시
+const SMARTSTORE_STATE = path.join(__dirname, 'smartstore-state.json');
 const PPURIO_STATE = path.join(__dirname, 'ppurio-state.json');
 
-// Windows: 일반 Chromium 실행파일 찾기 (chrome-headless-shell은 persistent context 미지원)
+// Windows: 일반 Chromium 실행파일 찾기 (chrome-headless-shell 콘솔 창 방지)
 function findFullChromium() {
   if (process.platform !== 'win32') return null;
   try {
@@ -62,7 +61,7 @@ const onlyPpurio = args.includes('ppurio');
 
 async function setupSmartStore() {
   console.log('═══════════════════════════════════════════════════════');
-  console.log('📦 스마트스토어 로그인 설정 (persistent context)');
+  console.log('📦 스마트스토어 로그인 설정');
   console.log('═══════════════════════════════════════════════════════');
   console.log('');
   console.log('브라우저가 열리면:');
@@ -73,19 +72,14 @@ async function setupSmartStore() {
   console.log('5. 대시보드가 보이면 여기 와서 Enter 누르세요!');
   console.log('');
 
-  // 기존 데이터 디렉토리 삭제 (깨끗하게 시작)
-  if (fs.existsSync(SMARTSTORE_DATA_DIR)) {
-    fs.rmSync(SMARTSTORE_DATA_DIR, { recursive: true });
-    console.log('🗑️ 기존 세션 디렉토리 삭제');
-  }
-  // 레거시 state 파일도 삭제
+  // 기존 상태파일 삭제 (깨끗하게 시작)
   if (fs.existsSync(SMARTSTORE_STATE)) {
     fs.unlinkSync(SMARTSTORE_STATE);
     console.log('🗑️ 기존 세션 파일 삭제');
   }
 
-  // persistent context로 브라우저 열기 (세션 자동 영구 저장)
-  const context = await chromium.launchPersistentContext(SMARTSTORE_DATA_DIR, { headless: false });
+  const browser = await chromium.launch({ headless: false });
+  const context = await browser.newContext();
   const page = await context.newPage();
 
   await page.goto('https://sell.smartstore.naver.com/');
@@ -114,7 +108,7 @@ async function setupSmartStore() {
 
     if (!ssLoggedIn) {
       console.log('❌ 로그인이 안 된 것 같아요. 다시 시도해주세요.');
-      await context.close();
+      await browser.close();
       return;
     }
 
@@ -127,62 +121,45 @@ async function setupSmartStore() {
     await naverPage.waitForTimeout(3000);
     await naverPage.close();
 
-    // persistent context → 자동 저장됨! (storageState 불필요)
-    console.log('💾 세션 저장됨: smartstore-data/ (persistent context)');
+    // 세션 저장
+    await context.storageState({ path: SMARTSTORE_STATE });
+    console.log('💾 저장됨:', SMARTSTORE_STATE);
 
-    // 쿠키 확인
-    const cookies = await context.cookies();
-    const naverCookies = cookies.filter(c => c.domain?.includes('naver'));
-    const hasNID = cookies.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES');
+    // 저장된 쿠키 확인
+    const savedState = JSON.parse(fs.readFileSync(SMARTSTORE_STATE, 'utf8'));
+    const cookieCount = savedState.cookies?.length || 0;
+    const naverCookies = savedState.cookies?.filter(c => c.domain?.includes('naver')) || [];
+    const hasNID = savedState.cookies?.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES');
 
     console.log('');
     console.log('📊 저장된 쿠키 정보:');
-    console.log(`   총 쿠키: ${cookies.length}개`);
+    console.log(`   총 쿠키: ${cookieCount}개`);
     console.log(`   네이버 쿠키: ${naverCookies.length}개`);
     console.log(`   NID_AUT/NID_SES: ${hasNID ? '✅ 완벽!' : '❌ "로그인 상태 유지" 안 눌렀어요!'}`);
 
     if (!hasNID) {
       console.log('');
       console.log('⚠️ "로그인 상태 유지" 안 눌렀어요!');
-      console.log('   이러면 세션이 빨리 만료돼요. 다시 해주세요:');
+      console.log('   이러면 잠자기 후 세션 만료돼요. 다시 해주세요:');
       console.log('   node setup-login.js smartstore');
     } else {
       console.log('');
-      console.log('🎉 완벽하게 저장됐어요! (persistent context → 영구 보존)');
+      console.log('🎉 완벽하게 저장됐어요!');
     }
 
-    // 세션 전용 쿠키 명시 저장 (persistent context는 session-only 쿠키를 디스크에 안 남김)
-    const allCookies = await context.cookies();
-    const cookieFile = path.join(SMARTSTORE_DATA_DIR, 'saved-cookies.json');
-    fs.writeFileSync(cookieFile, JSON.stringify(allCookies));
-    console.log(`💾 쿠키 ${allCookies.length}개 명시 저장 → saved-cookies.json`);
-
-    // headless로 검증 (persistent context 재활용)
+    // headless로 검증
     console.log('');
     console.log('🔬 저장된 세션 검증 중...');
-    await context.close();  // 먼저 닫아야 다시 열 수 있음
-    await new Promise(r => setTimeout(r, 2000));  // 프로필 데이터 디스크 플러시 대기
-
-    const headlessOpts = getHeadlessOptions();
-    console.log('   실행파일:', headlessOpts.executablePath || '(기본값 - chrome-headless-shell)');
-    const testCtx = await chromium.launchPersistentContext(SMARTSTORE_DATA_DIR, headlessOpts);
-
-    // 명시 저장한 쿠키 복원 (세션 전용 쿠키 포함)
-    const savedCookies = JSON.parse(fs.readFileSync(cookieFile, 'utf8'));
-    await testCtx.addCookies(savedCookies);
+    const testBrowser = await chromium.launch(getHeadlessOptions());
+    const testCtx = await testBrowser.newContext({ storageState: SMARTSTORE_STATE });
     const testPage = await testCtx.newPage();
-
-    // 쿠키 로드 확인
-    const testCookies = await testCtx.cookies();
-    console.log(`   로드된 쿠키: ${testCookies.length}개 (복원 후)`);
-    console.log(`   NID 쿠키: ${testCookies.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES') ? '있음' : '없음'}`);
     await testPage.goto('https://sell.smartstore.naver.com/#/home/dashboard', { waitUntil: 'domcontentloaded' });
     await testPage.waitForTimeout(5000);
     const testOk = await testPage.evaluate(() =>
       document.body.textContent.includes('판매관리') ||
       document.body.textContent.includes('정산관리')
     );
-    await testCtx.close();
+    await testBrowser.close();
 
     if (testOk) {
       console.log('   ✅ headless 검증 통과! 봇에서 쓸 수 있어요.');
@@ -190,13 +167,11 @@ async function setupSmartStore() {
       console.log('   ❌ headless 검증 실패. 세션이 제대로 안 저장됐어요.');
     }
 
-    return;  // context 이미 닫힘
-
   } catch (e) {
     console.log('❌ 오류:', e.message);
   }
 
-  await context.close().catch(() => {});
+  await browser.close();
 }
 
 async function setupPpurio() {
@@ -287,42 +262,17 @@ async function setupPpurio() {
   await browser.close();
 }
 
-// 스마트스토어 세션 검증 (persistent context)
-async function isSmartStoreSessionValid() {
-  if (!fs.existsSync(SMARTSTORE_DATA_DIR)) return false;
-  let ctx;
-  try {
-    ctx = await chromium.launchPersistentContext(SMARTSTORE_DATA_DIR, getHeadlessOptions());
-    const page = await ctx.newPage();
-    await page.goto('https://sell.smartstore.naver.com/#/home/dashboard');
-    await page.waitForTimeout(3000);
-    const ok = await page.evaluate(() =>
-      document.body.textContent.includes('판매관리') ||
-      document.body.textContent.includes('정산관리')
-    );
-    await ctx.close();
-    return ok;
-  } catch {
-    if (ctx) await ctx.close().catch(() => {});
-    return false;
-  }
-}
+async function isSessionValid(stateFile, url, checkFn) {
+  if (!fs.existsSync(stateFile)) return false;
 
-// 뿌리오 세션 검증 (storageState)
-async function isPpurioSessionValid() {
-  if (!fs.existsSync(PPURIO_STATE)) return false;
   let browser;
   try {
     browser = await chromium.launch(getHeadlessOptions());
-    const ctx = await browser.newContext({ storageState: PPURIO_STATE });
+    const ctx = await browser.newContext({ storageState: stateFile });
     const page = await ctx.newPage();
-    await page.goto('https://www.ppurio.com/');
+    await page.goto(url);
     await page.waitForTimeout(3000);
-    const ok = await page.evaluate(() => {
-      const hasLoginForm = document.body.innerText.includes('아이디 저장') ||
-                           document.body.innerText.includes('비밀번호 재설정');
-      return !hasLoginForm && document.body.innerText.includes('로그아웃');
-    });
+    const ok = await page.evaluate(checkFn);
     await browser.close();
     return ok;
   } catch {
@@ -337,13 +287,17 @@ async function main() {
   const doSmartstore = !onlyPpurio;
   const doPpurio = !onlySmartstore;
 
-  // 스마트스토어 (persistent context)
+  // 스마트스토어
   if (doSmartstore) {
-    if (forceAll || !fs.existsSync(SMARTSTORE_DATA_DIR)) {
+    if (forceAll || !fs.existsSync(SMARTSTORE_STATE)) {
       await setupSmartStore();
     } else {
-      console.log('📦 스마트스토어 세션 확인 중 (persistent context)...');
-      const valid = await isSmartStoreSessionValid();
+      console.log('📦 스마트스토어 세션 확인 중...');
+      const valid = await isSessionValid(
+        SMARTSTORE_STATE,
+        'https://sell.smartstore.naver.com/#/home/dashboard',
+        () => document.body.textContent.includes('판매관리') || document.body.textContent.includes('정산관리')
+      );
       if (valid) {
         console.log('   ✅ 스마트스토어 세션 유효\n');
       } else {
@@ -353,13 +307,21 @@ async function main() {
     }
   }
 
-  // 뿌리오 (storageState)
+  // 뿌리오
   if (doPpurio) {
     if (forceAll || !fs.existsSync(PPURIO_STATE)) {
       await setupPpurio();
     } else {
       console.log('💬 뿌리오 세션 확인 중...');
-      const valid = await isPpurioSessionValid();
+      const valid = await isSessionValid(
+        PPURIO_STATE,
+        'https://www.ppurio.com/',
+        () => {
+          const hasLoginForm = document.body.innerText.includes('아이디 저장') ||
+                               document.body.innerText.includes('비밀번호 재설정');
+          return !hasLoginForm && document.body.innerText.includes('로그아웃');
+        }
+      );
       if (valid) {
         console.log('   ✅ 뿌리오 세션 유효\n');
       } else {
