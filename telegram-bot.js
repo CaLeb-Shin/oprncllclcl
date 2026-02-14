@@ -483,7 +483,6 @@ async function smartstoreAutoRelogin() {
             await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
           } else {
             console.log('   ❌ 네이버 로그인 실패 (캡차 또는 2단계 인증 필요)');
-            if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>네이버 자동 로그인 실패</b>\n\n서버에서 실행:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>');
             await smartstorePage.close().catch(() => {});
             smartstorePage = null;
             if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
