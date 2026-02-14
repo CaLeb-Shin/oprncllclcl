@@ -98,11 +98,21 @@ function shouldNotifySessionExpire() {
   return true;
 }
 
-let browser = null;
+let browser = null;  // ppurio 전용 브라우저
 let smartstoreCtx = null;
 let smartstorePage = null;
 let ppurioCtx = null;
 let ppurioPage = null;
+
+// 스마트스토어 쿠키 명시 저장 (session-only 쿠키 보존용)
+async function saveSmartStoreCookies() {
+  if (!smartstoreCtx) return;
+  try {
+    const cookies = await smartstoreCtx.cookies();
+    const cookieFile = path.join(CONFIG.smartstoreUserDataDir, 'saved-cookies.json');
+    fs.writeFileSync(cookieFile, JSON.stringify(cookies));
+  } catch {}
+}
 
 // ============================================================
 // 유틸: JSON 파일 읽기/쓰기 (안전)
@@ -524,7 +534,8 @@ async function smartstoreAutoRelogin() {
     );
 
     if (ssLoggedIn) {
-      console.log('   ✅ 스마트스토어 자동 재로그인 성공! (persistent context 자동 저장)');
+      console.log('   ✅ 스마트스토어 자동 재로그인 성공!');
+      await saveSmartStoreCookies();
       return true;
     }
 
@@ -578,8 +589,8 @@ async function smartstoreKeepAlive() {
     );
 
     if (isOk) {
-      // persistent context → 쿠키 자동 저장됨
       console.log('🔄 스마트스토어 세션 keep-alive OK');
+      await saveSmartStoreCookies();
     } else {
       console.log('⚠️ 스마트스토어 세션 만료 감지 (keep-alive) → 자동 재로그인 시도');
       // 세션 만료 → 자동 재로그인 시도 (네이버 NID 쿠키로)
@@ -728,7 +739,21 @@ async function ensureBrowser() {
   smartstorePage = await smartstoreCtx.newPage();
   smartstorePage.setDefaultTimeout(60_000);
 
-  // 기존 storageState 파일에서 쿠키 마이그레이션 (최초 1회)
+  // 세션 전용 쿠키 복원 (persistent context는 session-only 쿠키를 디스크에 안 남김)
+  const savedCookieFile = path.join(CONFIG.smartstoreUserDataDir, 'saved-cookies.json');
+  if (fs.existsSync(savedCookieFile)) {
+    try {
+      const savedCookies = JSON.parse(fs.readFileSync(savedCookieFile, 'utf8'));
+      if (savedCookies.length > 0) {
+        await smartstoreCtx.addCookies(savedCookies);
+        console.log(`   🍪 저장된 쿠키 ${savedCookies.length}개 복원`);
+      }
+    } catch (e) {
+      console.log('   ⚠️ 쿠키 복원 실패:', e.message);
+    }
+  }
+
+  // 레거시 storageState 파일에서 쿠키 마이그레이션 (최초 1회)
   if (fs.existsSync(CONFIG.smartstoreStateFile)) {
     try {
       const state = JSON.parse(fs.readFileSync(CONFIG.smartstoreStateFile, 'utf8'));
@@ -736,7 +761,6 @@ async function ensureBrowser() {
         await smartstoreCtx.addCookies(state.cookies);
         console.log(`   🔄 기존 세션에서 쿠키 ${state.cookies.length}개 마이그레이션`);
       }
-      // 마이그레이션 완료 후 파일 삭제 (중복 방지)
       fs.unlinkSync(CONFIG.smartstoreStateFile);
       console.log('   🗑️ 기존 smartstore-state.json 삭제 (마이그레이션 완료)');
     } catch (e) {
@@ -820,6 +844,7 @@ async function ensureBrowser() {
       console.log('   ✅ 자동 재로그인 성공!');
     }
   }
+  await saveSmartStoreCookies();
   console.log('   ✅ 스마트스토어 로그인 OK (persistent context)');
 
   // 뿌리오 (별도 브라우저 + storageState 방식 유지)
@@ -1695,8 +1720,9 @@ async function checkForNewOrders() {
       try { await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 10000 }); } catch {}
     }
 
-    // 주문 확인 성공 → 뿌리오 세션 갱신 저장 (smartstore는 persistent context 자동 저장)
+    // 주문 확인 성공 → 세션 갱신 저장
     try {
+      await saveSmartStoreCookies();
       if (ppurioCtx) {
         await ppurioCtx.storageState({ path: CONFIG.ppurioStateFile });
       }

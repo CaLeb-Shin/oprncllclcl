@@ -151,6 +151,12 @@ async function setupSmartStore() {
       console.log('🎉 완벽하게 저장됐어요! (persistent context → 영구 보존)');
     }
 
+    // 세션 전용 쿠키 명시 저장 (persistent context는 session-only 쿠키를 디스크에 안 남김)
+    const allCookies = await context.cookies();
+    const cookieFile = path.join(SMARTSTORE_DATA_DIR, 'saved-cookies.json');
+    fs.writeFileSync(cookieFile, JSON.stringify(allCookies));
+    console.log(`💾 쿠키 ${allCookies.length}개 명시 저장 → saved-cookies.json`);
+
     // headless로 검증 (persistent context 재활용)
     console.log('');
     console.log('🔬 저장된 세션 검증 중...');
@@ -160,11 +166,15 @@ async function setupSmartStore() {
     const headlessOpts = getHeadlessOptions();
     console.log('   실행파일:', headlessOpts.executablePath || '(기본값 - chrome-headless-shell)');
     const testCtx = await chromium.launchPersistentContext(SMARTSTORE_DATA_DIR, headlessOpts);
+
+    // 명시 저장한 쿠키 복원 (세션 전용 쿠키 포함)
+    const savedCookies = JSON.parse(fs.readFileSync(cookieFile, 'utf8'));
+    await testCtx.addCookies(savedCookies);
     const testPage = await testCtx.newPage();
 
     // 쿠키 로드 확인
     const testCookies = await testCtx.cookies();
-    console.log(`   로드된 쿠키: ${testCookies.length}개`);
+    console.log(`   로드된 쿠키: ${testCookies.length}개 (복원 후)`);
     console.log(`   NID 쿠키: ${testCookies.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES') ? '있음' : '없음'}`);
     await testPage.goto('https://sell.smartstore.naver.com/#/home/dashboard', { waitUntil: 'domcontentloaded' });
     await testPage.waitForTimeout(5000);
