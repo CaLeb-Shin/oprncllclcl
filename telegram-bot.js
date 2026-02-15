@@ -403,7 +403,7 @@ async function ppurioAutoRelogin() {
 }
 
 async function smartstoreAutoRelogin() {
-  console.log('🔐 스마트스토어 자동 재로그인 시도...');
+  console.log('🔐 스마트스토어 세션 복구 시도...');
 
   // 기존 스마트스토어 컨텍스트 정리
   if (smartstorePage && !smartstorePage.isClosed()) await smartstorePage.close().catch(() => {});
@@ -415,114 +415,12 @@ async function smartstoreAutoRelogin() {
   if (!fs.existsSync(CONFIG.smartstoreStateFile)) return false;
 
   try {
-    // 저장된 세션(네이버 NID 쿠키 포함)으로 새 컨텍스트
+    // 저장된 세션으로 새 컨텍스트
     smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
     smartstorePage = await smartstoreCtx.newPage();
     smartstorePage.setDefaultTimeout(60_000);
 
-    // 1. 먼저 네이버 로그인 상태 확인/갱신 (NID 쿠키 리프레시)
-    console.log('   🔄 네이버 쿠키 확인 중...');
-    await smartstorePage.goto('https://nid.naver.com/nidlogin.login', { timeout: 20000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(2000);
-
-    // 네이버 로그인 상태면 자동 리다이렉트됨 (로그인 폼이 안 보임)
-    const naverUrl = smartstorePage.url();
-    const naverLoggedIn = !naverUrl.includes('nidlogin.login') || await smartstorePage.evaluate(() => {
-      return document.body.textContent.includes('로그아웃') ||
-             document.querySelector('#gnb_logout_button') !== null ||
-             document.querySelector('.MyView-module__btn_logout') !== null;
-    }).catch(() => false);
-
-    if (!naverLoggedIn) {
-      console.log('   ⚠️ 네이버 NID 쿠키 만료 → 아이디/비밀번호 로그인 시도...');
-
-      // naver-credentials.json에서 자격증명 로드
-      const credFile = path.join(__dirname, 'naver-credentials.json');
-      if (!fs.existsSync(credFile)) {
-        console.log('   ❌ naver-credentials.json 없음 - 수동 재로그인 필요');
-        await smartstorePage.close().catch(() => {});
-        smartstorePage = null;
-        if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
-        smartstoreCtx = null;
-        return false;
-      }
-
-      try {
-        const creds = JSON.parse(fs.readFileSync(credFile, 'utf8'));
-        // 네이버 로그인 페이지로 이동
-        await smartstorePage.goto('https://nid.naver.com/nidlogin.login?url=https%3A%2F%2Fsell.smartstore.naver.com', {
-          timeout: 20000, waitUntil: 'domcontentloaded'
-        });
-        await smartstorePage.waitForTimeout(2000);
-
-        // 아이디/비밀번호 입력 (클립보드 방식으로 봇 감지 우회)
-        const idInput = await smartstorePage.$('#id');
-        if (idInput) {
-          await idInput.click();
-          await smartstorePage.evaluate((val) => {
-            document.querySelector('#id').value = val;
-            document.querySelector('#id').dispatchEvent(new Event('input', { bubbles: true }));
-          }, creds.username);
-          await smartstorePage.waitForTimeout(500);
-
-          await smartstorePage.evaluate((val) => {
-            document.querySelector('#pw').value = val;
-            document.querySelector('#pw').dispatchEvent(new Event('input', { bubbles: true }));
-          }, creds.password);
-          await smartstorePage.waitForTimeout(500);
-
-          // 로그인 버튼 클릭
-          await smartstorePage.click('#log\\.login, .btn_login, button[type="submit"]');
-          await smartstorePage.waitForTimeout(5000);
-
-          // 로그인 성공 확인
-          const afterUrl = smartstorePage.url();
-          const loginSuccess = !afterUrl.includes('nidlogin.login') && !afterUrl.includes('error');
-          if (loginSuccess) {
-            console.log('   ✅ 네이버 아이디/비밀번호 로그인 성공!');
-            await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
-          } else {
-            console.log('   ❌ 네이버 로그인 실패 (캡차 또는 2단계 인증 필요)');
-            await smartstorePage.close().catch(() => {});
-            smartstorePage = null;
-            if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
-            smartstoreCtx = null;
-            return false;
-          }
-        } else {
-          console.log('   ❌ 로그인 폼을 찾을 수 없음');
-          await smartstorePage.close().catch(() => {});
-          smartstorePage = null;
-          if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
-          smartstoreCtx = null;
-          return false;
-        }
-      } catch (loginErr) {
-        console.log('   ❌ 네이버 로그인 오류:', loginErr.message);
-        await smartstorePage.close().catch(() => {});
-        smartstorePage = null;
-        if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
-        smartstoreCtx = null;
-        return false;
-      }
-    } else {
-      console.log('   ✅ 네이버 쿠키 유효');
-    }
-
-    // 2. 스마트스토어 로그인 페이지 접속 (네이버 SSO로 자동 로그인)
-    await smartstorePage.goto('https://sell.smartstore.naver.com/', { timeout: 30000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(5000);
-
-    // 3. "로그인하기" 버튼이 있으면 클릭
-    try {
-      const loginBtn = await smartstorePage.$('a[href*="login"], button:has-text("로그인"), .login-btn, [class*="login"]');
-      if (loginBtn) {
-        await loginBtn.click();
-        await smartstorePage.waitForTimeout(5000);
-      }
-    } catch {}
-
-    // 4. 대시보드 확인
+    // 스마트스토어 직접 접속 (storageState 쿠키로 자동 로그인)
     await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
     await smartstorePage.waitForTimeout(5000);
 
@@ -534,20 +432,20 @@ async function smartstoreAutoRelogin() {
     );
 
     if (ssLoggedIn) {
-      // 세션 파일 갱신
       await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
-      console.log('   ✅ 스마트스토어 자동 재로그인 성공! 세션 갱신됨');
+      console.log('   ✅ 스마트스토어 세션 복구 성공!');
       return true;
     }
 
-    console.log('   ❌ 스마트스토어 자동 재로그인 실패 (대시보드 접근 불가)');
+    // 세션 만료 → 수동 재로그인 필요
+    console.log('   ❌ 세션 만료 - 수동 재로그인 필요');
     await smartstorePage.close().catch(() => {});
     smartstorePage = null;
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
     smartstoreCtx = null;
     return false;
   } catch (err) {
-    console.error('   ❌ 스마트스토어 재로그인 오류:', err.message);
+    console.error('   ❌ 세션 복구 오류:', err.message);
     if (smartstorePage) await smartstorePage.close().catch(() => {});
     smartstorePage = null;
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
@@ -602,7 +500,7 @@ async function smartstoreKeepAlive() {
       // 세션 만료 → 자동 재로그인 시도 (네이버 NID 쿠키로)
       const ok = await smartstoreAutoRelogin();
       if (!ok) {
-        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>스마트스토어 세션 만료</b>\n\n자동 재로그인 실패. 서버에서 실행:\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code> 입력');
+        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>네이버 로그인 만료</b>\n\n서버에서 재로그인 해주세요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>');
       } else {
         console.log('🔐 스마트스토어 자동 재로그인 성공!');
       }
@@ -824,7 +722,7 @@ async function ensureBrowser() {
       const reloginOk = await smartstoreAutoRelogin();
       if (!reloginOk) {
         await closeBrowser(true);
-        throw new Error('스마트스토어 세션 만료. 자동 재로그인 실패.');
+        throw new Error('네이버 로그인 만료. 서버에서 node setup-login.js smartstore 실행 필요');
       }
       console.log('   ✅ 자동 재로그인 성공!');
     }
