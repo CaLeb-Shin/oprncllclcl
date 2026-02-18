@@ -2897,6 +2897,70 @@ function startDailyReport() {
 }
 
 // ============================================================
+// 매일 01:00 세션 만료 체크 → 알림
+// ============================================================
+function startDailySessionCheck() {
+  function scheduleNext() {
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(1, 0, 0, 0);
+
+    // 이미 01:00 지났으면 내일로
+    if (now >= target) {
+      target.setDate(target.getDate() + 1);
+    }
+
+    const delay = target.getTime() - now.getTime();
+    const hours = Math.floor(delay / 3600000);
+    const mins = Math.floor((delay % 3600000) / 60000);
+    console.log(`⏰ 다음 세션체크: ${target.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (${hours}시간 ${mins}분 후)`);
+
+    setTimeout(async () => {
+      try {
+        console.log('🔍 01:00 세션 만료 체크...');
+
+        let expired = false;
+
+        // 스마트스토어 체크
+        if (!smartstorePage || !smartstoreCtx) {
+          expired = true;
+        } else {
+          try {
+            await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
+            await smartstorePage.waitForTimeout(3000);
+            const ok = await smartstorePage.evaluate(() =>
+              document.body.textContent.includes('판매관리') ||
+              document.body.textContent.includes('정산관리') ||
+              document.body.textContent.includes('주문/배송') ||
+              document.body.textContent.includes('상품관리')
+            );
+            if (ok) {
+              await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+              console.log('   ✅ 스마트스토어 세션 유효');
+            } else {
+              expired = true;
+            }
+          } catch {
+            expired = true;
+          }
+        }
+
+        if (expired) {
+          console.log('   ⚠️ 세션 만료 → 알림 전송');
+          await sendMessage('🔔 <b>네이버 로그인 만료</b>\n\n서버에서 재로그인 해주세요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>');
+        }
+      } catch (err) {
+        console.error('세션 체크 오류:', err.message);
+      }
+
+      scheduleNext();
+    }, delay);
+  }
+
+  scheduleNext();
+}
+
+// ============================================================
 // 프로세스 종료 처리
 // ============================================================
 async function gracefulShutdown(signal) {
@@ -2932,3 +2996,4 @@ startAutoSmartstore();
 startSmartstoreKeepAlive();
 startPpurioKeepAlive();
 startDailyReport();
+startDailySessionCheck();
