@@ -1530,7 +1530,13 @@ async function compareNaverVsPpurio(perfIndex) {
     try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
     await smartstorePage.waitForTimeout(1000);
 
-    let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+    // 프레임 로딩 대기 (최대 15초 재시도)
+    let frame = null;
+    for (let i = 0; i < 5; i++) {
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+      if (frame) break;
+      await smartstorePage.waitForTimeout(3000);
+    }
     if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
 
     try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
