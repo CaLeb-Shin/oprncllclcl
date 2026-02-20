@@ -1481,6 +1481,238 @@ async function getFinalSummaryDetail(perfIndex) {
 }
 
 // ============================================================
+// 네이버 vs 뿌리오 주문 비교
+// ============================================================
+async function compareNaverVsPpurio(perfIndex) {
+  if (finalSummaryKeys.length === 0) {
+    return '❌ 먼저 "최종결산"으로 공연 목록을 조회해주세요.';
+  }
+  if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
+    return '❌ 잘못된 번호입니다. 1~' + finalSummaryKeys.length + ' 사이로 입력해주세요.';
+  }
+
+  const key = finalSummaryKeys[perfIndex];
+  const perf = finalSummaryData[key];
+  if (!perf || perf.orders.length === 0) {
+    return '📋 해당 공연의 발송 내역이 없습니다.';
+  }
+
+  // 뿌리오 제목에서 지역 추출
+  const perfRegionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천)/);
+  const perfRegion = perfRegionMatch ? perfRegionMatch[1] : '';
+  if (!perfRegion) return '❌ 공연 지역을 파악할 수 없습니다.';
+
+  // 뿌리오 날짜로 정확한 perfKey 결정 (같은 지역에 공연 여러 개일 때)
+  const candidates = Object.entries(PERFORMANCES).filter(([k]) => k.startsWith(perfRegion + '_'));
+  let targetPerfKeys = candidates.map(([k]) => k);
+  if (candidates.length > 1 && perf.date) {
+    const dm = perf.date.match(/(\d+)월\s*(\d+)일/);
+    if (dm) {
+      const matched = candidates.find(([, v]) => {
+        const pm = v.date.match(/^(\d+)\/(\d+)/);
+        return pm && parseInt(pm[1]) === parseInt(dm[1]) && parseInt(pm[2]) === parseInt(dm[2]);
+      });
+      if (matched) targetPerfKeys = [matched[0]];
+    }
+  }
+
+  // 네이버 주문 스크래핑 (구매자명 포함)
+  while (isKeepAliveRunning) {
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  isSmartstoreRunning = true;
+
+  try {
+    await ensureBrowser();
+
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
+    await smartstorePage.waitForTimeout(5000);
+    try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+    await smartstorePage.waitForTimeout(1000);
+
+    let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+    if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
+
+    try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
+    await frame.waitForTimeout(500);
+    await frame.evaluate(() => {
+      const btns = document.querySelectorAll('button, a, input[type="button"]');
+      for (const btn of btns) { if (btn.textContent.trim() === '검색') { btn.click(); return; } }
+    });
+    await smartstorePage.waitForTimeout(8000);
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+    // 전체 주문 스크래핑 (구매자명 포함)
+    const scrapeWithNames = async () => {
+      return await frame.evaluate(() => {
+        const rows = document.querySelectorAll('table tbody tr');
+        const active = [];
+        const cancelled = [];
+        for (const tr of rows) {
+          const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+          if (cells.length < 11) continue;
+          const date = cells[0] || '';
+          if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
+          const status = cells[1] || '';
+          const product = cells[7] || '';
+          const optionInfo = cells[8] || '';
+          const qty = parseInt(cells[9]) || 1;
+          const buyerName = cells[10] || '';
+          if (!product || !buyerName) continue;
+          const order = { product, optionInfo, qty, buyerName };
+          if (status.includes('취소') || status.includes('반품')) {
+            cancelled.push(order);
+          } else {
+            active.push(order);
+          }
+        }
+        return { active, cancelled };
+      });
+    };
+
+    let allActive = [];
+    let allCancelled = [];
+    const page1 = await scrapeWithNames();
+    allActive.push(...page1.active);
+    allCancelled.push(...page1.cancelled);
+
+    for (let nextPage = 2; nextPage <= 10; nextPage++) {
+      const hasNext = await frame.evaluate((pageNum) => {
+        const links = document.querySelectorAll('a, button');
+        for (const link of links) {
+          if (link.textContent.trim() === String(pageNum)) { link.click(); return true; }
+        }
+        return false;
+      }, nextPage).catch(() => false);
+      if (!hasNext) break;
+      await smartstorePage.waitForTimeout(3000);
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+      const pageData = await scrapeWithNames();
+      allActive.push(...pageData.active);
+      allCancelled.push(...pageData.cancelled);
+      if (pageData.active.length === 0 && pageData.cancelled.length === 0) break;
+    }
+
+    try { await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile }); } catch {}
+
+    // 해당 공연만 필터
+    const naverOrders = [];
+    for (const o of allActive) {
+      const info = parseProductInfo(o.product, o.optionInfo);
+      if (targetPerfKeys.includes(info.perfKey)) {
+        naverOrders.push({ buyerName: o.buyerName, seatType: info.seat, qty: o.qty });
+      }
+    }
+
+    // 뿌리오 취소 처리 (getFinalSummaryDetail과 동일 로직)
+    const cancelCount = {};
+    for (const o of allCancelled) {
+      const info = parseProductInfo(o.product, o.optionInfo);
+      if (targetPerfKeys.includes(info.perfKey)) {
+        const ck = `${o.buyerName}_${info.seat || ''}`;
+        cancelCount[ck] = (cancelCount[ck] || 0) + 1;
+      }
+    }
+    const manualCancelled = readJson(CONFIG.cancelledOrdersFile, []);
+
+    const ppurioOrders = [];
+    for (const o of perf.orders) {
+      // 수동 취소 체크
+      const isManual = manualCancelled.some((c) => {
+        const nameMatch = c.buyerName && o.buyerName &&
+          (c.buyerName === o.buyerName || c.buyerName.includes(o.buyerName) || o.buyerName.includes(c.buyerName));
+        const phoneMatch = c.lastFour && o.lastFour && c.lastFour === o.lastFour;
+        return nameMatch && phoneMatch;
+      });
+      if (isManual) continue;
+      // 네이버 취소 체크
+      const ck = `${o.buyerName}_${o.seatType || ''}`;
+      if (cancelCount[ck] && cancelCount[ck] > 0) {
+        cancelCount[ck]--;
+        continue;
+      }
+      ppurioOrders.push(o);
+    }
+
+    // 비교 맵 생성 (이름 기본형으로 매칭)
+    const baseName = (name) => name.replace(/\(.*?\)/g, '').trim();
+
+    const naverMap = {};
+    for (const o of naverOrders) {
+      const k = `${baseName(o.buyerName)}_${o.seatType}`;
+      naverMap[k] = (naverMap[k] || 0) + o.qty;
+    }
+
+    const ppurioMap = {};
+    const ppurioInfo = {}; // lastFour 저장용
+    for (const o of ppurioOrders) {
+      const k = `${baseName(o.buyerName)}_${o.seatType}`;
+      ppurioMap[k] = (ppurioMap[k] || 0) + o.qty;
+      if (o.lastFour) ppurioInfo[k] = o.lastFour;
+    }
+
+    // 차이 찾기
+    const onlyNaver = [];
+    const onlyPpurio = [];
+    const qtyDiff = [];
+    const allKeys = new Set([...Object.keys(naverMap), ...Object.keys(ppurioMap)]);
+
+    for (const k of allKeys) {
+      const nQty = naverMap[k] || 0;
+      const pQty = ppurioMap[k] || 0;
+      const [name, seat] = [k.substring(0, k.lastIndexOf('_')), k.substring(k.lastIndexOf('_') + 1)];
+      const phone = ppurioInfo[k] ? ` (${ppurioInfo[k]})` : '';
+
+      if (nQty > 0 && pQty === 0) {
+        onlyNaver.push({ name, seat, qty: nQty });
+      } else if (nQty === 0 && pQty > 0) {
+        onlyPpurio.push({ name, seat, qty: pQty, phone });
+      } else if (nQty !== pQty) {
+        qtyDiff.push({ name, seat, nQty, pQty, phone });
+      }
+    }
+
+    const naverTotal = Object.values(naverMap).reduce((s, q) => s + q, 0);
+    const ppurioTotal = Object.values(ppurioMap).reduce((s, q) => s + q, 0);
+
+    let msg = `🔍 <b>주문 비교: ${perf.title}</b>\n`;
+    if (perf.date) msg += `📅 ${perf.date}\n`;
+    msg += `━━━━━━━━━━━━━━━━\n`;
+    msg += `📦 네이버: <b>${naverTotal}매</b> (${naverOrders.length}건)\n`;
+    msg += `📋 뿌리오: <b>${ppurioTotal}매</b> (${ppurioOrders.length}건)\n`;
+
+    if (onlyNaver.length === 0 && onlyPpurio.length === 0 && qtyDiff.length === 0) {
+      msg += `\n✅ <b>완전 일치!</b>`;
+    } else {
+      msg += `\n📊 차이: <b>${Math.abs(naverTotal - ppurioTotal)}매</b>\n`;
+
+      if (onlyNaver.length > 0) {
+        msg += `\n⚠️ <b>네이버에만 있음:</b>\n`;
+        for (const o of onlyNaver) {
+          msg += `  ${o.name} - ${o.seat} ${o.qty}매\n`;
+        }
+      }
+      if (onlyPpurio.length > 0) {
+        msg += `\n⚠️ <b>뿌리오에만 있음:</b>\n`;
+        for (const o of onlyPpurio) {
+          msg += `  ${o.name}${o.phone} - ${o.seat} ${o.qty}매\n`;
+        }
+      }
+      if (qtyDiff.length > 0) {
+        msg += `\n⚠️ <b>수량 차이:</b>\n`;
+        for (const o of qtyDiff) {
+          msg += `  ${o.name}${o.phone} - ${o.seat}: 네이버 ${o.nQty}매 / 뿌리오 ${o.pQty}매\n`;
+        }
+      }
+    }
+
+    return msg;
+  } finally {
+    isSmartstoreRunning = false;
+  }
+}
+
+// ============================================================
 // 놀티켓(인터파크) 멜론 오케스트라 공연 검색
 // ============================================================
 async function searchNolticketPerformances() {
@@ -2341,6 +2573,23 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 주문비교: "비교1", "비교 2", "주문비교1"
+  if (text.match(/(?:주문)?비교\s*(\d+)/)) {
+    const num = parseInt(text.match(/(?:주문)?비교\s*(\d+)/)[1]);
+    if (finalSummaryKeys.length === 0) {
+      await sendMessage('⚠️ 먼저 "최종결산"을 입력해서 공연 목록을 불러오세요.');
+      return;
+    }
+    try {
+      await sendMessage('🔍 주문 비교 중... (네이버 스크래핑 + 뿌리오 대조)');
+      const report = await compareNaverVsPpurio(num - 1);
+      await sendMessage(report);
+    } catch (err) {
+      await sendMessage(`❌ 주문 비교 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 최종결산 2단계: 숫자 선택 (공연 선택)
   if (text.startsWith('결산') && text.match(/결산\s*(\d+)/)) {
     const num = parseInt(text.match(/결산\s*(\d+)/)[1]);
@@ -2535,6 +2784,7 @@ async function handleMessage(msg) {
       `• 조회 - 놀티켓 판매현황\n\n` +
       `<b>📋 결산</b>\n` +
       `• 최종결산 - 공연별 발송 명단\n` +
+      `• 비교N - 네이버↔뿌리오 주문 비교\n` +
       `• 취소목록 - 취소/반품 목록 확인\n` +
       `• 취소등록 이름 뒷자리 - 수동 취소\n` +
       `• 취소삭제 번호 - 취소 목록에서 제거\n\n` +
@@ -2692,6 +2942,7 @@ async function startPolling() {
       `• 조회 - 놀티켓 판매현황\n\n` +
       `<b>📋 결산</b>\n` +
       `• 최종결산 - 공연별 발송 명단\n` +
+      `• 비교N - 네이버↔뿌리오 주문 비교\n` +
       `• 취소목록 - 취소/반품 목록 확인\n` +
       `• 취소등록 이름 뒷자리 - 수동 취소 등록\n\n` +
       `<b>🔍 검색</b>\n` +
