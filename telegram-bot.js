@@ -2624,7 +2624,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
