@@ -1525,6 +1525,9 @@ async function compareNaverVsPpurio(perfIndex) {
   try {
     await ensureBrowser();
 
+    // 다른 페이지 경유 (같은 URL 연속 접속 시 iframe 미로드 방지)
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/home/about', { timeout: 15000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(2000);
     await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
     await smartstorePage.waitForTimeout(5000);
     try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
