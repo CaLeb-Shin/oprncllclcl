@@ -2642,6 +2642,15 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 대기 삭제 (승인 대기 목록 초기화)
+  if (['대기삭제', '대기초기화', '대기클리어'].includes(text)) {
+    const count = Object.keys(pendingOrders).length;
+    pendingOrders = {};
+    savePendingOrders(pendingOrders);
+    await sendMessage(`✅ 승인 대기 ${count}건 삭제 완료`);
+    return;
+  }
+
   // 취소 목록 확인
   if (['취소목록', '취소리스트', '반품목록'].includes(text)) {
     const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
