@@ -2680,6 +2680,30 @@ async function handleMessage(msg) {
     return;
   }
 
+  // /지역공연링크 → 해당 지역 네이버 스토어 링크 (개인 봇)
+  const perfLinkMatch = text.match(/^\/?(?:\/?)?(대구|창원|광주|대전|부산|고양|인천)공연(?:링크)?$/);
+  if (perfLinkMatch) {
+    const region = perfLinkMatch[1];
+    if (Object.keys(storeLinksCache).length === 0) await fetchStoreProductLinks();
+    const perfs = Object.entries(PERFORMANCES)
+      .filter(([key]) => key.startsWith(region + '_'))
+      .filter(([key]) => isPerfFuture(key));
+    const getLink = (perf) => perf.link || storeLinksCache[region] || STORE_URL;
+    if (perfs.length === 0) {
+      await sendMessage(`❌ ${region} 지역에 예정된 공연이 없습니다.`);
+    } else if (perfs.length === 1) {
+      const [, perf] = perfs[0];
+      await sendMessage(`🎫 <b>${perf.name} ${perf.date}</b>\n🔗 ${getLink(perf)}`);
+    } else {
+      let linkMsg = `🎫 <b>${region} 공연 네이버 링크</b>\n\n`;
+      perfs.forEach(([, perf], idx) => {
+        linkMsg += `${idx + 1}. <b>${perf.name} ${perf.date}</b>\n🔗 ${getLink(perf)}\n\n`;
+      });
+      await sendMessage(linkMsg.trim());
+    }
+    return;
+  }
+
   // 인터파크 판매현황
   if (['sales', '/sales', '조회', '판매현황', '놀티켓'].includes(text)) {
     await sendMessage('🔍 판매현황 조회 중... 약 1분 소요됩니다.');
