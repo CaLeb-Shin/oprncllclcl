@@ -1917,78 +1917,174 @@ const PERFORMANCES = {
   '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '' },
 };
 
-// 스토어 공개 페이지에서 상품 링크 스크래핑 (지역별 가장 비싼 상품)
+// 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
 let storeLinksCache = {};  // { '대구': 'https://...', '창원': 'https://...' }
+let storeLinksCacheTime = 0;
+const STORE_LINKS_TTL = 6 * 60 * 60 * 1000; // 6시간
+
 async function fetchStoreProductLinks() {
-  console.log('🔗 스토어 상품 링크 스크래핑...');
-  const { chromium: pw } = require('playwright');
-  let linkBrowser = null;
+  // 캐시 유효하면 사용
+  if (Object.keys(storeLinksCache).length > 0 &&
+      Date.now() - storeLinksCacheTime < STORE_LINKS_TTL) {
+    return storeLinksCache;
+  }
+
+  console.log('🔗 관리자 패널에서 상품 링크 수집 중...');
+
+  if (!smartstoreCtx) {
+    console.log('   ❌ 스마트스토어 미연결');
+    return storeLinksCache;
+  }
+
+  let linkPage = null;
   try {
-    linkBrowser = await pw.launch({ headless: true, args: ['--no-sandbox'] });
-    const ctx = await linkBrowser.newContext();
-    const page = await ctx.newPage();
-    page.setDefaultTimeout(30000);
+    linkPage = await smartstoreCtx.newPage();
+    linkPage.setDefaultTimeout(30000);
 
-    await page.goto(STORE_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(5000);
+    const regions = ['대구', '창원', '광주', '대전', '부산', '고양', '인천'];
+    let products = [];
 
-    // 상품 목록에서 이름, 가격, 링크 추출
-    const products = await page.evaluate(() => {
-      const items = [];
-      // 스마트스토어 상품 카드 셀렉터
-      const cards = document.querySelectorAll('li a[href*="/products/"]');
-      for (const card of cards) {
-        const href = card.href || card.getAttribute('href') || '';
-        const text = card.innerText || '';
-        // 가격 추출 (숫자만)
-        const priceMatch = text.match(/([\d,]+)\s*원/);
-        const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
-        items.push({ text: text.substring(0, 200), href, price });
-      }
-      // fallback: 모든 링크에서 /products/ 포함된 것
-      if (items.length === 0) {
-        const allLinks = document.querySelectorAll('a[href*="/products/"]');
-        for (const a of allLinks) {
-          const href = a.href || a.getAttribute('href') || '';
-          const text = a.innerText || '';
-          const priceMatch = text.match(/([\d,]+)\s*원/);
-          const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
-          items.push({ text: text.substring(0, 200), href, price });
+    // === 방법 1: 관리자 상품 목록 API 응답 캡처 ===
+    let apiResolve;
+    const apiPromise = new Promise(r => { apiResolve = r; });
+    const apiTimeout = setTimeout(() => apiResolve(null), 15000);
+
+    const captureHandler = async (resp) => {
+      try {
+        if (resp.status() === 200 &&
+            (resp.headers()['content-type'] || '').includes('json') &&
+            resp.url().includes('product')) {
+          const json = await resp.json();
+          // 상품 목록 API 응답 (contents 배열이 있는 것)
+          if (json?.contents && Array.isArray(json.contents) && json.contents.length > 0) {
+            clearTimeout(apiTimeout);
+            apiResolve(json.contents);
+          }
         }
-      }
-      return items;
+      } catch {}
+    };
+    linkPage.on('response', captureHandler);
+
+    await linkPage.goto('https://sell.smartstore.naver.com/#/products/origin-product-list', {
+      waitUntil: 'domcontentloaded'
     });
 
-    console.log(`   📦 상품 ${products.length}개 발견`);
+    const apiItems = await apiPromise;
+    linkPage.off('response', captureHandler);
 
-    // 지역별로 그룹화 → 가장 비싼 상품 링크 선택
-    const regionLinks = {};
-    const regions = ['대구', '창원', '광주', '대전', '부산', '고양', '인천'];
+    if (apiItems) {
+      console.log(`   📦 API: 상품 ${apiItems.length}개`);
+      for (const item of apiItems) {
+        // 다양한 API 응답 구조 지원
+        const name = item?.originProduct?.name || item?.name || item?.productName || '';
+        const price = item?.originProduct?.salePrice || item?.salePrice || item?.price || 0;
+        const channelNo = item?.channelProducts?.[0]?.channelProductNo
+                       || item?.channelProductNo || '';
+        if (name && channelNo) {
+          products.push({ name, price, productNo: String(channelNo) });
+        }
+      }
+    }
+
+    // === 방법 2: DOM에서 상품 정보 추출 (API 실패시) ===
+    if (products.length === 0) {
+      console.log('   📝 API 미캡처, DOM 스크래핑 시도...');
+      await linkPage.waitForTimeout(3000);
+
+      const domItems = await linkPage.evaluate(() => {
+        const items = [];
+        const links = document.querySelectorAll('a');
+        for (const a of links) {
+          const href = a.getAttribute('href') || '';
+          const m = href.match(/(?:origin|channel)-product\/(\d+)/);
+          if (m) {
+            const name = a.textContent.trim();
+            const parent = a.closest('tr') || a.parentElement;
+            const txt = parent?.textContent || '';
+            const pm = txt.match(/([\d,]+)\s*원/);
+            if (name.length > 3) {
+              items.push({
+                name,
+                price: pm ? parseInt(pm[1].replace(/,/g, '')) : 0,
+                productId: m[1],
+                isOrigin: href.includes('origin-product')
+              });
+            }
+          }
+        }
+        return items;
+      });
+
+      console.log(`   📦 DOM: ${domItems.length}개`);
+
+      // origin-product → 상세 페이지에서 채널 상품 번호 추출
+      for (const item of domItems) {
+        const matchedRegion = regions.find(r => item.name.includes(r));
+        if (!matchedRegion) continue;
+
+        if (!item.isOrigin) {
+          products.push({ name: item.name, price: item.price, productNo: item.productId });
+          continue;
+        }
+
+        try {
+          await linkPage.goto(
+            `https://sell.smartstore.naver.com/#/products/origin-product/${item.productId}`,
+            { waitUntil: 'domcontentloaded' }
+          );
+          await linkPage.waitForTimeout(3000);
+
+          const channelNo = await linkPage.evaluate(() => {
+            const text = document.body.innerText;
+            const urlM = text.match(/smartstore\.naver\.com\/[^\/\s]+\/products\/(\d+)/);
+            if (urlM) return urlM[1];
+            const chM = text.match(/채널\s*상품\s*(?:번호)?[:\s]*(\d+)/);
+            if (chM) return chM[1];
+            return null;
+          });
+
+          if (channelNo) {
+            products.push({ name: item.name, price: item.price, productNo: channelNo });
+          }
+        } catch {}
+      }
+    }
+
+    // 지역별 가장 비싼 상품 선택
+    const regionBest = {};
     for (const p of products) {
+      if (!p.productNo) continue;
       for (const region of regions) {
-        if (p.text.includes(region) && p.href) {
-          if (!regionLinks[region] || p.price > regionLinks[region].price) {
-            regionLinks[region] = { link: p.href, price: p.price, name: p.text.split('\n')[0] };
+        if (p.name.includes(region)) {
+          if (!regionBest[region] || p.price > regionBest[region].price) {
+            regionBest[region] = {
+              link: `https://smartstore.naver.com/melon_symphony_orchestra/products/${p.productNo}`,
+              price: p.price
+            };
           }
         }
       }
     }
 
-    for (const [region, info] of Object.entries(regionLinks)) {
-      console.log(`   🔗 ${region}: ${info.link} (${info.price.toLocaleString()}원)`);
-    }
-
+    // 캐시 업데이트
     storeLinksCache = {};
-    for (const [region, info] of Object.entries(regionLinks)) {
+    for (const [region, info] of Object.entries(regionBest)) {
       storeLinksCache[region] = info.link;
+      console.log(`   🔗 ${region}: ${info.link}${info.price ? ` (${info.price.toLocaleString()}원)` : ''}`);
     }
 
-    await linkBrowser.close();
+    if (Object.keys(storeLinksCache).length > 0) {
+      storeLinksCacheTime = Date.now();
+    } else {
+      console.log('   ⚠️ 상품 링크를 찾지 못함');
+    }
+
     return storeLinksCache;
   } catch (err) {
-    console.error('   ❌ 스토어 링크 스크래핑 오류:', err.message);
-    if (linkBrowser) await linkBrowser.close().catch(() => {});
+    console.error('   ❌ 상품 링크 수집 오류:', err.message);
     return storeLinksCache;
+  } finally {
+    if (linkPage) await linkPage.close().catch(() => {});
   }
 }
 
