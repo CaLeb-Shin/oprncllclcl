@@ -1917,6 +1917,81 @@ const PERFORMANCES = {
   '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '' },
 };
 
+// 스토어 공개 페이지에서 상품 링크 스크래핑 (지역별 가장 비싼 상품)
+let storeLinksCache = {};  // { '대구': 'https://...', '창원': 'https://...' }
+async function fetchStoreProductLinks() {
+  console.log('🔗 스토어 상품 링크 스크래핑...');
+  const { chromium: pw } = require('playwright');
+  let linkBrowser = null;
+  try {
+    linkBrowser = await pw.launch({ headless: true, args: ['--no-sandbox'] });
+    const ctx = await linkBrowser.newContext();
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(30000);
+
+    await page.goto(STORE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
+
+    // 상품 목록에서 이름, 가격, 링크 추출
+    const products = await page.evaluate(() => {
+      const items = [];
+      // 스마트스토어 상품 카드 셀렉터
+      const cards = document.querySelectorAll('li a[href*="/products/"]');
+      for (const card of cards) {
+        const href = card.href || card.getAttribute('href') || '';
+        const text = card.innerText || '';
+        // 가격 추출 (숫자만)
+        const priceMatch = text.match(/([\d,]+)\s*원/);
+        const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
+        items.push({ text: text.substring(0, 200), href, price });
+      }
+      // fallback: 모든 링크에서 /products/ 포함된 것
+      if (items.length === 0) {
+        const allLinks = document.querySelectorAll('a[href*="/products/"]');
+        for (const a of allLinks) {
+          const href = a.href || a.getAttribute('href') || '';
+          const text = a.innerText || '';
+          const priceMatch = text.match(/([\d,]+)\s*원/);
+          const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
+          items.push({ text: text.substring(0, 200), href, price });
+        }
+      }
+      return items;
+    });
+
+    console.log(`   📦 상품 ${products.length}개 발견`);
+
+    // 지역별로 그룹화 → 가장 비싼 상품 링크 선택
+    const regionLinks = {};
+    const regions = ['대구', '창원', '광주', '대전', '부산', '고양', '인천'];
+    for (const p of products) {
+      for (const region of regions) {
+        if (p.text.includes(region) && p.href) {
+          if (!regionLinks[region] || p.price > regionLinks[region].price) {
+            regionLinks[region] = { link: p.href, price: p.price, name: p.text.split('\n')[0] };
+          }
+        }
+      }
+    }
+
+    for (const [region, info] of Object.entries(regionLinks)) {
+      console.log(`   🔗 ${region}: ${info.link} (${info.price.toLocaleString()}원)`);
+    }
+
+    storeLinksCache = {};
+    for (const [region, info] of Object.entries(regionLinks)) {
+      storeLinksCache[region] = info.link;
+    }
+
+    await linkBrowser.close();
+    return storeLinksCache;
+  } catch (err) {
+    console.error('   ❌ 스토어 링크 스크래핑 오류:', err.message);
+    if (linkBrowser) await linkBrowser.close().catch(() => {});
+    return storeLinksCache;
+  }
+}
+
 function parseProductInfo(productStr, optionInfo) {
   // "[대구] MelON(멜론) 디즈니 + 지브리 오케스트라 콘서트 [비지정석] 대구, S석"
   const regionMatch = productStr.match(/^\[([^\]]+)\]/);
@@ -2539,22 +2614,28 @@ async function handleMessage(msg) {
       const region = regionMatch[1];
       console.log(`📩 그룹: /${region}공연 from ${msg.from?.first_name || ''}`);
 
+      // 캐시 없으면 스크래핑
+      if (Object.keys(storeLinksCache).length === 0) {
+        await fetchStoreProductLinks();
+      }
+
       // 해당 지역 + 미래 공연만 필터
       const perfs = Object.entries(PERFORMANCES)
         .filter(([key]) => key.startsWith(region + '_'))
         .filter(([key]) => isPerfFuture(key));
 
+      // 링크 결정: PERFORMANCES.link > storeLinksCache > STORE_URL
+      const getLink = (perf) => perf.link || storeLinksCache[region] || STORE_URL;
+
       if (perfs.length === 0) {
         await sendMessageTo(chatId, `❌ ${region} 지역에 예정된 공연이 없습니다.`);
       } else if (perfs.length === 1) {
         const [, perf] = perfs[0];
-        const link = perf.link || STORE_URL;
-        await sendMessageTo(chatId, `🎫 <b>${perf.name} ${perf.date}</b>\n🔗 ${link}`);
+        await sendMessageTo(chatId, `🎫 <b>${perf.name} ${perf.date}</b>\n🔗 ${getLink(perf)}`);
       } else {
         let linkMsg = `🎫 <b>${region} 공연 네이버 링크</b>\n\n`;
         perfs.forEach(([, perf], idx) => {
-          const link = perf.link || STORE_URL;
-          linkMsg += `${idx + 1}. <b>${perf.name} ${perf.date}</b>\n🔗 ${link}\n\n`;
+          linkMsg += `${idx + 1}. <b>${perf.name} ${perf.date}</b>\n🔗 ${getLink(perf)}\n\n`;
         });
         await sendMessageTo(chatId, linkMsg.trim());
       }
