@@ -1904,16 +1904,17 @@ async function checkForNewOrders() {
 // 스마트스토어 판매현황 조회
 // ============================================================
 
-// 공연 정보 (공연명 키워드 → 공연 날짜, 표시명)
+// 공연 정보 (공연명 키워드 → 공연 날짜, 표시명, 네이버 링크)
 // 새 공연 추가 시 여기만 수정하면 됨
+const STORE_URL = 'https://smartstore.naver.com/melon_symphony_orchestra';
 const PERFORMANCES = {
-  '대구_디즈니': { date: '3/15(일)', name: '대구 디즈니+지브리' },
-  '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리' },
-  '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬' },
-  '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리' },
-  '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬' },
-  '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬' },
-  '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬' },
+  '대구_디즈니': { date: '3/15(일)', name: '대구 디즈니+지브리', link: '' },
+  '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '' },
+  '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '' },
+  '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리', link: '' },
+  '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬', link: '' },
+  '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬', link: '' },
+  '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '' },
 };
 
 function parseProductInfo(productStr, optionInfo) {
@@ -2529,6 +2530,33 @@ async function handleMessage(msg) {
         await sendMessageTo(chatId, storeReport);
       } catch (err) {
         await sendMessageTo(chatId, `❌ 오류: ${err.message}`);
+      }
+    }
+
+    // /지역공연 → 해당 지역 네이버 스토어 링크
+    const regionMatch = cmd.match(/^(대구|창원|광주|대전|부산|고양|인천)공연$/);
+    if (regionMatch) {
+      const region = regionMatch[1];
+      console.log(`📩 그룹: /${region}공연 from ${msg.from?.first_name || ''}`);
+
+      // 해당 지역 + 미래 공연만 필터
+      const perfs = Object.entries(PERFORMANCES)
+        .filter(([key]) => key.startsWith(region + '_'))
+        .filter(([key]) => isPerfFuture(key));
+
+      if (perfs.length === 0) {
+        await sendMessageTo(chatId, `❌ ${region} 지역에 예정된 공연이 없습니다.`);
+      } else if (perfs.length === 1) {
+        const [, perf] = perfs[0];
+        const link = perf.link || STORE_URL;
+        await sendMessageTo(chatId, `🎫 <b>${perf.name} ${perf.date}</b>\n🔗 ${link}`);
+      } else {
+        let linkMsg = `🎫 <b>${region} 공연 네이버 링크</b>\n\n`;
+        perfs.forEach(([, perf], idx) => {
+          const link = perf.link || STORE_URL;
+          linkMsg += `${idx + 1}. <b>${perf.name} ${perf.date}</b>\n🔗 ${link}\n\n`;
+        });
+        await sendMessageTo(chatId, linkMsg.trim());
       }
     }
 
