@@ -97,6 +97,16 @@ function shouldNotifySessionExpire() {
   return true;
 }
 
+// 스마트스토어 로그인 실패 즉시 알림 (5분 쿨다운으로 스팸 방지)
+let lastSmartLoginFailNotice = 0;
+async function notifySmartLoginFail(context = '') {
+  const now = Date.now();
+  if (now - lastSmartLoginFailNotice < 5 * 60 * 1000) return;
+  lastSmartLoginFailNotice = now;
+  const msg = `🚨 <b>스마트스토어 로그인 실패</b>${context ? ` (${context})` : ''}\n\n서버에서 재로그인 필요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>`;
+  try { await sendMessage(msg); } catch {}
+}
+
 let browser = null;
 let smartstoreCtx = null;
 let smartstorePage = null;
@@ -500,7 +510,7 @@ async function smartstoreKeepAlive() {
       // 세션 만료 → 자동 재로그인 시도 (네이버 NID 쿠키로)
       const ok = await smartstoreAutoRelogin();
       if (!ok) {
-        if (shouldNotifySessionExpire()) await sendMessage('⚠️ <b>네이버 로그인 만료</b>\n\n서버에서 재로그인 해주세요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>');
+        await notifySmartLoginFail('keep-alive 세션 만료');
       } else {
         console.log('🔐 스마트스토어 자동 재로그인 성공!');
       }
@@ -511,6 +521,7 @@ async function smartstoreKeepAlive() {
     try {
       const ok = await smartstoreAutoRelogin();
       if (!ok) {
+        await notifySmartLoginFail('keep-alive 오류');
         await closeBrowser();
         await Promise.race([
           ensureBrowser(),
@@ -519,6 +530,7 @@ async function smartstoreKeepAlive() {
       }
     } catch (e) {
       console.log('⚠️ keep-alive 복구 실패:', e.message);
+      await notifySmartLoginFail('keep-alive 복구 실패');
       isEnsureBrowserRunning = false;
     }
   } finally {
@@ -625,6 +637,7 @@ async function ensureBrowser() {
           return;
         }
         // 재로그인 실패 → 아래 전체 재초기화로 진행
+        await notifySmartLoginFail('세션 킥 (다른 기기 로그인?)');
         ssOk = false;
       } catch {
         ssOk = false;
@@ -721,6 +734,7 @@ async function ensureBrowser() {
       console.log('   🔐 자동 재로그인 시도...');
       const reloginOk = await smartstoreAutoRelogin();
       if (!reloginOk) {
+        await notifySmartLoginFail('브라우저 초기화 실패');
         await closeBrowser(true);
         throw new Error('네이버 로그인 만료. 서버에서 node setup-login.js smartstore 실행 필요');
       }
@@ -1884,10 +1898,12 @@ async function checkForNewOrders() {
           console.log('   ✅ 자동 재로그인 성공! 다음 주기에 정상 작동');
         } else {
           console.log('   ❌ 자동 재로그인 실패 → 브라우저 재초기화');
+          await notifySmartLoginFail('주문확인 중 세션 오류');
           await closeBrowser();
         }
       } catch (reloginErr) {
         console.log('   ❌ 재로그인 오류:', reloginErr.message);
+        await notifySmartLoginFail('주문확인 재로그인 오류');
         await closeBrowser();
       }
     } else if (msg.includes('Timeout') || msg.includes('타임아웃')) {
@@ -3293,9 +3309,13 @@ function startAutoSmartstore() {
         console.log('   🔐 세션 오류 → 자동 재로그인 재시도...');
         try {
           const ok = await smartstoreAutoRelogin();
-          if (ok) console.log('   ✅ 재로그인 성공! 다음 주기 정상 작동');
-          else await closeBrowser();
-        } catch { await closeBrowser(); }
+          if (ok) {
+            console.log('   ✅ 재로그인 성공! 다음 주기 정상 작동');
+          } else {
+            await notifySmartLoginFail('주기적 주문확인');
+            await closeBrowser();
+          }
+        } catch { await notifySmartLoginFail('주기적 확인 오류'); await closeBrowser(); }
       }
     }
   }, CONFIG.orderCheckInterval);
