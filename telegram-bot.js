@@ -521,12 +521,12 @@ async function smartstoreKeepAlive() {
     try {
       const ok = await smartstoreAutoRelogin();
       if (!ok) {
-        await notifySmartLoginFail('keep-alive 오류');
         await closeBrowser();
         await Promise.race([
           ensureBrowser(),
           new Promise((_, rej) => setTimeout(() => rej(new Error('keep-alive 복구 타임아웃')), 60000)),
         ]);
+        // ensureBrowser 성공 → 복구됨, 알림 불필요
       }
     } catch (e) {
       console.log('⚠️ keep-alive 복구 실패:', e.message);
