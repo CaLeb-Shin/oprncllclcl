@@ -1588,9 +1588,9 @@ async function generateLabelPdf(perfIndex) {
   const H_PITCH = LABEL_W + H_GAP; // 29.4mm
   const V_PITCH = 10.2;  // 세로피치 (실제 라벨지 간격 보정)
   const MARGIN_LEFT = 5; // mm
-  const MARGIN_TOP = 7;  // mm
+  const MARGIN_TOP = 8.5; // mm
 
-  const FONT_SIZE = 7;   // pt
+  const FONT_SIZE = 8;   // pt
   const totalSlots = COLS * ROWS;
 
   // 한글 폰트 경로
