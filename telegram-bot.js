@@ -209,6 +209,54 @@ function sendMessageTo(chatId, text) {
   return telegramRequest('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' });
 }
 
+// 텔레그램 파일 전송 (multipart/form-data)
+function sendDocument(pdfBuffer, filename, caption = '') {
+  return new Promise((resolve, reject) => {
+    const boundary = '----FormBoundary' + Date.now().toString(16);
+    const parts = [];
+
+    // chat_id
+    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${CONFIG.telegramChatId}`);
+    // caption
+    if (caption) {
+      parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`);
+    }
+    // document (binary)
+    const fileHeader = `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\nContent-Type: application/pdf\r\n\r\n`;
+    const fileFooter = `\r\n--${boundary}--\r\n`;
+
+    const body = Buffer.concat([
+      Buffer.from(parts.join('\r\n') + '\r\n'),
+      Buffer.from(fileHeader),
+      pdfBuffer,
+      Buffer.from(fileFooter),
+    ]);
+
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${CONFIG.telegramBotToken}/sendDocument`,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch { resolve({ ok: false }); }
+      });
+    });
+    req.setTimeout(30000, () => req.destroy(new Error('sendDocument timeout')));
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 function getUpdates(offset, timeout = 30) {
   return telegramRequest(
     'getUpdates',
@@ -1396,17 +1444,17 @@ async function getNaverCancelledOrders() {
   return allCancelled;
 }
 
-// 2단계: 선택한 공연 상세 (취소 목록 대조 후 제외)
-async function getFinalSummaryDetail(perfIndex) {
+// 취소 필터링 후 유효 주문 목록 반환 (결산 상세 + 라벨 공용)
+async function getActiveOrders(perfIndex) {
   if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
-    return '❌ 잘못된 번호입니다. 1~' + finalSummaryKeys.length + ' 사이로 입력해주세요.';
+    return null;
   }
 
   const key = finalSummaryKeys[perfIndex];
   const perf = finalSummaryData[key];
 
   if (!perf || perf.orders.length === 0) {
-    return '📋 해당 공연의 발송 내역이 없습니다.';
+    return { activeOrders: [], cancelledList: [], perf };
   }
 
   // 1) 수동 취소 목록
@@ -1427,16 +1475,14 @@ async function getFinalSummaryDetail(perfIndex) {
   // 네이버 취소 건수 카운터: "이름_좌석" → 남은 취소 횟수 (같은 지역만)
   const cancelCount = {};
   for (const c of naverCancelled) {
-    // 공연 지역 필터: 해당 공연의 취소만 매칭
     if (perfRegion && c.product) {
       const parsed = parseProductInfo(c.product, '');
       if (parsed.region !== perfRegion) continue;
     }
-    const key = `${c.buyerName}_${c.seatType || ''}`;
-    cancelCount[key] = (cancelCount[key] || 0) + 1;
+    const cKey = `${c.buyerName}_${c.seatType || ''}`;
+    cancelCount[cKey] = (cancelCount[cKey] || 0) + 1;
   }
 
-  // 수동 취소 매칭
   function isManualCancelled(order) {
     return manualCancelled.some((c) => {
       const nameMatch = c.buyerName && order.buyerName &&
@@ -1446,11 +1492,10 @@ async function getFinalSummaryDetail(perfIndex) {
     });
   }
 
-  // 네이버 자동 취소: 건수 기반 (같은 사람이 취소→재주문→취소→재주문 가능)
   function isNaverCancelled(order) {
-    const key = `${order.buyerName}_${order.seatType || ''}`;
-    if (cancelCount[key] && cancelCount[key] > 0) {
-      cancelCount[key]--;
+    const cKey = `${order.buyerName}_${order.seatType || ''}`;
+    if (cancelCount[cKey] && cancelCount[cKey] > 0) {
+      cancelCount[cKey]--;
       return true;
     }
     return false;
@@ -1469,6 +1514,23 @@ async function getFinalSummaryDetail(perfIndex) {
     }
   }
 
+  return { activeOrders, cancelledList, perf };
+}
+
+// 2단계: 선택한 공연 상세 (취소 목록 대조 후 제외)
+async function getFinalSummaryDetail(perfIndex) {
+  if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
+    return '❌ 잘못된 번호입니다. 1~' + finalSummaryKeys.length + ' 사이로 입력해주세요.';
+  }
+
+  const result = await getActiveOrders(perfIndex);
+  if (!result) return '❌ 잘못된 번호입니다.';
+
+  const { activeOrders, cancelledList, perf } = result;
+  if (activeOrders.length === 0 && cancelledList.length === 0) {
+    return '📋 해당 공연의 발송 내역이 없습니다.';
+  }
+
   let msg = `📋 <b>최종결산</b>\n\n`;
   msg += `🎫 <b>${perf.title}</b>\n`;
   if (perf.date) msg += `📅 ${perf.date}\n`;
@@ -1485,7 +1547,6 @@ async function getFinalSummaryDetail(perfIndex) {
   msg += `\n━━━━━━━━━━━━━━\n`;
   msg += `<b>총 합계: ${activeOrders.length}건 ${totalQty}매</b>`;
 
-  // 취소 건이 있으면 별도 표시
   if (cancelledList.length > 0) {
     let cancelQty = 0;
     msg += `\n\n🚫 <b>취소/반품 제외 (${cancelledList.length}건)</b>\n`;
@@ -1498,6 +1559,103 @@ async function getFinalSummaryDetail(perfIndex) {
   }
 
   return msg;
+}
+
+// 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
+async function generateLabelPdf(perfIndex) {
+  const result = await getActiveOrders(perfIndex);
+  if (!result) throw new Error('잘못된 공연 번호');
+  const { activeOrders, perf } = result;
+  if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
+
+  // 라벨 데이터 준비
+  const labels = activeOrders.map(o => ({
+    line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
+    line2: `${o.seatType || ''} ${o.qty}매`,
+  }));
+
+  // 라벨 규격: 글로리텍 8189
+  const COLS = 7;
+  const ROWS = 27;
+  const LABEL_W = 25.4; // mm
+  const LABEL_H = 10;   // mm
+  const MARGIN_LEFT = 16.1; // (210 - 7*25.4) / 2
+  const MARGIN_TOP = 13.5;  // (297 - 27*10) / 2
+
+  // 라벨 셀 HTML 생성
+  const totalSlots = COLS * ROWS;
+  let cellsHtml = '';
+  for (let i = 0; i < totalSlots; i++) {
+    if (i < labels.length) {
+      cellsHtml += `<div class="cell"><div class="l1">${labels[i].line1}</div><div class="l2">${labels[i].line2}</div></div>`;
+    } else {
+      cellsHtml += `<div class="cell"></div>`;
+    }
+  }
+
+  // 여러 페이지가 필요한 경우
+  const pages = Math.ceil(labels.length / totalSlots);
+  let pagesHtml = '';
+  for (let p = 0; p < pages; p++) {
+    const start = p * totalSlots;
+    let pageCells = '';
+    for (let i = 0; i < totalSlots; i++) {
+      const idx = start + i;
+      if (idx < labels.length) {
+        pageCells += `<div class="cell"><div class="l1">${labels[idx].line1}</div><div class="l2">${labels[idx].line2}</div></div>`;
+      } else {
+        pageCells += `<div class="cell"></div>`;
+      }
+    }
+    pagesHtml += `<div class="page"><div class="grid">${pageCells}</div></div>`;
+  }
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
+  .page {
+    width: 210mm; height: 297mm;
+    padding-top: ${MARGIN_TOP}mm;
+    padding-left: ${MARGIN_LEFT}mm;
+    page-break-after: always;
+  }
+  .page:last-child { page-break-after: auto; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(${COLS}, ${LABEL_W}mm);
+    grid-template-rows: repeat(${ROWS}, ${LABEL_H}mm);
+  }
+  .cell {
+    width: ${LABEL_W}mm; height: ${LABEL_H}mm;
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    overflow: hidden;
+    font-size: 7pt; line-height: 1.2;
+    text-align: center;
+  }
+  .l1 { font-weight: bold; white-space: nowrap; }
+  .l2 { white-space: nowrap; }
+</style>
+</head><body>${pagesHtml}</body></html>`;
+
+  // Playwright로 PDF 생성
+  if (!smartstoreCtx) throw new Error('브라우저 미연결');
+  let pdfPage = null;
+  try {
+    pdfPage = await smartstoreCtx.newPage();
+    await pdfPage.setContent(html, { waitUntil: 'domcontentloaded' });
+    const pdfBuffer = await pdfPage.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    });
+    return { pdfBuffer, orderCount: activeOrders.length, perf };
+  } finally {
+    if (pdfPage) await pdfPage.close().catch(() => {});
+  }
 }
 
 // ============================================================
@@ -2850,6 +3008,25 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 라벨 출력: "라벨1", "라벨 2"
+  if (text.match(/^라벨\s*(\d+)$/)) {
+    const num = parseInt(text.match(/^라벨\s*(\d+)$/)[1]);
+    if (finalSummaryKeys.length === 0) {
+      await sendMessage('⚠️ 먼저 "최종결산"을 입력해서 공연 목록을 불러오세요.');
+      return;
+    }
+    try {
+      await sendMessage('🏷 라벨 시트 생성 중...');
+      const { pdfBuffer, orderCount, perf } = await generateLabelPdf(num - 1);
+      const region = (perf.title.match(/(대구|창원|광주|대전|부산|고양|인천)/) || ['', '공연'])[1];
+      const filename = `라벨_${region}_${orderCount}건.pdf`;
+      await sendDocument(pdfBuffer, filename, `🏷 ${perf.title} 라벨 (${orderCount}건)`);
+    } catch (err) {
+      await sendMessage(`❌ 라벨 생성 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 최종결산 2단계: 숫자 선택 (공연 선택)
   if (text.startsWith('결산') && text.match(/결산\s*(\d+)/)) {
     const num = parseInt(text.match(/결산\s*(\d+)/)[1]);
@@ -2884,7 +3061,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
