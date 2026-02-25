@@ -1610,7 +1610,7 @@ async function generateLabelPdf(perfIndex) {
         pageCells += `<div class="cell"></div>`;
       }
     }
-    pagesHtml += `<div class="page"><div class="grid">${pageCells}</div></div>`;
+    pagesHtml += `<div class="page"><div class="grid-wrap"><div class="grid">${pageCells}</div></div></div>`;
   }
 
   const html = `<!DOCTYPE html>
@@ -1620,12 +1620,16 @@ async function generateLabelPdf(perfIndex) {
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
   .page {
+    position: relative;
     width: 210mm; height: 297mm;
-    padding-top: ${MARGIN_TOP}mm;
-    padding-left: ${MARGIN_LEFT}mm;
     page-break-after: always;
   }
   .page:last-child { page-break-after: auto; }
+  .grid-wrap {
+    position: absolute;
+    top: ${MARGIN_TOP}mm;
+    left: ${MARGIN_LEFT}mm;
+  }
   .grid {
     display: grid;
     grid-template-columns: repeat(${COLS}, ${H_PITCH}mm);
@@ -1653,7 +1657,7 @@ async function generateLabelPdf(perfIndex) {
     const pdfBuffer = await pdfPage.pdf({
       format: 'A4',
       printBackground: true,
-      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+      margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
     });
     return { pdfBuffer, orderCount: activeOrders.length, perf };
   } finally {
