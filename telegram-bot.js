@@ -1574,15 +1574,16 @@ async function generateLabelPdf(perfIndex) {
     line2: `${o.seatType || ''} ${o.qty}매`,
   }));
 
-  // 라벨 규격: 글로리텍 8189 (Avery L6008 호환)
+  // 라벨 규격: 글로리텍 8189 (실측값)
   const COLS = 7;
   const ROWS = 27;
   const LABEL_W = 25.4;  // mm
   const LABEL_H = 10;    // mm
-  const H_PITCH = 28.65; // 가로피치 (라벨+간격)
+  const H_GAP = 4;       // 가로 칸 사이 간격
+  const H_PITCH = LABEL_W + H_GAP; // 29.4mm
   const V_PITCH = 10;    // 세로피치 (간격 없음)
-  const MARGIN_LEFT = 4.7;
-  const MARGIN_TOP = 13.5;
+  const MARGIN_LEFT = 8;
+  const MARGIN_TOP = 12;
 
   // 라벨 셀 HTML 생성
   const totalSlots = COLS * ROWS;
