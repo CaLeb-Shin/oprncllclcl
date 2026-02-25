@@ -38,17 +38,10 @@ function findFullChromium() {
 }
 
 function getBrowserLaunchOptions() {
-  const opts = {
+  return {
     headless: true,
     args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'],
   };
-
-  const fullChromium = findFullChromium();
-  if (fullChromium) {
-    opts.executablePath = fullChromium;
-  }
-
-  return opts;
 }
 
 // ============================================================
