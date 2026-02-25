@@ -1582,8 +1582,8 @@ async function generateLabelPdf(perfIndex) {
   const H_GAP = 4;       // 가로 칸 사이 간격
   const H_PITCH = LABEL_W + H_GAP; // 29.4mm
   const V_PITCH = 10;    // 세로피치 (간격 없음)
-  const MARGIN_LEFT = 8;
-  const MARGIN_TOP = 5;
+  const MARGIN_LEFT = 7;
+  const MARGIN_TOP = 7;
 
   // 라벨 셀 HTML 생성
   const totalSlots = COLS * ROWS;
