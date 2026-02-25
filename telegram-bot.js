@@ -1583,7 +1583,7 @@ async function generateLabelPdf(perfIndex) {
   const H_PITCH = LABEL_W + H_GAP; // 29.4mm
   const V_PITCH = 10.1;  // 세로피치 (누적오차 보정 +0.1mm)
   const MARGIN_LEFT = 7;
-  const MARGIN_TOP = 5;
+  const MARGIN_TOP = 9;
 
   // 라벨 셀 HTML 생성
   const totalSlots = COLS * ROWS;
