@@ -1586,7 +1586,7 @@ async function generateLabelPdf(perfIndex) {
   const LABEL_H = 10;    // mm
   const H_GAP = 4;       // 가로 칸 사이 간격
   const H_PITCH = LABEL_W + H_GAP; // 29.4mm
-  const V_PITCH = 10;    // 세로피치 (pdfkit은 누적오차 없음)
+  const V_PITCH = 10.2;  // 세로피치 (실제 라벨지 간격 보정)
   const MARGIN_LEFT = 5; // mm
   const MARGIN_TOP = 7;  // mm
 
