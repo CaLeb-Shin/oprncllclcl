@@ -1587,8 +1587,8 @@ async function generateLabelPdf(perfIndex) {
   const H_GAP = 4;       // 가로 칸 사이 간격
   const H_PITCH = LABEL_W + H_GAP; // 29.4mm
   const V_PITCH = 10;    // 세로피치 (pdfkit은 누적오차 없음)
-  const MARGIN_LEFT = 8; // mm (실측)
-  const MARGIN_TOP = 12; // mm (실측)
+  const MARGIN_LEFT = 5; // mm
+  const MARGIN_TOP = 7;  // mm
 
   const FONT_SIZE = 7;   // pt
   const totalSlots = COLS * ROWS;
