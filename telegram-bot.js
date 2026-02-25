@@ -38,10 +38,22 @@ function findFullChromium() {
 }
 
 function getBrowserLaunchOptions() {
-  return {
+  const opts = {
     headless: true,
     args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'],
   };
+
+  const fullChromium = findFullChromium();
+  if (fullChromium) {
+    opts.executablePath = fullChromium;
+  }
+
+  return opts;
+}
+
+// Windows execSync 래퍼 (CMD 창 숨김)
+function execSyncHidden(cmd, options = {}) {
+  return execSync(cmd, { ...options, windowsHide: true });
 }
 
 // ============================================================
@@ -226,6 +238,7 @@ function runSalesScript(targetChatId) {
 
     const child = spawn('node', ['interpark-sales.js'], {
       cwd: CONFIG.baseDir,
+      windowsHide: true,
       env: {
         ...process.env,
         PATH: `/Users/erwin_shin/.nvm/versions/node/v22.20.0/bin:${process.env.PATH}`,
@@ -272,11 +285,11 @@ async function closeBrowser(force = false) {
   // Windows: 혹시 남아있는 chrome-headless-shell 프로세스 정리
   if (process.platform === 'win32') {
     try {
-      execSync('taskkill /F /IM chrome-headless-shell.exe /T 2>nul', { timeout: 5000 });
+      execSyncHidden('taskkill /F /IM chrome-headless-shell.exe /T 2>nul', { timeout: 5000 });
       console.log('🧹 잔여 chrome-headless-shell 프로세스 정리');
     } catch {} // 실행 중인 프로세스 없으면 무시
     try {
-      execSync('taskkill /F /IM chrome.exe /FI "WINDOWTITLE eq about:blank" /T 2>nul', { timeout: 5000 });
+      execSyncHidden('taskkill /F /IM chrome.exe /FI "WINDOWTITLE eq about:blank" /T 2>nul', { timeout: 5000 });
     } catch {}
   }
 }
@@ -3475,7 +3488,7 @@ process.on('unhandledRejection', (err) => {
 // Windows: 시작 시 이전 좀비 브라우저 프로세스 정리
 if (process.platform === 'win32') {
   try {
-    execSync('taskkill /F /IM chrome-headless-shell.exe /T 2>nul', { timeout: 5000 });
+    execSyncHidden('taskkill /F /IM chrome-headless-shell.exe /T 2>nul', { timeout: 5000 });
     console.log('🧹 시작 시 잔여 chrome-headless-shell 프로세스 정리');
   } catch {}
 }
