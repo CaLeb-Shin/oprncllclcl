@@ -3,6 +3,7 @@ const { spawn, execSync } = require('child_process');
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const PDFDocument = require('pdfkit');
 
 // Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell 콘솔 창 방지)
 function findFullChromium() {
@@ -1562,6 +1563,7 @@ async function getFinalSummaryDetail(perfIndex) {
 }
 
 // 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
+// pdfkit으로 mm 단위 정확한 좌표 배치 (Playwright HTML→PDF 오차 제거)
 async function generateLabelPdf(perfIndex) {
   const result = await getActiveOrders(perfIndex);
   if (!result) throw new Error('잘못된 공연 번호');
@@ -1574,6 +1576,9 @@ async function generateLabelPdf(perfIndex) {
     line2: `${o.seatType || ''} ${o.qty}매`,
   }));
 
+  // mm → pt 변환 (1mm = 72/25.4 pt)
+  const mm = v => v * 72 / 25.4;
+
   // 라벨 규격: 글로리텍 8189 (실측값)
   const COLS = 7;
   const ROWS = 27;
@@ -1581,88 +1586,67 @@ async function generateLabelPdf(perfIndex) {
   const LABEL_H = 10;    // mm
   const H_GAP = 4;       // 가로 칸 사이 간격
   const H_PITCH = LABEL_W + H_GAP; // 29.4mm
-  const V_PITCH = 10.1;  // 세로피치 (누적오차 보정 +0.1mm)
-  const MARGIN_LEFT = 7;
-  const MARGIN_TOP = 9;
+  const V_PITCH = 10;    // 세로피치 (pdfkit은 누적오차 없음)
+  const MARGIN_LEFT = 8; // mm (실측)
+  const MARGIN_TOP = 12; // mm (실측)
 
-  // 라벨 셀 HTML 생성
+  const FONT_SIZE = 7;   // pt
   const totalSlots = COLS * ROWS;
-  let cellsHtml = '';
-  for (let i = 0; i < totalSlots; i++) {
-    if (i < labels.length) {
-      cellsHtml += `<div class="cell"><div class="l1">${labels[i].line1}</div><div class="l2">${labels[i].line2}</div></div>`;
-    } else {
-      cellsHtml += `<div class="cell"></div>`;
-    }
-  }
 
-  // 여러 페이지가 필요한 경우
-  const pages = Math.ceil(labels.length / totalSlots);
-  let pagesHtml = '';
-  for (let p = 0; p < pages; p++) {
-    const start = p * totalSlots;
-    let pageCells = '';
-    for (let i = 0; i < totalSlots; i++) {
-      const idx = start + i;
-      if (idx < labels.length) {
-        pageCells += `<div class="cell"><div class="l1">${labels[idx].line1}</div><div class="l2">${labels[idx].line2}</div></div>`;
-      } else {
-        pageCells += `<div class="cell"></div>`;
+  // 한글 폰트 경로
+  const fontPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgun.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+  const fontBoldPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgunbd.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 0 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve({ pdfBuffer: Buffer.concat(chunks), orderCount: activeOrders.length, perf }));
+    doc.on('error', reject);
+
+    doc.registerFont('label', fontPath);
+    doc.registerFont('label-bold', fontBoldPath);
+
+    const pageCount = Math.ceil(labels.length / totalSlots) || 1;
+
+    for (let p = 0; p < pageCount; p++) {
+      if (p > 0) doc.addPage({ size: 'A4', margin: 0 });
+
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const idx = p * totalSlots + row * COLS + col;
+          if (idx >= labels.length) break;
+
+          const label = labels[idx];
+          // 셀 중앙 좌표 (mm)
+          const cellX = MARGIN_LEFT + col * H_PITCH;
+          const cellY = MARGIN_TOP + row * V_PITCH;
+          const centerX = cellX + LABEL_W / 2;
+          const centerY = cellY + LABEL_H / 2;
+
+          // line1 (bold) — 셀 중앙 위쪽
+          doc.font('label-bold').fontSize(FONT_SIZE);
+          const w1 = doc.widthOfString(label.line1);
+          doc.text(label.line1, mm(centerX) - w1 / 2, mm(centerY) - FONT_SIZE * 1.1, {
+            lineBreak: false,
+          });
+
+          // line2 — 셀 중앙 아래쪽
+          doc.font('label').fontSize(FONT_SIZE);
+          const w2 = doc.widthOfString(label.line2);
+          doc.text(label.line2, mm(centerX) - w2 / 2, mm(centerY) + FONT_SIZE * 0.15, {
+            lineBreak: false,
+          });
+        }
       }
     }
-    pagesHtml += `<div class="page"><div class="grid-wrap"><div class="grid">${pageCells}</div></div></div>`;
-  }
 
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-  @page { size: A4; margin: 0; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
-  .page {
-    position: relative;
-    width: 210mm; height: 297mm;
-    page-break-after: always;
-  }
-  .page:last-child { page-break-after: auto; }
-  .grid-wrap {
-    position: absolute;
-    top: ${MARGIN_TOP}mm;
-    left: ${MARGIN_LEFT}mm;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(${COLS}, ${H_PITCH}mm);
-    grid-template-rows: repeat(${ROWS}, ${V_PITCH}mm);
-  }
-  .cell {
-    width: ${LABEL_W}mm; height: ${LABEL_H}mm;
-    display: flex; flex-direction: column;
-    justify-content: center; align-items: center;
-    overflow: hidden;
-    font-size: 7pt; line-height: 1.2;
-    text-align: center;
-  }
-  .l1 { font-weight: bold; white-space: nowrap; }
-  .l2 { white-space: nowrap; }
-</style>
-</head><body>${pagesHtml}</body></html>`;
-
-  // Playwright로 PDF 생성
-  if (!smartstoreCtx) throw new Error('브라우저 미연결');
-  let pdfPage = null;
-  try {
-    pdfPage = await smartstoreCtx.newPage();
-    await pdfPage.setContent(html, { waitUntil: 'domcontentloaded' });
-    const pdfBuffer = await pdfPage.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
-    });
-    return { pdfBuffer, orderCount: activeOrders.length, perf };
-  } finally {
-    if (pdfPage) await pdfPage.close().catch(() => {});
-  }
+    doc.end();
+  });
 }
 
 // ============================================================
