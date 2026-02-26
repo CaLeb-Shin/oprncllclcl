@@ -1470,7 +1470,7 @@ async function getActiveOrders(perfIndex) {
   }
 
   // 현재 공연의 지역 추출 (뿌리오 제목에서)
-  const perfRegionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천)/);
+  const perfRegionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
   const perfRegion = perfRegionMatch ? perfRegionMatch[1] : '';
 
   // 네이버 취소 건수 카운터: "이름_좌석" → 남은 취소 횟수 (같은 지역만)
@@ -1667,7 +1667,7 @@ async function compareNaverVsPpurio(perfIndex) {
   }
 
   // 뿌리오 제목에서 지역 추출
-  const perfRegionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천)/);
+  const perfRegionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
   const perfRegion = perfRegionMatch ? perfRegionMatch[1] : '';
   if (!perfRegion) return '❌ 공연 지역을 파악할 수 없습니다.';
 
@@ -2079,6 +2079,7 @@ async function checkForNewOrders() {
 // 새 공연 추가 시 여기만 수정하면 됨
 const STORE_URL = 'https://smartstore.naver.com/melon_symphony_orchestra';
 const PERFORMANCES = {
+  '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '' },
   '대구_디즈니': { date: '3/15(일)', name: '대구 디즈니+지브리', link: '' },
   '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '' },
   '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '' },
@@ -2112,7 +2113,7 @@ async function fetchStoreProductLinks() {
     linkPage = await smartstoreCtx.newPage();
     linkPage.setDefaultTimeout(30000);
 
-    const regions = ['대구', '창원', '광주', '대전', '부산', '고양', '인천'];
+    const regions = ['대구', '창원', '광주', '대전', '부산', '고양', '인천', '울산'];
     let products = [];
 
     // === 방법 1: 관리자 상품 목록 API 응답 캡처 ===
@@ -2902,7 +2903,7 @@ async function handleMessage(msg) {
     }
 
     // /지역공연 → 해당 지역 네이버 스토어 링크
-    const regionMatch = cmd.match(/^(대구|창원|광주|대전|부산|고양|인천)공연$/);
+    const regionMatch = cmd.match(/^(대구|창원|광주|대전|부산|고양|인천|울산)공연$/);
     if (regionMatch) {
       const region = regionMatch[1];
       console.log(`📩 그룹: /${region}공연 from ${msg.from?.first_name || ''}`);
@@ -2974,7 +2975,7 @@ async function handleMessage(msg) {
   }
 
   // /지역공연링크 → 해당 지역 네이버 스토어 링크 (개인 봇)
-  const perfLinkMatch = text.match(/^\/?(?:\/?)?(대구|창원|광주|대전|부산|고양|인천)공연(?:링크)?$/);
+  const perfLinkMatch = text.match(/^\/?(?:\/?)?(대구|창원|광주|대전|부산|고양|인천|울산)공연(?:링크)?$/);
   if (perfLinkMatch) {
     const region = perfLinkMatch[1];
     if (Object.keys(storeLinksCache).length === 0) await fetchStoreProductLinks();
@@ -3035,7 +3036,7 @@ async function handleMessage(msg) {
     try {
       await sendMessage('🏷 라벨 시트 생성 중...');
       const { pdfBuffer, orderCount, perf } = await generateLabelPdf(num - 1);
-      const region = (perf.title.match(/(대구|창원|광주|대전|부산|고양|인천)/) || ['', '공연'])[1];
+      const region = (perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/) || ['', '공연'])[1];
       const filename = `라벨_${region}_${orderCount}건.pdf`;
       await sendDocument(pdfBuffer, filename, `🏷 ${perf.title} 라벨 (${orderCount}건)`);
     } catch (err) {
