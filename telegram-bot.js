@@ -1592,6 +1592,9 @@ async function generateLabelPdf(perfIndex) {
   const { activeOrders, perf } = result;
   if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
 
+  // 뿌리오 데이터(최신순) → reverse → 선착순
+  activeOrders.reverse();
+
   // 등급별 정렬: VIP석 → R석 → S석 → A석 (각 등급 내 선착순 유지)
   const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
   activeOrders.sort((a, b) => {
