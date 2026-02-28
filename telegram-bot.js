@@ -2151,6 +2151,15 @@ const VENUE_SECTION_PRIORITY = {
     '3층B구역': 5,
     '3층A구역': 6, '3층C구역': 6,
   },
+  '창원': {  // 창원 성산아트홀 대극장
+    'O열': 1, '1층O열': 1,
+    '1층C열': 2,
+    '1층B열': 3, '1층D열': 3,
+    '1층A열': 4, '1층E열': 4,
+    '2층C열': 5,
+    '2층B열': 6, '2층D열': 6,
+    '2층A열': 7, '2층E열': 7,
+  },
 };
 
 // 좌석배정 대기 플래그
@@ -2204,12 +2213,14 @@ function parseUnsoldSeats(buffer) {
     const floorRaw = String(row[COL_FLOOR] || '').trim();
     if (floorRaw) lastFloor = floorRaw;
 
-    // 열 컬럼: "BL5구역 1열" or "G구역 3열" or "A구역 1열" → 구역 + 행 분리
+    // 열 컬럼: "BL5구역 1열" or "G구역 3열" or "A열 5행" → 섹션 + 행 분리
     const sectionRowRaw = String(row[COL_SECTION_ROW] || '').trim();
     if (!sectionRowRaw) continue;
 
-    // "BL5구역 1열" → section="BL5구역", rowNum=1
-    const srMatch = sectionRowRaw.match(/^(.+?구역)\s*(\d+)열?$/);
+    // 패턴1: "BL5구역 1열" → section="BL5구역", rowNum=1
+    // 패턴2: "A열 5행" → section="A열", rowNum=5
+    // 패턴3: "C열 3" → section="C열", rowNum=3
+    const srMatch = sectionRowRaw.match(/^(.+?(?:구역|열))\s*(\d+)(?:열|행)?$/);
     if (!srMatch) continue;
     const section = srMatch[1];
     const rowNum = parseInt(srMatch[2]);
