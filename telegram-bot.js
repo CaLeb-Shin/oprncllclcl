@@ -2212,6 +2212,11 @@ function assignSeats(unsoldSeats, activeOrders, region) {
   const assignments = [];
   const unassigned = [];
 
+  // 예매 순서 번호 부여 (1번 = 가장 먼저 예매한 사람)
+  for (let i = 0; i < activeOrders.length; i++) {
+    activeOrders[i].bookingOrder = i + 1;
+  }
+
   // 등급별 구매자 그룹핑
   const buyersByGrade = {};
   for (const order of activeOrders) {
@@ -2376,11 +2381,12 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
       const a = items[i];
       const name = `${a.buyer.buyerName || '?'}(${a.buyer.lastFour || '----'})`;
       const qty = a.buyer.qty || 1;
+      const orderNum = a.buyer.bookingOrder || '?';
       if (a.split) {
         const seatInfo = a.split.map(s => `${s.section} ${s.row}행 ${s.seats.join(',')}번`).join(' / ');
-        msg += `${i + 1}. ${name} ${qty}매 → ${seatInfo}\n`;
+        msg += `${orderNum}. ${name} ${qty}매 → ${seatInfo}\n`;
       } else {
-        msg += `${i + 1}. ${name} ${qty}매 → ${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
+        msg += `${orderNum}. ${name} ${qty}매 → ${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
       }
       totalAssigned++;
     }
