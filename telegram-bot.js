@@ -4,6 +4,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit');
+const XLSX = require('xlsx');
 
 // Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell 콘솔 창 방지)
 function findFullChromium() {
@@ -255,6 +256,27 @@ function sendDocument(pdfBuffer, filename, caption = '') {
     req.on('error', reject);
     req.write(body);
     req.end();
+  });
+}
+
+// 텔레그램 파일 다운로드 (fileId → Buffer)
+function downloadTelegramFile(fileId) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const fileInfo = await telegramRequest('getFile', { file_id: fileId });
+      if (!fileInfo.ok || !fileInfo.result?.file_path) {
+        return reject(new Error('파일 정보를 가져올 수 없습니다'));
+      }
+      const filePath = fileInfo.result.file_path;
+      const url = `https://api.telegram.org/file/bot${CONFIG.telegramBotToken}/${filePath}`;
+
+      https.get(url, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+        res.on('error', reject);
+      }).on('error', reject);
+    } catch (err) { reject(err); }
   });
 }
 
@@ -2089,6 +2111,292 @@ const PERFORMANCES = {
   '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '' },
 };
 
+// ============================================================
+// 좌석 배정 시스템
+// ============================================================
+
+// 공연장별 구역 우선순위 (가운데→바깥, 숫자 낮을수록 우선)
+const VENUE_SECTION_PRIORITY = {
+  '대구': {  // 대구 콘서트하우스 그랜드홀
+    'B구역': 1,
+    'A구역': 2, 'C구역': 2,
+    'E구역': 3,
+    'I구역': 4,
+    'J구역': 5, 'H구역': 5,
+    'D구역': 6, 'F구역': 6,
+    'K구역': 7, 'G구역': 7,
+    'BL1': 8, 'BL2': 8,
+    'BL3': 9, 'BL4': 9,
+    'BL5': 10, 'BL6': 10,
+  },
+};
+
+// 좌석배정 대기 플래그
+let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
+
+// 엑셀 파싱: 미판매 좌석 추출
+function parseUnsoldSeats(buffer) {
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+  // 헤더 행 찾기 (좌석등급, 구역, 행, 좌석번호 등의 키워드)
+  let headerIdx = -1;
+  let colMap = {};
+  for (let i = 0; i < Math.min(rows.length, 10); i++) {
+    const row = (rows[i] || []).map(c => String(c || '').trim());
+    const gradeCol = row.findIndex(c => c.includes('좌석등급') || c.includes('등급') || c.includes('좌석구분'));
+    const sectionCol = row.findIndex(c => c.includes('구역') || c.includes('좌석구역'));
+    const rowCol = row.findIndex(c => c === '행' || c.includes('행'));
+    const seatsCol = row.findIndex(c => c.includes('좌석번호') || c.includes('좌석NO'));
+    if (gradeCol >= 0 && seatsCol >= 0) {
+      headerIdx = i;
+      colMap = { grade: gradeCol, section: sectionCol, row: rowCol, seats: seatsCol };
+      break;
+    }
+  }
+
+  // 헤더를 못 찾으면 추정 (엑셀 이미지 기준: 좌석등급, 구역, 행, 열, 좌석수, 좌석번호)
+  if (headerIdx < 0) {
+    headerIdx = 0;
+    // 첫 번째 데이터 기반 추정
+    colMap = { grade: 2, section: 3, row: 4, seats: 7 };
+  }
+
+  const result = {};
+  let lastGrade = '';
+  let lastSection = '';
+
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    if (row.length < 3) continue;
+
+    // 좌석등급 (병합셀이면 이전 값 유지)
+    const gradeRaw = String(row[colMap.grade] || '').trim();
+    if (gradeRaw && gradeRaw.includes('석')) lastGrade = gradeRaw;
+    if (!lastGrade) continue;
+
+    // 구역
+    const sectionRaw = String(row[colMap.section] || '').trim();
+    if (sectionRaw && sectionRaw.includes('구역')) lastSection = sectionRaw;
+    // BL 구역 처리
+    if (sectionRaw && sectionRaw.match(/^BL\d/i)) lastSection = sectionRaw;
+    if (!lastSection) continue;
+
+    // 행
+    const rowNum = parseInt(String(row[colMap.row] || ''));
+    if (!rowNum || isNaN(rowNum)) continue;
+
+    // 좌석번호 파싱
+    const seatsRaw = String(row[colMap.seats] || '').trim();
+    if (!seatsRaw) continue;
+
+    // "1 2 3 4 5" or "1,2,3,4,5" or "1 2 3 4 5 6 7"
+    const seatNums = seatsRaw.split(/[\s,]+/)
+      .map(s => parseInt(s.trim()))
+      .filter(n => !isNaN(n) && n > 0);
+    if (seatNums.length === 0) continue;
+
+    if (!result[lastGrade]) result[lastGrade] = [];
+    result[lastGrade].push({
+      section: lastSection,
+      row: rowNum,
+      seats: seatNums.sort((a, b) => a - b),
+    });
+  }
+
+  return result;
+}
+
+// 좌석 배정 알고리즘
+function assignSeats(unsoldSeats, activeOrders, region) {
+  const priority = VENUE_SECTION_PRIORITY[region] || {};
+  const assignments = [];
+  const unassigned = [];
+
+  // 등급별 구매자 그룹핑
+  const buyersByGrade = {};
+  for (const order of activeOrders) {
+    const grade = order.seatType || '미분류';
+    if (!buyersByGrade[grade]) buyersByGrade[grade] = [];
+    buyersByGrade[grade].push(order);
+  }
+
+  for (const [grade, buyers] of Object.entries(buyersByGrade)) {
+    // 해당 등급의 미판매 좌석
+    let availableRows = (unsoldSeats[grade] || []).map(r => ({
+      ...r,
+      seats: [...r.seats], // 복사
+    }));
+
+    if (availableRows.length === 0) {
+      buyers.forEach(b => unassigned.push({ buyer: b, reason: `${grade} 미판매 좌석 없음` }));
+      continue;
+    }
+
+    // 구역 우선순위 정렬
+    availableRows.sort((a, b) => {
+      const pa = priority[a.section] || 99;
+      const pb = priority[b.section] || 99;
+      if (pa !== pb) return pa - pb;
+      return a.row - b.row;
+    });
+
+    // 각 행의 중앙값 계산
+    const getCenter = (seats) => {
+      if (seats.length === 0) return 0;
+      return (Math.min(...seats) + Math.max(...seats)) / 2;
+    };
+
+    // 연속좌석 그룹 찾기 (같은 행에서 qty만큼 연속)
+    const findConsecutive = (seats, qty) => {
+      if (seats.length < qty) return null;
+      const center = getCenter(seats);
+      let bestGroup = null;
+      let bestDist = Infinity;
+
+      for (let i = 0; i <= seats.length - qty; i++) {
+        // 연속 체크
+        let consecutive = true;
+        for (let j = 1; j < qty; j++) {
+          if (seats[i + j] !== seats[i] + j) { consecutive = false; break; }
+        }
+        if (!consecutive) continue;
+
+        const group = seats.slice(i, i + qty);
+        const groupCenter = (group[0] + group[group.length - 1]) / 2;
+        const dist = Math.abs(groupCenter - center);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestGroup = group;
+        }
+      }
+      return bestGroup;
+    };
+
+    // 2매 이상 → 연속좌석 우선, 1매 → 가운데 우선
+    // 다매 구매자 먼저 배정 (연속좌석 확보 유리)
+    const sortedBuyers = [...buyers].sort((a, b) => (b.qty || 1) - (a.qty || 1));
+
+    for (const buyer of sortedBuyers) {
+      const qty = buyer.qty || 1;
+      let assigned = false;
+
+      for (const rowData of availableRows) {
+        if (rowData.seats.length < qty) continue;
+
+        if (qty >= 2) {
+          // 연속좌석 탐색
+          const group = findConsecutive(rowData.seats, qty);
+          if (group) {
+            assignments.push({
+              buyer,
+              grade,
+              section: rowData.section,
+              row: rowData.row,
+              seats: group,
+            });
+            // 배정된 좌석 제거
+            rowData.seats = rowData.seats.filter(s => !group.includes(s));
+            assigned = true;
+            break;
+          }
+        } else {
+          // 1매: 가운데에 가장 가까운 좌석
+          const center = getCenter(rowData.seats);
+          rowData.seats.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+          const seat = rowData.seats.shift();
+          assignments.push({
+            buyer,
+            grade,
+            section: rowData.section,
+            row: rowData.row,
+            seats: [seat],
+          });
+          assigned = true;
+          break;
+        }
+      }
+
+      // 연속 실패 시 분산 배정
+      if (!assigned && qty >= 2) {
+        let remaining = qty;
+        const splitSeats = [];
+        for (const rowData of availableRows) {
+          if (remaining <= 0) break;
+          const take = Math.min(remaining, rowData.seats.length);
+          if (take === 0) continue;
+          const center = getCenter(rowData.seats);
+          rowData.seats.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+          const taken = rowData.seats.splice(0, take);
+          splitSeats.push({ section: rowData.section, row: rowData.row, seats: taken.sort((a, b) => a - b) });
+          remaining -= take;
+        }
+        if (splitSeats.length > 0) {
+          assignments.push({
+            buyer,
+            grade,
+            section: splitSeats.map(s => s.section).join('+'),
+            row: splitSeats.map(s => s.row).join('+'),
+            seats: splitSeats.flatMap(s => s.seats),
+            split: splitSeats,
+          });
+          assigned = true;
+        }
+      }
+
+      if (!assigned) {
+        unassigned.push({ buyer, reason: `${grade} 잔여좌석 부족` });
+      }
+    }
+  }
+
+  return { assignments, unassigned };
+}
+
+// 배정 결과 메시지 생성
+function formatAssignmentResult(assignments, unassigned, perfName) {
+  let msg = `🎫 <b>좌석 배정 결과</b> (${perfName})\n━━━━━━━━━━━━━━━━\n`;
+
+  // 등급별 그룹핑
+  const byGrade = {};
+  for (const a of assignments) {
+    if (!byGrade[a.grade]) byGrade[a.grade] = [];
+    byGrade[a.grade].push(a);
+  }
+
+  let totalAssigned = 0;
+  for (const [grade, items] of Object.entries(byGrade)) {
+    msg += `\n<b>[${grade}]</b> 배정 ${items.length}명\n`;
+    for (let i = 0; i < items.length; i++) {
+      const a = items[i];
+      const name = `${a.buyer.buyerName || '?'}(${a.buyer.lastFour || '----'})`;
+      const qty = a.buyer.qty || 1;
+      if (a.split) {
+        const seatInfo = a.split.map(s => `${s.section} ${s.row}행 ${s.seats.join(',')}번`).join(' / ');
+        msg += `${i + 1}. ${name} ${qty}매 → ${seatInfo}\n`;
+      } else {
+        msg += `${i + 1}. ${name} ${qty}매 → ${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
+      }
+      totalAssigned++;
+    }
+  }
+
+  if (unassigned.length > 0) {
+    msg += `\n<b>⚠️ 미배정 ${unassigned.length}명</b>\n`;
+    for (const u of unassigned) {
+      const name = `${u.buyer.buyerName || '?'}(${u.buyer.lastFour || '----'})`;
+      msg += `  - ${name}: ${u.reason}\n`;
+    }
+  }
+
+  msg += `\n━━━━━━━━━━━━━━━━\n`;
+  msg += `✅ 총 배정: ${totalAssigned}명`;
+  if (unassigned.length > 0) msg += ` / ⚠️ 미배정: ${unassigned.length}명`;
+
+  return msg;
+}
+
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
 let storeLinksCache = {};  // { '대구': 'https://...', '창원': 'https://...' }
 let storeLinksCacheTime = 0;
@@ -2841,12 +3149,82 @@ async function handleCallbackQuery(cq) {
 // 메시지 처리
 // ============================================================
 async function handleMessage(msg) {
+  const chatId = String(msg.chat.id);
+  const isPersonalChat = chatId === CONFIG.telegramChatId;
+
+  // 좌석배정 엑셀 파일 수신 처리
+  if (msg.document && isPersonalChat && seatAssignWaiting) {
+    const doc = msg.document;
+    const fileName = doc.file_name || '';
+    if (!fileName.match(/\.(xlsx?|csv)$/i)) {
+      await sendMessage('⚠️ 엑셀 파일(.xlsx)을 보내주세요.');
+      return;
+    }
+    // 타임아웃 체크 (10분)
+    if (Date.now() - seatAssignWaiting.timestamp > 10 * 60 * 1000) {
+      seatAssignWaiting = null;
+      await sendMessage('⏰ 좌석배정 대기 시간이 초과되었습니다. "좌석배정N"을 다시 입력해주세요.');
+      return;
+    }
+    try {
+      await sendMessage('📊 엑셀 파싱 중...');
+      const fileBuffer = await downloadTelegramFile(doc.file_id);
+      const unsoldSeats = parseUnsoldSeats(fileBuffer);
+
+      // 미판매 좌석 요약
+      const gradeCount = {};
+      for (const [grade, rows] of Object.entries(unsoldSeats)) {
+        gradeCount[grade] = rows.reduce((sum, r) => sum + r.seats.length, 0);
+      }
+      const unsoldSummary = Object.entries(gradeCount).map(([g, c]) => `${g} ${c}석`).join(', ');
+      await sendMessage(`📋 미판매 좌석: ${unsoldSummary}\n\n🎯 좌석 배정 중...`);
+
+      // 최종결산 데이터에서 activeOrders 가져오기
+      const perfIndex = seatAssignWaiting.perfIndex;
+      const result = await getActiveOrders(perfIndex);
+      if (!result) throw new Error('공연 데이터를 가져올 수 없습니다');
+      const { activeOrders, perf } = result;
+
+      // 지역 추출
+      const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
+      const region = regionMatch ? regionMatch[1] : '';
+
+      // 좌석 배정 실행
+      const { assignments, unassigned } = assignSeats(unsoldSeats, activeOrders, region);
+
+      // 결과 메시지
+      const resultMsg = formatAssignmentResult(assignments, unassigned, perf.title);
+
+      // 긴 메시지 분할 전송 (텔레그램 4096자 제한)
+      if (resultMsg.length > 4000) {
+        const lines = resultMsg.split('\n');
+        let chunk = '';
+        for (const line of lines) {
+          if ((chunk + '\n' + line).length > 3900) {
+            await sendMessage(chunk);
+            chunk = line;
+          } else {
+            chunk += (chunk ? '\n' : '') + line;
+          }
+        }
+        if (chunk) await sendMessage(chunk);
+      } else {
+        await sendMessage(resultMsg);
+      }
+
+      seatAssignWaiting = null;
+    } catch (err) {
+      await sendMessage(`❌ 좌석배정 오류: ${err.message}`);
+      seatAssignWaiting = null;
+    }
+    return;
+  }
+
   // 그룹에서 @봇이름 제거 처리
   let text = msg.text?.trim();
   if (!text) return;
   text = text.replace(/@\S+/g, '').trim().toLowerCase();
 
-  const chatId = String(msg.chat.id);
   const isGroup = CONFIG.telegramGroupId && chatId === CONFIG.telegramGroupId;
   const isPersonal = chatId === CONFIG.telegramChatId;
 
@@ -3045,6 +3423,29 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 좌석배정: "좌석배정1", "좌석배정 2"
+  if (text.match(/^좌석배정\s*(\d+)$/)) {
+    const num = parseInt(text.match(/^좌석배정\s*(\d+)$/)[1]);
+    if (finalSummaryKeys.length === 0) {
+      await sendMessage('⚠️ 먼저 "최종결산"을 입력해서 공연 목록을 불러오세요.');
+      return;
+    }
+    const perfIndex = num - 1;
+    if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
+      await sendMessage(`❌ 1~${finalSummaryKeys.length} 사이로 입력해주세요.`);
+      return;
+    }
+    const key = finalSummaryKeys[perfIndex];
+    const perf = finalSummaryData[key];
+    seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now() };
+    await sendMessage(
+      `🎫 <b>${perf.title}</b> 좌석배정 준비\n\n` +
+      `📎 미판매 좌석 엑셀 파일(.xlsx)을 보내주세요.\n` +
+      `⏰ 10분 이내에 파일을 보내주세요.`
+    );
+    return;
+  }
+
   // 최종결산 2단계: 숫자 선택 (공연 선택)
   if (text.startsWith('결산') && text.match(/결산\s*(\d+)/)) {
     const num = parseInt(text.match(/결산\s*(\d+)/)[1]);
@@ -3079,7 +3480,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n좌석 배정: <b>좌석배정1</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
