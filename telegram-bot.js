@@ -3169,6 +3169,18 @@ async function handleMessage(msg) {
     try {
       await sendMessage('📊 엑셀 파싱 중...');
       const fileBuffer = await downloadTelegramFile(doc.file_id);
+
+      // 디버그: 엑셀 첫 5행 출력
+      const debugWb = XLSX.read(fileBuffer, { type: 'buffer' });
+      const debugSheet = debugWb.Sheets[debugWb.SheetNames[0]];
+      const debugRows = XLSX.utils.sheet_to_json(debugSheet, { header: 1 });
+      let debugMsg = '🔍 <b>엑셀 디버그 (첫 5행)</b>\n';
+      for (let i = 0; i < Math.min(5, debugRows.length); i++) {
+        const row = (debugRows[i] || []).map((c, idx) => `[${idx}]${String(c || '').substring(0, 15)}`);
+        debugMsg += `행${i}: ${row.join(' | ')}\n`;
+      }
+      await sendMessage(debugMsg);
+
       const unsoldSeats = parseUnsoldSeats(fileBuffer);
 
       // 미판매 좌석 요약
