@@ -2129,6 +2129,14 @@ const VENUE_SECTION_PRIORITY = {
     'BL3구역': 9, 'BL4구역': 9,
     'BL5구역': 10, 'BL6구역': 10,
   },
+  '울산': {  // 울산문화예술회관 대공연장
+    '1층B구역': 1,
+    '1층A구역': 2, '1층C구역': 2,
+    '2층B구역': 3,
+    '2층A구역': 4, '2층C구역': 4,
+    '3층B구역': 5,
+    '3층A구역': 6, '3층C구역': 6,
+  },
 };
 
 // 좌석배정 대기 플래그
@@ -2155,16 +2163,19 @@ function parseUnsoldSeats(buffer) {
   // 컬럼 인덱스 자동 감지
   const headerRow = (rows[headerIdx] || []).map(c => String(c || '').trim());
   const gradeIdx = headerRow.findIndex(c => c.includes('좌석등급') || c.includes('등급'));
+  const floorIdx = headerRow.findIndex(c => c === '층' || c.includes('층'));
   const sectionRowIdx = headerRow.findIndex(c => c === '열' || c.includes('열'));
   const seatsIdx = headerRow.findIndex(c => c.includes('좌석번호'));
 
   // fallback: 실측 기반
   const COL_GRADE = gradeIdx >= 0 ? gradeIdx : 3;
+  const COL_FLOOR = floorIdx >= 0 ? floorIdx : 4;
   const COL_SECTION_ROW = sectionRowIdx >= 0 ? sectionRowIdx : 5;
   const COL_SEATS = seatsIdx >= 0 ? seatsIdx : 7;
 
   const result = {};
   let lastGrade = '';
+  let lastFloor = '';
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i] || [];
@@ -2174,6 +2185,10 @@ function parseUnsoldSeats(buffer) {
     const gradeRaw = String(row[COL_GRADE] || '').trim();
     if (gradeRaw && gradeRaw.includes('석')) lastGrade = gradeRaw;
     if (!lastGrade) continue;
+
+    // 층 (병합셀이면 이전 값 유지)
+    const floorRaw = String(row[COL_FLOOR] || '').trim();
+    if (floorRaw) lastFloor = floorRaw;
 
     // 열 컬럼: "BL5구역 1열" or "G구역 3열" or "A구역 1열" → 구역 + 행 분리
     const sectionRowRaw = String(row[COL_SECTION_ROW] || '').trim();
@@ -2195,9 +2210,14 @@ function parseUnsoldSeats(buffer) {
       .filter(n => !isNaN(n) && n > 0);
     if (seatNums.length === 0) continue;
 
+    // 층 정보 정규화 (예: "1층", "2층", "합창석" 등)
+    const floorMatch = lastFloor.match(/(\d+)층/);
+    const floor = floorMatch ? `${floorMatch[1]}층` : lastFloor;
+
     if (!result[lastGrade]) result[lastGrade] = [];
     result[lastGrade].push({
       section,
+      floor,
       row: rowNum,
       seats: seatNums.sort((a, b) => a - b),
     });
@@ -2237,10 +2257,11 @@ function assignSeats(unsoldSeats, activeOrders, region) {
       continue;
     }
 
-    // 구역 우선순위 정렬
+    // 구역 우선순위 정렬 (층+구역 → 구역만 fallback)
+    const getPriority = (r) => priority[`${r.floor}${r.section}`] || priority[r.section] || 99;
     availableRows.sort((a, b) => {
-      const pa = priority[a.section] || 99;
-      const pb = priority[b.section] || 99;
+      const pa = getPriority(a);
+      const pb = getPriority(b);
       if (pa !== pb) return pa - pb;
       return a.row - b.row;
     });
@@ -2294,6 +2315,7 @@ function assignSeats(unsoldSeats, activeOrders, region) {
             assignments.push({
               buyer,
               grade,
+              floor: rowData.floor,
               section: rowData.section,
               row: rowData.row,
               seats: group,
@@ -2311,6 +2333,7 @@ function assignSeats(unsoldSeats, activeOrders, region) {
           assignments.push({
             buyer,
             grade,
+            floor: rowData.floor,
             section: rowData.section,
             row: rowData.row,
             seats: [seat],
@@ -2331,7 +2354,7 @@ function assignSeats(unsoldSeats, activeOrders, region) {
           const center = getCenter(rowData.seats);
           rowData.seats.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
           const taken = rowData.seats.splice(0, take);
-          splitSeats.push({ section: rowData.section, row: rowData.row, seats: taken.sort((a, b) => a - b) });
+          splitSeats.push({ floor: rowData.floor, section: rowData.section, row: rowData.row, seats: taken.sort((a, b) => a - b) });
           remaining -= take;
         }
         if (splitSeats.length > 0) {
@@ -2382,11 +2405,15 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
       const name = `${a.buyer.buyerName || '?'}(${a.buyer.lastFour || '----'})`;
       const qty = a.buyer.qty || 1;
       const orderNum = a.buyer.bookingOrder || '?';
+      const floorPrefix = a.floor ? `${a.floor} ` : '';
       if (a.split) {
-        const seatInfo = a.split.map(s => `${s.section} ${s.row}행 ${s.seats.join(',')}번`).join(' / ');
+        const seatInfo = a.split.map(s => {
+          const fp = s.floor ? `${s.floor} ` : '';
+          return `${fp}${s.section} ${s.row}행 ${s.seats.join(',')}번`;
+        }).join(' / ');
         msg += `${orderNum}. ${name} ${qty}매 → ${seatInfo}\n`;
       } else {
-        msg += `${orderNum}. ${name} ${qty}매 → ${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
+        msg += `${orderNum}. ${name} ${qty}매 → ${floorPrefix}${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
       }
       totalAssigned++;
     }
