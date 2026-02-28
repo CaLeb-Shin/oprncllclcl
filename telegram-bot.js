@@ -1554,6 +1554,9 @@ async function getFinalSummaryDetail(perfIndex) {
     return '📋 해당 공연의 발송 내역이 없습니다.';
   }
 
+  // 뿌리오 데이터(최신순) → reverse → 선착순
+  activeOrders.reverse();
+
   let msg = `📋 <b>최종결산</b>\n\n`;
   msg += `🎫 <b>${perf.title}</b>\n`;
   if (perf.date) msg += `📅 ${perf.date}\n`;
