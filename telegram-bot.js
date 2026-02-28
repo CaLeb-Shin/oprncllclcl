@@ -2125,9 +2125,9 @@ const VENUE_SECTION_PRIORITY = {
     'J구역': 5, 'H구역': 5,
     'D구역': 6, 'F구역': 6,
     'K구역': 7, 'G구역': 7,
-    'BL1': 8, 'BL2': 8,
-    'BL3': 9, 'BL4': 9,
-    'BL5': 10, 'BL6': 10,
+    'BL1구역': 8, 'BL2구역': 8,
+    'BL3구역': 9, 'BL4구역': 9,
+    'BL5구역': 10, 'BL6구역': 10,
   },
 };
 
@@ -2135,63 +2135,61 @@ const VENUE_SECTION_PRIORITY = {
 let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
 
 // 엑셀 파싱: 미판매 좌석 추출
+// 실제 엑셀 구조: [0]No [1]이용일 [2]회차 [3]좌석등급 [4]층 [5]열(구역+행) [6]좌석수 [7]좌석번호
 function parseUnsoldSeats(buffer) {
   const workbook = XLSX.read(buffer, { type: 'buffer' });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-  // 헤더 행 찾기 (좌석등급, 구역, 행, 좌석번호 등의 키워드)
+  // 헤더 행 찾기
   let headerIdx = -1;
-  let colMap = {};
   for (let i = 0; i < Math.min(rows.length, 10); i++) {
     const row = (rows[i] || []).map(c => String(c || '').trim());
-    const gradeCol = row.findIndex(c => c.includes('좌석등급') || c.includes('등급') || c.includes('좌석구분'));
-    const sectionCol = row.findIndex(c => c.includes('구역') || c.includes('좌석구역'));
-    const rowCol = row.findIndex(c => c === '행' || c.includes('행'));
-    const seatsCol = row.findIndex(c => c.includes('좌석번호') || c.includes('좌석NO'));
-    if (gradeCol >= 0 && seatsCol >= 0) {
+    if (row.some(c => c.includes('좌석등급') || c.includes('등급'))) {
       headerIdx = i;
-      colMap = { grade: gradeCol, section: sectionCol, row: rowCol, seats: seatsCol };
       break;
     }
   }
+  if (headerIdx < 0) headerIdx = 0;
 
-  // 헤더를 못 찾으면 추정 (엑셀 이미지 기준: 좌석등급, 구역, 행, 열, 좌석수, 좌석번호)
-  if (headerIdx < 0) {
-    headerIdx = 0;
-    // 첫 번째 데이터 기반 추정
-    colMap = { grade: 2, section: 3, row: 4, seats: 7 };
-  }
+  // 컬럼 인덱스 자동 감지
+  const headerRow = (rows[headerIdx] || []).map(c => String(c || '').trim());
+  const gradeIdx = headerRow.findIndex(c => c.includes('좌석등급') || c.includes('등급'));
+  const sectionRowIdx = headerRow.findIndex(c => c === '열' || c.includes('열'));
+  const seatsIdx = headerRow.findIndex(c => c.includes('좌석번호'));
+
+  // fallback: 실측 기반
+  const COL_GRADE = gradeIdx >= 0 ? gradeIdx : 3;
+  const COL_SECTION_ROW = sectionRowIdx >= 0 ? sectionRowIdx : 5;
+  const COL_SEATS = seatsIdx >= 0 ? seatsIdx : 7;
 
   const result = {};
   let lastGrade = '';
-  let lastSection = '';
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i] || [];
     if (row.length < 3) continue;
 
     // 좌석등급 (병합셀이면 이전 값 유지)
-    const gradeRaw = String(row[colMap.grade] || '').trim();
+    const gradeRaw = String(row[COL_GRADE] || '').trim();
     if (gradeRaw && gradeRaw.includes('석')) lastGrade = gradeRaw;
     if (!lastGrade) continue;
 
-    // 구역
-    const sectionRaw = String(row[colMap.section] || '').trim();
-    if (sectionRaw && sectionRaw.includes('구역')) lastSection = sectionRaw;
-    // BL 구역 처리
-    if (sectionRaw && sectionRaw.match(/^BL\d/i)) lastSection = sectionRaw;
-    if (!lastSection) continue;
+    // 열 컬럼: "BL5구역 1열" or "G구역 3열" or "A구역 1열" → 구역 + 행 분리
+    const sectionRowRaw = String(row[COL_SECTION_ROW] || '').trim();
+    if (!sectionRowRaw) continue;
 
-    // 행
-    const rowNum = parseInt(String(row[colMap.row] || ''));
+    // "BL5구역 1열" → section="BL5구역", rowNum=1
+    const srMatch = sectionRowRaw.match(/^(.+?구역)\s*(\d+)열?$/);
+    if (!srMatch) continue;
+    const section = srMatch[1];
+    const rowNum = parseInt(srMatch[2]);
     if (!rowNum || isNaN(rowNum)) continue;
 
     // 좌석번호 파싱
-    const seatsRaw = String(row[colMap.seats] || '').trim();
+    const seatsRaw = String(row[COL_SEATS] || '').trim();
     if (!seatsRaw) continue;
 
-    // "1 2 3 4 5" or "1,2,3,4,5" or "1 2 3 4 5 6 7"
     const seatNums = seatsRaw.split(/[\s,]+/)
       .map(s => parseInt(s.trim()))
       .filter(n => !isNaN(n) && n > 0);
@@ -2199,7 +2197,7 @@ function parseUnsoldSeats(buffer) {
 
     if (!result[lastGrade]) result[lastGrade] = [];
     result[lastGrade].push({
-      section: lastSection,
+      section,
       row: rowNum,
       seats: seatNums.sort((a, b) => a - b),
     });
