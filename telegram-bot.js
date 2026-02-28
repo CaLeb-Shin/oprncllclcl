@@ -1592,6 +1592,14 @@ async function generateLabelPdf(perfIndex) {
   const { activeOrders, perf } = result;
   if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
 
+  // 등급별 정렬: VIP석 → R석 → S석 → A석 (각 등급 내 선착순 유지)
+  const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
+  activeOrders.sort((a, b) => {
+    const ai = gradeOrder.indexOf(a.seatType);
+    const bi = gradeOrder.indexOf(b.seatType);
+    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+  });
+
   // 라벨 데이터 준비
   const labels = activeOrders.map(o => ({
     line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
