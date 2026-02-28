@@ -2272,9 +2272,8 @@ function assignSeats(unsoldSeats, activeOrders, region) {
       return bestGroup;
     };
 
-    // 2매 이상 → 연속좌석 우선, 1매 → 가운데 우선
-    // 다매 구매자 먼저 배정 (연속좌석 확보 유리)
-    const sortedBuyers = [...buyers].sort((a, b) => (b.qty || 1) - (a.qty || 1));
+    // 예매 선착순 유지 (먼저 예매한 사람이 좋은 좌석 배정)
+    const sortedBuyers = buyers;
 
     for (const buyer of sortedBuyers) {
       const qty = buyer.qty || 1;
@@ -2364,7 +2363,14 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
   }
 
   let totalAssigned = 0;
-  for (const [grade, items] of Object.entries(byGrade)) {
+  const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
+  const sortedGrades = [...Object.keys(byGrade)].sort((a, b) => {
+    const ai = gradeOrder.indexOf(a);
+    const bi = gradeOrder.indexOf(b);
+    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+  });
+  for (const grade of sortedGrades) {
+    const items = byGrade[grade];
     msg += `\n<b>[${grade}]</b> 배정 ${items.length}명\n`;
     for (let i = 0; i < items.length; i++) {
       const a = items[i];
@@ -3194,6 +3200,9 @@ async function handleMessage(msg) {
       const result = await getActiveOrders(perfIndex);
       if (!result) throw new Error('공연 데이터를 가져올 수 없습니다');
       const { activeOrders, perf } = result;
+
+      // 뿌리오 데이터(최신순) → reverse → 선착순 (먼저 예매한 사람이 좋은 좌석)
+      activeOrders.reverse();
 
       // 지역 추출
       const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
