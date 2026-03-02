@@ -2116,7 +2116,7 @@ async function checkForNewOrders() {
 const STORE_URL = 'https://smartstore.naver.com/melon_symphony_orchestra';
 const PERFORMANCES = {
   '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '' },
-  '대구_디즈니': { date: '3/15(일)', name: '대구 디즈니+지브리', link: '' },
+  '대구_디즈니': { date: '3/7(토)', name: '대구 디즈니+지브리', link: '' },
   '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '' },
   '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '' },
   '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리', link: '' },
