@@ -2905,7 +2905,12 @@ async function getStoreSalesSummary() {
 
   let msg = `📦 <b>네이버 스토어 판매현황</b>\n📅 ${todayLabel} ${timeStr} 조회\n━━━━━━━━━━━━━━━━\n`;
 
-  const perfEntries = Object.entries(summary).sort((a, b) => a[1].perfDate.localeCompare(b[1].perfDate));
+  // 날짜순 정렬 (숫자 비교: "3/7(토)" → 월*100+일)
+  const parseDateNum = (d) => {
+    const m = (d || '').match(/(\d+)\/(\d+)/);
+    return m ? parseInt(m[1]) * 100 + parseInt(m[2]) : 9999;
+  };
+  const perfEntries = Object.entries(summary).sort((a, b) => parseDateNum(a[1].perfDate) - parseDateNum(b[1].perfDate));
   if (perfEntries.length === 0) {
     msg += '\n주문 없음';
     return msg;
