@@ -85,6 +85,17 @@ const CONFIG = {
   orderCheckInterval: 3 * 60 * 1000,         // 3분
   maxProcessedAge: 90,                       // processed 목록 최대 보관일
   httpTimeoutMs: 60_000,                     // HTTP 요청 타임아웃
+
+  // 멜론티켓 Firebase CF 연동
+  firebase: {
+    cfBaseUrl: 'https://us-central1-melon-ticket-mvp-2026.cloudfunctions.net',
+    botApiKey: 'melon-bot-secret-2026',
+    // perfKey → Firebase eventId 매핑 (어드민에서 이벤트 만들 때 ID 확인 후 입력)
+    eventMap: {
+      // '대구_지브리': 'FIREBASE_EVENT_ID_HERE',
+      // '울산_디즈니': 'FIREBASE_EVENT_ID_HERE',
+    },
+  },
 };
 
 // ============================================================
@@ -198,6 +209,70 @@ function telegramRequest(method, body = {}, timeoutMs = CONFIG.httpTimeoutMs) {
     req.on('error', reject);
     req.write(postData);
     req.end();
+  });
+}
+
+// ============================================================
+// 멜론티켓 Firebase CF 호출
+// ============================================================
+function callFirebaseCF(functionName, bodyData, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify(bodyData);
+    const url = new URL(`${CONFIG.firebase.cfBaseUrl}/${functionName}`);
+    const options = {
+      hostname: url.hostname,
+      port: 443,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+        'Authorization': `Bearer ${CONFIG.firebase.botApiKey}`,
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(parsed);
+          } else {
+            reject(new Error(parsed.error || `CF ${functionName} failed (${res.statusCode})`));
+          }
+        } catch {
+          reject(new Error(`CF ${functionName} JSON parse error`));
+        }
+      });
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`CF ${functionName} timeout (${timeoutMs}ms)`));
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * 멜론티켓 시스템에 네이버 주문 등록 + MobileTicket 생성
+ * @returns { success, orderId, tickets: [{ ticketId, accessToken, entryNumber, url }] }
+ */
+async function createMelonTicket(order, eventId) {
+  const info = parseProductInfo(order.productName);
+  return callFirebaseCF('createNaverOrderHttp', {
+    eventId,
+    naverOrderId: order.orderId,
+    buyerName: order.buyerName,
+    buyerPhone: order.phone || '',
+    productName: order.productName,
+    seatGrade: info.seatGrade || 'S',
+    quantity: order.qty || 1,
+    orderDate: new Date().toISOString(),
+    memo: `봇 자동 등록`,
   });
 }
 
@@ -1151,9 +1226,25 @@ async function checkCancelledOrders() {
       if (cancel.productName) msg += `🎫 상품: ${cancel.productName}\n`;
       if (cancel.phone) msg += `📱 연락처: ${cancel.phone}\n`;
       if (cancel.reason) msg += `📝 사유: ${cancel.reason}\n`;
-      msg += `\n스마트스토어에서 승인/거절해주세요.\n`;
-      msg += `승인 후 <b>취소확인</b> 입력하면 결산에서 제외됩니다.`;
+      msg += `\n스마트스토어에서 승인/거절해주세요.`;
       await sendMessage(msg);
+
+      // 멜론티켓 자동 취소 처리
+      try {
+        const cancelResult = await callFirebaseCF('cancelNaverOrderHttp', {
+          naverOrderId: cancel.orderId,
+        });
+        if (cancelResult.success) {
+          if (cancelResult.alreadyCancelled) {
+            await sendMessage(`ℹ️ 주문 ${cancel.orderId} — 이미 취소 처리됨`);
+          } else {
+            await sendMessage(`✅ 주문 ${cancel.orderId} — 티켓 ${cancelResult.cancelledTickets}장 자동 취소 완료`);
+          }
+        }
+      } catch (cancelErr) {
+        // 멜론티켓에 등록 안 된 주문일 수 있음 — 무시
+        console.log(`   ℹ️ 멜론티켓 취소 처리 스킵 (${cancel.orderId}):`, cancelErr.message);
+      }
 
       // 취소 목록에 저장 (최종결산 대조용)
       const cancelledOrders = readJson(CONFIG.cancelledOrdersFile, []);
@@ -2116,6 +2207,7 @@ async function checkForNewOrders() {
 const STORE_URL = 'https://smartstore.naver.com/melon_symphony_orchestra';
 const PERFORMANCES = {
   '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '' },
+  '대구_디즈니': { date: '3/7(토)', name: '대구 지브리&뮤지컬', link: '' },
   '대구_지브리': { date: '3/7(토)', name: '대구 지브리&뮤지컬', link: '' },
   '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '' },
   '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '' },
@@ -2462,6 +2554,7 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
 let storeLinksCache = {};  // { '대구': 'https://...', '창원': 'https://...' }
 let storeLinksCacheTime = 0;
+let rawStoreProducts = []; // [{ name, price, productNo }] — 전체 상품 캐시
 const STORE_LINKS_TTL = 6 * 60 * 60 * 1000; // 6시간
 
 async function fetchStoreProductLinks() {
@@ -2591,6 +2684,9 @@ async function fetchStoreProductLinks() {
         } catch {}
       }
     }
+
+    // 전체 상품 캐시 업데이트
+    rawStoreProducts = products;
 
     // 지역별 가장 비싼 상품 선택
     const regionBest = {};
@@ -3033,11 +3129,27 @@ async function sendSMS(order, _isRetry = false) {
     const qty = order.qty || 1;
     content = content.replace(/- 좌석: .+/, `- 좌석: ${seatType} ${qty}매 (비지정석)`);
 
+    // 모바일 티켓 URL 추가 (있으면)
+    if (order._ticketUrls && order._ticketUrls.length > 0) {
+      // 기존 "- 티켓확인:" 줄이 있으면 교체, 없으면 좌석 줄 뒤에 추가
+      const ticketLine = `- 티켓확인: ${order._ticketUrls[0]}`;
+      if (content.includes('- 티켓확인:')) {
+        content = content.replace(/- 티켓확인: .+/, ticketLine);
+      } else {
+        content = content.replace(/(- 좌석: .+)/, `$1\n${ticketLine}`);
+      }
+      // 여러 장이면 추가 URL 안내
+      if (order._ticketUrls.length > 1) {
+        content += `\n\n(총 ${order._ticketUrls.length}장 — 추가 티켓은 별도 안내)`;
+      }
+    }
+
     // 교체된 내용 입력
     await leftTextarea.click();
     await leftTextarea.fill(content);
     await ppurioPage.waitForTimeout(500);
     console.log(`      이름: ${buyerName}, 연락처: ${lastFour}, 좌석: ${seatType} ${qty}매`);
+    if (order._ticketUrls) console.log(`      티켓URL: ${order._ticketUrls[0]}`);
   }
 
   // 3. 오른쪽 "직접입력" 영역에 수신번호 입력 (x > 800인 textarea.user_message)
@@ -3127,20 +3239,49 @@ async function processDelivery(orderId) {
 }
 
 // ============================================================
-// 주문 처리 (문자 발송만 - 배송처리는 나중에)
+// 주문 처리 (멜론티켓 등록 + 문자 발송)
 // ============================================================
 async function processOrder(order) {
   try {
     await ensureBrowser();
 
+    // 0) 멜론티켓 시스템에 주문 등록 (eventId 매핑이 있을 때만)
+    let ticketResult = null;
+    const info = parseProductInfo(order.productName);
+    const eventId = CONFIG.firebase.eventMap[info.perfKey];
+    if (eventId) {
+      try {
+        console.log(`🎫 멜론티켓 CF 호출: ${info.perfKey} → ${eventId}`);
+        ticketResult = await createMelonTicket(order, eventId);
+        const urls = ticketResult.tickets.map(t => t.url).join('\n');
+        await sendMessage(
+          `🎫 <b>모바일 티켓 생성 완료!</b>\n\n` +
+          `주문: ${order.orderId}\n` +
+          `구매자: ${order.buyerName}\n` +
+          `등급: ${info.seatGrade} ${order.qty}매\n\n` +
+          `📱 티켓 URL:\n${urls}`
+        );
+      } catch (cfErr) {
+        console.log('   ⚠️ 멜론티켓 CF 오류:', cfErr.message);
+        await sendMessage(`⚠️ <b>모바일 티켓 생성 실패</b>\n\n${cfErr.message}\n\n문자 발송은 계속 진행합니다.`);
+      }
+    } else {
+      console.log(`   ℹ️ eventId 매핑 없음 (${info.perfKey}) — 멜론티켓 등록 건너뜀`);
+    }
+
     // 1) 문자 발송 (ppurioPage 없어도 sendSMS 내부에서 자동 재로그인 시도)
+    // ticketResult가 있으면 URL을 order에 첨부해서 SMS에 포함
+    if (ticketResult && ticketResult.tickets) {
+      order._ticketUrls = ticketResult.tickets.map(t => t.url);
+    }
+
     let smsSent = false;
     try {
       smsSent = await sendSMS(order);
     } catch (smsErr) {
       console.log('   문자 발송 에러:', smsErr.message);
     }
-    
+
     if (smsSent) {
       await sendMessage(`✅ <b>문자 발송 완료!</b>\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n\n⚠️ 배송처리는 직접 해주세요.`);
     } else {
@@ -3161,6 +3302,7 @@ async function processOrder(order) {
         productName: order.productName,
         qty: order.qty,
         smsAt: new Date().toISOString(),
+        ticketUrls: order._ticketUrls || null,
       });
       writeJson(CONFIG.pendingDeliveryFile, pendingDelivery);
     }
@@ -4013,6 +4155,80 @@ function startSmartstoreKeepAlive() {
   console.log('⏰ 스마트스토어 세션 5분 keep-alive 설정');
 }
 
+// ============================================================
+// SMS 자동 발송 (Firebase smsTasks 폴링)
+// ============================================================
+let isSmsPolling = false;
+
+async function pollAndSendSms() {
+  if (isSmsPolling) return;
+  isSmsPolling = true;
+
+  try {
+    // 대기중 SMS 태스크 가져오기
+    const result = await callFirebaseCF('getPendingSmsHttp', {});
+    const tasks = result.tasks || [];
+
+    if (tasks.length === 0) {
+      isSmsPolling = false;
+      return;
+    }
+
+    console.log(`📱 SMS 발송 대기: ${tasks.length}건`);
+
+    for (const task of tasks) {
+      try {
+        // sendSMS에 맞는 order 객체 구성
+        const order = {
+          buyerName: task.buyerName,
+          phone: task.buyerPhone,
+          productName: task.productName,
+          qty: task.quantity,
+          _ticketUrls: task.ticketUrls,
+        };
+
+        console.log(`   📱 ${task.buyerName} (${task.seatGrade} ${task.quantity}매)...`);
+        const sent = await sendSMS(order);
+
+        if (sent) {
+          await callFirebaseCF('markSmsSentHttp', { taskId: task.id, status: 'sent' });
+          console.log(`   ✅ SMS 발송 완료 → ${task.buyerName}`);
+          await sendMessage(`📱 SMS 자동발송 완료: <b>${task.buyerName}</b> (${task.seatGrade} ${task.quantity}매)`);
+        } else {
+          await callFirebaseCF('markSmsSentHttp', { taskId: task.id, status: 'failed', error: '발송 실패 (템플릿/수신번호 오류)' });
+          console.log(`   ❌ SMS 발송 실패 → ${task.buyerName}`);
+        }
+      } catch (smsErr) {
+        console.error(`   ❌ SMS 오류: ${smsErr.message}`);
+        try {
+          await callFirebaseCF('markSmsSentHttp', { taskId: task.id, status: 'failed', error: smsErr.message });
+        } catch {}
+      }
+
+      // 연속 발송 시 간격 두기
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  } catch (err) {
+    // 폴링 자체 실패 (네트워크 등)는 조용히 무시
+    if (!err.message?.includes('Unauthorized')) {
+      console.error('SMS 폴링 오류:', err.message);
+    }
+  } finally {
+    isSmsPolling = false;
+  }
+}
+
+function startSmsPoll() {
+  setInterval(async () => {
+    try {
+      await pollAndSendSms();
+    } catch (err) {
+      console.error('SMS 폴링 루프 오류:', err.message);
+    }
+  }, 30 * 1000); // 30초마다
+  console.log('⏰ SMS 자동발송 30초 폴링 설정');
+}
+
 function startPpurioKeepAlive() {
   // 10분마다 뿌리오 세션 갱신 (세션 만료 방지 강화)
   setInterval(async () => {
@@ -4137,6 +4353,47 @@ function startDailySessionCheck() {
 }
 
 // ============================================================
+// 네이버 상품 → Firestore 동기화 (어드민 위자드용)
+// ============================================================
+async function syncNaverProductsToFirebase() {
+  try {
+    // fetchStoreProductLinks()를 먼저 호출해 rawStoreProducts 캐시 채우기
+    await fetchStoreProductLinks();
+
+    if (rawStoreProducts.length === 0) {
+      console.log('   ⚠️ 동기화할 상품 없음');
+      return;
+    }
+
+    console.log(`🔄 네이버 상품 ${rawStoreProducts.length}개 → Firestore 동기화...`);
+    const result = await callFirebaseCF('syncNaverProductsHttp', {
+      products: rawStoreProducts,
+    });
+
+    if (result.success) {
+      console.log(`   ✅ Firestore 동기화 완료: ${result.synced}개`);
+    } else {
+      console.error('   ❌ 동기화 실패:', result.error);
+    }
+  } catch (err) {
+    console.error('   ❌ 네이버 상품 동기화 오류:', err.message);
+  }
+}
+
+function startNaverProductSync() {
+  // 시작 시 1회 + 6시간마다 자동 동기화
+  setTimeout(() => syncNaverProductsToFirebase(), 60 * 1000); // 시작 1분 후
+  setInterval(async () => {
+    try {
+      await syncNaverProductsToFirebase();
+    } catch (err) {
+      console.error('네이버 상품 동기화 루프 오류:', err.message);
+    }
+  }, 6 * 60 * 60 * 1000); // 6시간
+  console.log('⏰ 네이버 상품 Firestore 동기화 설정 (6시간)');
+}
+
+// ============================================================
 // 프로세스 종료 처리
 // ============================================================
 async function gracefulShutdown(signal) {
@@ -4171,5 +4428,7 @@ startAutoSales();
 startAutoSmartstore();
 startSmartstoreKeepAlive();
 startPpurioKeepAlive();
+startSmsPoll();
+startNaverProductSync();
 startDailyReport();
 startDailySessionCheck();
