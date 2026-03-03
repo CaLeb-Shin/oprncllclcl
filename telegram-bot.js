@@ -72,6 +72,12 @@ const CONFIG = {
     cancelUrl: 'https://sell.smartstore.naver.com/#/naverpay/sale/cancel',
   },
 
+  // 네이버 자동 재로그인용 (2단계 인증 시 핸드폰 승인 필요)
+  naverLogin: {
+    id: process.env.NAVER_ID || '',
+    pw: process.env.NAVER_PW || '',
+  },
+
   baseDir: path.resolve(__dirname),
   smartstoreStateFile: path.join(__dirname, 'smartstore-state.json'),
   ppurioStateFile: path.join(__dirname, 'ppurio-state.json'),
@@ -599,12 +605,18 @@ async function smartstoreAutoRelogin() {
       return true;
     }
 
-    // 세션 만료 → 수동 재로그인 필요
-    console.log('   ❌ 세션 만료 - 수동 재로그인 필요');
+    // 세션 만료 → ID/PW 로그인 + 2단계 인증 시도
+    console.log('   ⚠️ 쿠키 만료 → ID/PW 로그인 시도...');
     await smartstorePage.close().catch(() => {});
     smartstorePage = null;
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
     smartstoreCtx = null;
+
+    // ID/PW가 설정되어 있으면 로그인 시도
+    if (CONFIG.naverLogin.id && CONFIG.naverLogin.pw) {
+      const loginOk = await naverLoginWith2FA();
+      if (loginOk) return true;
+    }
     return false;
   } catch (err) {
     console.error('   ❌ 세션 복구 오류:', err.message);
@@ -612,6 +624,144 @@ async function smartstoreAutoRelogin() {
     smartstorePage = null;
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
     smartstoreCtx = null;
+
+    // 예외 발생해도 ID/PW 로그인 시도
+    if (CONFIG.naverLogin.id && CONFIG.naverLogin.pw) {
+      const loginOk = await naverLoginWith2FA();
+      if (loginOk) return true;
+    }
+    return false;
+  }
+}
+
+// 네이버 ID/PW 로그인 + 2단계 인증 대기
+async function naverLoginWith2FA() {
+  console.log('🔐 네이버 ID/PW 로그인 + 2단계 인증 시도...');
+  let page = null;
+  let ctx = null;
+
+  try {
+    if (!browser) return false;
+
+    ctx = await browser.newContext();
+    page = await ctx.newPage();
+    page.setDefaultTimeout(30_000);
+
+    // 1. 네이버 로그인 페이지
+    await page.goto('https://nid.naver.com/nidlogin.login', { timeout: 20000, waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2000);
+
+    // 2. ID/PW 입력 (clipboard paste 방식으로 봇 감지 우회)
+    const idField = page.locator('#id');
+    const pwField = page.locator('#pw');
+
+    await idField.click();
+    await page.evaluate((id) => {
+      document.querySelector('#id').value = id;
+      document.querySelector('#id').dispatchEvent(new Event('input', { bubbles: true }));
+    }, CONFIG.naverLogin.id);
+    await page.waitForTimeout(500);
+
+    await pwField.click();
+    await page.evaluate((pw) => {
+      document.querySelector('#pw').value = pw;
+      document.querySelector('#pw').dispatchEvent(new Event('input', { bubbles: true }));
+    }, CONFIG.naverLogin.pw);
+    await page.waitForTimeout(500);
+
+    // 3. 로그인 버튼 클릭
+    await page.click('#log\\.login, .btn_login, button[type="submit"]');
+    await page.waitForTimeout(3000);
+
+    // 4. 결과 확인: 로그인 성공 / 2단계 인증 / 실패
+    const currentUrl = page.url();
+    const bodyText = await page.evaluate(() => document.body.textContent || '');
+
+    // 바로 로그인 성공한 경우
+    if (currentUrl.includes('naver.com') && !currentUrl.includes('nidlogin') && !currentUrl.includes('login')) {
+      console.log('   ✅ 바로 로그인 성공 (2단계 인증 없음)');
+    } else if (bodyText.includes('2단계') || bodyText.includes('본인확인') || bodyText.includes('인증') || currentUrl.includes('login/sms')) {
+      // 2단계 인증 대기
+      console.log('   📱 2단계 인증 화면 감지 → 텔레그램 알림 전송');
+      await sendMessage('📱 <b>네이버 2단계 인증 필요</b>\n\n핸드폰에서 승인해주세요!\n⏰ 2분간 대기합니다...');
+
+      // 최대 2분간 10초마다 체크
+      let verified = false;
+      for (let i = 0; i < 12; i++) {
+        await page.waitForTimeout(10000);
+
+        const nowUrl = page.url();
+        const nowBody = await page.evaluate(() => document.body.textContent || '').catch(() => '');
+
+        // 로그인 페이지를 벗어났으면 성공
+        if (!nowUrl.includes('nidlogin') && !nowUrl.includes('login/sms') && !nowUrl.includes('login')) {
+          verified = true;
+          break;
+        }
+        // 스마트스토어 관련 텍스트가 보이면 성공
+        if (nowBody.includes('판매관리') || nowBody.includes('주문/배송')) {
+          verified = true;
+          break;
+        }
+
+        console.log(`   ⏳ 2단계 인증 대기 중... (${(i + 1) * 10}초/${120}초)`);
+      }
+
+      if (!verified) {
+        console.log('   ❌ 2단계 인증 시간 초과 (2분)');
+        await sendMessage('❌ <b>2단계 인증 시간 초과</b>\n\n2분 내에 승인되지 않았습니다.');
+        await page.close().catch(() => {});
+        if (ctx) await ctx.close().catch(() => {});
+        return false;
+      }
+
+      console.log('   ✅ 2단계 인증 승인 완료!');
+    } else {
+      // 로그인 실패 (비밀번호 오류 등)
+      console.log('   ❌ 로그인 실패 - URL:', currentUrl);
+      await page.close().catch(() => {});
+      if (ctx) await ctx.close().catch(() => {});
+      return false;
+    }
+
+    // 5. 세션 저장 후 스마트스토어 접속
+    await ctx.storageState({ path: CONFIG.smartstoreStateFile });
+    await page.close().catch(() => {});
+    await ctx.close().catch(() => {});
+
+    // 6. 새 세션으로 스마트스토어 접속 확인
+    smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
+    smartstorePage = await smartstoreCtx.newPage();
+    smartstorePage.setDefaultTimeout(60_000);
+
+    await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(5000);
+
+    const ssLoggedIn = await smartstorePage.evaluate(() =>
+      document.body.textContent.includes('판매관리') ||
+      document.body.textContent.includes('정산관리') ||
+      document.body.textContent.includes('주문/배송') ||
+      document.body.textContent.includes('상품관리')
+    );
+
+    if (ssLoggedIn) {
+      await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
+      console.log('   ✅ 네이버 재로그인 + 스마트스토어 접속 성공!');
+      await sendMessage('✅ <b>네이버 자동 재로그인 성공!</b>\n\n스마트스토어 정상 접속 확인됨');
+      return true;
+    }
+
+    console.log('   ❌ 네이버 로그인은 됐지만 스마트스토어 접속 실패');
+    await smartstorePage.close().catch(() => {});
+    smartstorePage = null;
+    if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
+    smartstoreCtx = null;
+    return false;
+
+  } catch (err) {
+    console.error('   ❌ 네이버 로그인 오류:', err.message);
+    if (page) await page.close().catch(() => {});
+    if (ctx) await ctx.close().catch(() => {});
     return false;
   }
 }
@@ -4322,39 +4472,7 @@ function startDailyReport() {
   scheduleNext();
 }
 
-// ============================================================
-// 매일 00:00 네이버 재로그인 사전 알림
-// ============================================================
-function startDailySessionCheck() {
-  function scheduleNext() {
-    const now = new Date();
-    const target = new Date(now);
-    target.setHours(0, 0, 0, 0);
-
-    // 이미 00:00 지났으면 내일로
-    if (now >= target) {
-      target.setDate(target.getDate() + 1);
-    }
-
-    const delay = target.getTime() - now.getTime();
-    const hours = Math.floor(delay / 3600000);
-    const mins = Math.floor((delay % 3600000) / 60000);
-    console.log(`⏰ 다음 재로그인 알림: ${target.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (${hours}시간 ${mins}분 후)`);
-
-    setTimeout(async () => {
-      try {
-        console.log('🔔 00:00 네이버 재로그인 사전 알림');
-        await sendMessage('🔔 <b>네이버 세션 곧 만료</b>\n\n새벽 1시쯤 만료됩니다. 재로그인 해주세요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>');
-      } catch (err) {
-        console.error('재로그인 알림 오류:', err.message);
-      }
-
-      scheduleNext();
-    }, delay);
-  }
-
-  scheduleNext();
-}
+// (00:00 사전 알림 제거됨 — 자동 재로그인이 처리)
 
 // ============================================================
 // 네이버 상품 → Firestore 동기화 (어드민 위자드용)
@@ -4435,4 +4553,4 @@ startPpurioKeepAlive();
 startSmsPoll();
 startNaverProductSync();
 startDailyReport();
-startDailySessionCheck();
+// startDailySessionCheck(); // 제거됨 — 자동 재로그인이 처리
