@@ -74,8 +74,8 @@ const CONFIG = {
 
   // 네이버 자동 재로그인용 (2단계 인증 시 핸드폰 승인 필요)
   naverLogin: {
-    id: process.env.NAVER_ID || '',
-    pw: process.env.NAVER_PW || '',
+    id: 'sinbun001',
+    pw: 'ERwin0525!',
   },
 
   baseDir: path.resolve(__dirname),
