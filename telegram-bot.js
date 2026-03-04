@@ -3215,16 +3215,6 @@ async function sendSMS(order, _isRetry = false) {
     return false;
   }
 
-  // 같은 지역 공연 2개 이상이면 텔레그램 알림
-  const sameRegion = Object.entries(PERFORMANCES).filter(([key]) => key.startsWith(region + '_'));
-  if (sameRegion.length >= 2) {
-    await sendMessage(
-      `⚠️ <b>${region} 지역에 공연이 ${sameRegion.length}개 있습니다!</b>\n\n` +
-      sameRegion.map(([k, v]) => `• ${v.name} ${v.date}`).join('\n') +
-      `\n\n문자함 템플릿이 올바른 공연으로 설정되어 있는지 확인해주세요!`
-    );
-  }
-
   console.log(`📱 문자 발송: ${order.buyerName} (${region})`);
   await ppurioPage.goto('https://www.ppurio.com/send/sms/gn/view');
   await ppurioPage.waitForTimeout(3000);
@@ -3277,6 +3267,20 @@ async function sendSMS(order, _isRetry = false) {
   // 2. 해당 지역 템플릿 찾기 (1페이지 시도 → 검색 시도 → 페이지 넘기기 시도)
   console.log(`   2️⃣ 템플릿 찾기: ${region}`);
   let templateFound = false;
+
+  // 같은 지역 템플릿이 문자함에 2개 이상인지 실제 확인
+  const regionTemplateCount = await ppurioPage.evaluate((rgn) => {
+    return [...document.querySelectorAll('*')].filter(el =>
+      el.innerText?.trim().includes(`[멜론] ${rgn}`) && el.children.length === 0
+    ).length;
+  }, region).catch(() => 0);
+
+  if (regionTemplateCount >= 2) {
+    await sendMessage(
+      `⚠️ <b>${region} 지역 문자 템플릿이 ${regionTemplateCount}개 있습니다!</b>\n\n` +
+      `문자함에서 올바른 템플릿만 남겨주세요.\n자동 발송은 첫 번째 템플릿으로 진행됩니다.`
+    );
+  }
 
   // 방법1: 현재 페이지(1페이지)에서 바로 찾기
   try {
