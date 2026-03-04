@@ -740,14 +740,36 @@ async function naverLoginWith2FA() {
     smartstorePage.setDefaultTimeout(60_000);
 
     await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(5000);
+    await smartstorePage.waitForTimeout(10000);
 
-    const ssLoggedIn = await smartstorePage.evaluate(() =>
+    // 팝업 닫기 시도
+    try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+    try { await smartstorePage.click('text=닫기', { timeout: 1000 }); } catch {}
+    await smartstorePage.waitForTimeout(1000);
+
+    const checkSS = () => smartstorePage.evaluate(() =>
       document.body.textContent.includes('판매관리') ||
       document.body.textContent.includes('정산관리') ||
       document.body.textContent.includes('주문/배송') ||
       document.body.textContent.includes('상품관리')
     );
+
+    let ssLoggedIn = await checkSS();
+
+    // 실패 시 리로드 후 재확인
+    if (!ssLoggedIn) {
+      const curUrl = smartstorePage.url();
+      const bodySnippet = await smartstorePage.evaluate(() => document.body.textContent?.substring(0, 200) || '').catch(() => '');
+      console.log(`   ⚠️ 1차 실패 → URL: ${curUrl}`);
+      console.log(`   ⚠️ 페이지 내용: ${bodySnippet}`);
+
+      console.log('   🔄 리로드 후 재확인...');
+      await smartstorePage.reload({ timeout: 30000, waitUntil: 'domcontentloaded' });
+      await smartstorePage.waitForTimeout(10000);
+      try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+      await smartstorePage.waitForTimeout(1000);
+      ssLoggedIn = await checkSS();
+    }
 
     if (ssLoggedIn) {
       await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
@@ -756,7 +778,8 @@ async function naverLoginWith2FA() {
       return true;
     }
 
-    console.log('   ❌ 네이버 로그인은 됐지만 스마트스토어 접속 실패');
+    const failUrl = smartstorePage.url();
+    console.log(`   ❌ 네이버 로그인은 됐지만 스마트스토어 접속 실패 (URL: ${failUrl})`);
     await smartstorePage.close().catch(() => {});
     smartstorePage = null;
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
