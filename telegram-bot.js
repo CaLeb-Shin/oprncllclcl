@@ -3246,23 +3246,39 @@ async function sendSMS(order, _isRetry = false) {
   // 2. 문자함 검색으로 해당 지역 템플릿 찾기
   console.log(`   2️⃣ 템플릿 검색: ${region}`);
   try {
-    // 검색창에 지역명 입력 후 검색
-    const searchInput = await ppurioPage.$('input[placeholder*="검색"], input[type="text"]');
-    if (searchInput) {
-      await searchInput.click();
-      await searchInput.fill(region);
-      await ppurioPage.waitForTimeout(500);
-      // 검색 버튼 클릭 (돋보기)
-      try {
-        await ppurioPage.click('button:has(svg), button:has(img[alt*="검색"]), button[class*="search"]', { timeout: 2000 });
-      } catch {
-        // 검색 버튼 못 찾으면 엔터
-        await ppurioPage.keyboard.press('Enter');
+    // evaluate로 팝업 내 검색창 찾아서 입력
+    await ppurioPage.evaluate((q) => {
+      const inputs = document.querySelectorAll('input');
+      for (const inp of inputs) {
+        if (inp.placeholder && inp.placeholder.includes('검색')) {
+          inp.value = q;
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          return;
+        }
       }
-      await ppurioPage.waitForTimeout(2000);
-    }
+    }, region);
+    await ppurioPage.waitForTimeout(500);
+
+    // 검색 버튼 클릭 (돋보기 아이콘)
+    await ppurioPage.evaluate(() => {
+      const inputs = document.querySelectorAll('input');
+      for (const inp of inputs) {
+        if (inp.placeholder && inp.placeholder.includes('검색')) {
+          // 검색창 옆 버튼 찾기
+          const parent = inp.parentElement;
+          const btn = parent?.querySelector('button') || parent?.nextElementSibling;
+          if (btn) { btn.click(); return; }
+          // fallback: 가장 가까운 form submit
+          const form = inp.closest('form');
+          if (form) { form.dispatchEvent(new Event('submit', { bubbles: true })); }
+          return;
+        }
+      }
+    });
+    await ppurioPage.waitForTimeout(2000);
+    console.log(`      검색 완료: "${region}"`);
   } catch (e) {
-    console.log(`      검색 실패, 직접 찾기 시도...`);
+    console.log(`      검색 실패: ${e.message}`);
   }
 
   // 템플릿 클릭
