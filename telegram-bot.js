@@ -3243,47 +3243,34 @@ async function sendSMS(order, _isRetry = false) {
     throw new Error('뿌리오 세션 만료');
   }
 
-  // 2. 해당 지역 템플릿 클릭 (페이지 넘기며 검색, 최대 5페이지)
-  console.log(`   2️⃣ 템플릿 선택: ${region}`);
-  let templateFound = false;
-  for (let page = 1; page <= 5; page++) {
-    try {
-      await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
-      await ppurioPage.waitForTimeout(1500);
-      templateFound = true;
-      break;
-    } catch (e) {
-      // 현재 페이지에 없으면 다음 페이지 번호 클릭 (처음|이전|1|2|... 형태)
-      if (page < 5) {
-        const nextPageNum = page + 1;
-        console.log(`      페이지 ${page}에 없음 → 페이지 ${nextPageNum} 클릭...`);
-        try {
-          const clicked = await ppurioPage.evaluate((num) => {
-            // 팝업 내 모든 링크/버튼에서 페이지 번호 찾기
-            const allEls = document.querySelectorAll('a, button, span, li');
-            for (const el of allEls) {
-              if (el.innerText?.trim() === String(num)) {
-                el.click();
-                return true;
-              }
-            }
-            return false;
-          }, nextPageNum);
-
-          if (!clicked) {
-            console.log(`      페이지 ${nextPageNum} 버튼 없음`);
-            break;
-          }
-          await ppurioPage.waitForTimeout(1500);
-        } catch {
-          console.log(`      다음 페이지 이동 실패`);
-          break;
-        }
+  // 2. 문자함 검색으로 해당 지역 템플릿 찾기
+  console.log(`   2️⃣ 템플릿 검색: ${region}`);
+  try {
+    // 검색창에 지역명 입력 후 검색
+    const searchInput = await ppurioPage.$('input[placeholder*="검색"], input[type="text"]');
+    if (searchInput) {
+      await searchInput.click();
+      await searchInput.fill(region);
+      await ppurioPage.waitForTimeout(500);
+      // 검색 버튼 클릭 (돋보기)
+      try {
+        await ppurioPage.click('button:has(svg), button:has(img[alt*="검색"]), button[class*="search"]', { timeout: 2000 });
+      } catch {
+        // 검색 버튼 못 찾으면 엔터
+        await ppurioPage.keyboard.press('Enter');
       }
+      await ppurioPage.waitForTimeout(2000);
     }
+  } catch (e) {
+    console.log(`      검색 실패, 직접 찾기 시도...`);
   }
-  if (!templateFound) {
-    console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료 (전체 페이지 검색)`);
+
+  // 템플릿 클릭
+  try {
+    await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 5000 });
+    await ppurioPage.waitForTimeout(1500);
+  } catch (e) {
+    console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료`);
     await ppurioPage.keyboard.press('Escape');
     return false;
   }
