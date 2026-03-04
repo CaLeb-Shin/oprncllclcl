@@ -3243,66 +3243,72 @@ async function sendSMS(order, _isRetry = false) {
     throw new Error('뿌리오 세션 만료');
   }
 
-  // 2. 문자함 검색으로 해당 지역 템플릿 찾기
-  console.log(`   2️⃣ 템플릿 검색: ${region}`);
+  // 2. 해당 지역 템플릿 찾기 (1페이지 시도 → 검색 시도 → 페이지 넘기기 시도)
+  console.log(`   2️⃣ 템플릿 찾기: ${region}`);
+  let templateFound = false;
+
+  // 방법1: 현재 페이지(1페이지)에서 바로 찾기
   try {
-    // Playwright fill로 검색창에 입력 (placeholder로 찾기)
-    await ppurioPage.fill('input[placeholder*="검색"]', region);
-    await ppurioPage.waitForTimeout(500);
+    await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
+    templateFound = true;
+    console.log(`      1페이지에서 발견!`);
+  } catch {}
 
-    // 검색 실행: 돋보기 버튼 클릭 시도 → 실패하면 Enter
-    const searchClicked = await ppurioPage.evaluate((q) => {
-      // 검색창 옆 돋보기 버튼 찾기
-      const inputs = document.querySelectorAll('input');
-      for (const inp of inputs) {
-        if (inp.placeholder && inp.placeholder.includes('검색') && inp.value === q) {
-          // 부모 ~ 형제 중 button, a, span[onclick] 찾기
-          let el = inp;
-          while (el && el.tagName !== 'BODY') {
-            const btns = el.querySelectorAll('button, a[href="javascript"], span[onclick]');
-            for (const btn of btns) {
-              if (btn !== inp && (btn.querySelector('svg, img') || btn.innerText?.includes('검색'))) {
-                btn.click();
-                return 'btn';
-              }
-            }
-            // 형제 요소 확인
-            if (el.nextElementSibling) {
-              const sib = el.nextElementSibling;
-              if (sib.tagName === 'BUTTON' || sib.tagName === 'A' || sib.querySelector('svg, img')) {
-                sib.click();
-                return 'sibling';
-              }
-            }
-            el = el.parentElement;
-          }
-          return 'not_found';
-        }
-      }
-      return 'no_input';
-    }, region);
-    console.log(`      검색 버튼: ${searchClicked}`);
-
-    // 버튼 못 찾았으면 Enter로 검색
-    if (searchClicked === 'not_found' || searchClicked === 'no_input') {
+  // 방법2: 검색 시도
+  if (!templateFound) {
+    console.log(`      1페이지에 없음 → 검색 시도...`);
+    try {
+      await ppurioPage.fill('input[placeholder*="검색"]', region);
+      await ppurioPage.waitForTimeout(300);
       await ppurioPage.keyboard.press('Enter');
-      console.log(`      Enter로 검색 실행`);
+      await ppurioPage.waitForTimeout(2000);
+
+      try {
+        await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
+        templateFound = true;
+        console.log(`      검색으로 발견!`);
+      } catch {}
+    } catch (e) {
+      console.log(`      검색 실패: ${e.message}`);
     }
-    await ppurioPage.waitForTimeout(2000);
-    console.log(`      검색 완료: "${region}"`);
-  } catch (e) {
-    console.log(`      검색 실패: ${e.message}`);
   }
 
-  // 템플릿 클릭
-  try {
-    await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 5000 });
-    await ppurioPage.waitForTimeout(1500);
-  } catch (e) {
+  // 방법3: 페이지 넘기기 (2~5페이지)
+  if (!templateFound) {
+    console.log(`      검색 실패 → 페이지 넘기기 시도...`);
+    for (let p = 2; p <= 5; p++) {
+      const clicked = await ppurioPage.evaluate((num) => {
+        const els = document.querySelectorAll('a, button, span, li');
+        for (const el of els) {
+          if (el.innerText?.trim() === String(num) && el.offsetParent !== null) {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      }, p);
+
+      if (!clicked) {
+        console.log(`      페이지 ${p} 버튼 없음 → 중단`);
+        break;
+      }
+
+      await ppurioPage.waitForTimeout(1500);
+      try {
+        await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
+        templateFound = true;
+        console.log(`      페이지 ${p}에서 발견!`);
+        break;
+      } catch {}
+    }
+  }
+
+  if (!templateFound) {
     console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료`);
     await ppurioPage.keyboard.press('Escape');
     return false;
   }
+  await ppurioPage.waitForTimeout(1500);
 
   // 내 문자함 팝업 닫기
   await ppurioPage.keyboard.press('Escape');
