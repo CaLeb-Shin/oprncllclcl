@@ -634,12 +634,17 @@ async function smartstoreAutoRelogin() {
   }
 }
 
+// 2FA 로그인 진행 중 플래그 (타임아웃 핸들러와 경합 방지)
+let is2FAInProgress = false;
+
 // 네이버 ID/PW 로그인 + 2단계 인증 대기
 async function naverLoginWith2FA() {
+  is2FAInProgress = true;
   console.log('🔐 네이버 ID/PW 로그인 + 2단계 인증 시도...');
   let page = null;
   let ctx = null;
 
+  try { // ← 외부 try (finally로 플래그 해제)
   try {
     if (!browser) return false;
 
@@ -763,6 +768,9 @@ async function naverLoginWith2FA() {
     if (page) await page.close().catch(() => {});
     if (ctx) await ctx.close().catch(() => {});
     return false;
+  }
+  } finally { // ← 외부 try/finally
+    is2FAInProgress = false;
   }
 }
 
@@ -4339,8 +4347,12 @@ function startAutoSmartstore() {
 
       const msg = err.message || '';
       if (msg.includes('타임아웃')) {
-        console.log('   🔄 타임아웃으로 인한 브라우저 재초기화...');
-        await closeBrowser();
+        if (is2FAInProgress) {
+          console.log('   ⏳ 2FA 로그인 진행 중 → 브라우저 재초기화 건너뜀');
+        } else {
+          console.log('   🔄 타임아웃으로 인한 브라우저 재초기화...');
+          await closeBrowser();
+        }
       } else if (msg.includes('세션 만료') || msg.includes('Target closed') || msg.includes('closed') || msg.includes('crashed')) {
         // 세션 오류 → 자동 재로그인 (checkForNewOrders에서 이미 시도했지만 한번 더)
         console.log('   🔐 세션 오류 → 자동 재로그인 재시도...');
