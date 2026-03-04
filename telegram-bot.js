@@ -3243,13 +3243,32 @@ async function sendSMS(order, _isRetry = false) {
     throw new Error('뿌리오 세션 만료');
   }
 
-  // 2. 해당 지역 템플릿 클릭 (예: "[멜론] 대전 공연 예매 완료")
+  // 2. 해당 지역 템플릿 클릭 (페이지 넘기며 검색, 최대 5페이지)
   console.log(`   2️⃣ 템플릿 선택: ${region}`);
-  try {
-    await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 5000 });
-    await ppurioPage.waitForTimeout(1500);
-  } catch (e) {
-    console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료`);
+  let templateFound = false;
+  for (let page = 1; page <= 5; page++) {
+    try {
+      await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
+      await ppurioPage.waitForTimeout(1500);
+      templateFound = true;
+      break;
+    } catch (e) {
+      // 현재 페이지에 없으면 다음 페이지 시도
+      if (page < 5) {
+        console.log(`      페이지 ${page}에 없음 → 다음 페이지...`);
+        try {
+          await ppurioPage.click('.jconfirm [class*="next"], .jconfirm button:has-text("다음"), .jconfirm button:has-text(">"), .jconfirm button:has-text("›")', { timeout: 2000 });
+          await ppurioPage.waitForTimeout(1500);
+        } catch {
+          // 다음 페이지 버튼 없으면 종료
+          console.log(`      다음 페이지 버튼 없음`);
+          break;
+        }
+      }
+    }
+  }
+  if (!templateFound) {
+    console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료 (전체 페이지 검색)`);
     await ppurioPage.keyboard.press('Escape');
     return false;
   }
