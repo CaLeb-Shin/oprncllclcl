@@ -249,7 +249,7 @@ function callFirebaseCF(functionName, bodyData, timeoutMs = 30_000) {
             reject(new Error(parsed.error || `CF ${functionName} failed (${res.statusCode})`));
           }
         } catch {
-          reject(new Error(`CF ${functionName} JSON parse error`));
+          reject(new Error(`CF ${functionName} JSON parse error (status=${res.statusCode}, body=${data.substring(0, 200)})`));
         }
       });
     });
