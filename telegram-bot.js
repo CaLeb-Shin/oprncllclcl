@@ -3253,39 +3253,25 @@ async function sendSMS(order, _isRetry = false) {
       templateFound = true;
       break;
     } catch (e) {
-      // 현재 페이지에 없으면 다음 페이지 시도
+      // 현재 페이지에 없으면 다음 페이지 번호 클릭 (처음|이전|1|2|... 형태)
       if (page < 5) {
-        console.log(`      페이지 ${page}에 없음 → 다음 페이지...`);
+        const nextPageNum = page + 1;
+        console.log(`      페이지 ${page}에 없음 → 페이지 ${nextPageNum} 클릭...`);
         try {
-          // 문자함 팝업 내부를 스크롤해서 다음 페이지 버튼 노출
-          await ppurioPage.evaluate(() => {
-            const popup = document.querySelector('.jconfirm-box') || document.querySelector('.jconfirm');
-            if (popup) popup.scrollTop = popup.scrollHeight;
-            // 팝업 내 스크롤 가능한 영역도 시도
-            const scrollable = popup?.querySelector('[style*="overflow"], [class*="scroll"], .jconfirm-content');
-            if (scrollable) scrollable.scrollTop = scrollable.scrollHeight;
-          });
-          await ppurioPage.waitForTimeout(1000);
-
-          // 다음 페이지 버튼 클릭 (다양한 선택자 시도)
-          const nextClicked = await ppurioPage.evaluate(() => {
-            // 모든 링크/버튼에서 "다음", ">", "›", ">>" 찾기
-            const allEls = document.querySelectorAll('.jconfirm a, .jconfirm button, .jconfirm span[onclick], .jconfirm li[onclick]');
+          const clicked = await ppurioPage.evaluate((num) => {
+            // 팝업 내 모든 링크/버튼에서 페이지 번호 찾기
+            const allEls = document.querySelectorAll('a, button, span, li');
             for (const el of allEls) {
-              const t = el.innerText?.trim();
-              if (t === '다음' || t === '>' || t === '›' || t === '»' || t === '>>') {
+              if (el.innerText?.trim() === String(num)) {
                 el.click();
                 return true;
               }
             }
-            // class에 next 포함된 요소
-            const nextEl = document.querySelector('.jconfirm [class*="next"]:not([class*="prevent"])');
-            if (nextEl) { nextEl.click(); return true; }
             return false;
-          });
+          }, nextPageNum);
 
-          if (!nextClicked) {
-            console.log(`      다음 페이지 버튼 없음`);
+          if (!clicked) {
+            console.log(`      페이지 ${nextPageNum} 버튼 없음`);
             break;
           }
           await ppurioPage.waitForTimeout(1500);
