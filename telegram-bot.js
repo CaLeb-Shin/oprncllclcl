@@ -3246,35 +3246,48 @@ async function sendSMS(order, _isRetry = false) {
   // 2. 문자함 검색으로 해당 지역 템플릿 찾기
   console.log(`   2️⃣ 템플릿 검색: ${region}`);
   try {
-    // evaluate로 팝업 내 검색창 찾아서 입력
-    await ppurioPage.evaluate((q) => {
-      const inputs = document.querySelectorAll('input');
-      for (const inp of inputs) {
-        if (inp.placeholder && inp.placeholder.includes('검색')) {
-          inp.value = q;
-          inp.dispatchEvent(new Event('input', { bubbles: true }));
-          return;
-        }
-      }
-    }, region);
+    // Playwright fill로 검색창에 입력 (placeholder로 찾기)
+    await ppurioPage.fill('input[placeholder*="검색"]', region);
     await ppurioPage.waitForTimeout(500);
 
-    // 검색 버튼 클릭 (돋보기 아이콘)
-    await ppurioPage.evaluate(() => {
+    // 검색 실행: 돋보기 버튼 클릭 시도 → 실패하면 Enter
+    const searchClicked = await ppurioPage.evaluate((q) => {
+      // 검색창 옆 돋보기 버튼 찾기
       const inputs = document.querySelectorAll('input');
       for (const inp of inputs) {
-        if (inp.placeholder && inp.placeholder.includes('검색')) {
-          // 검색창 옆 버튼 찾기
-          const parent = inp.parentElement;
-          const btn = parent?.querySelector('button') || parent?.nextElementSibling;
-          if (btn) { btn.click(); return; }
-          // fallback: 가장 가까운 form submit
-          const form = inp.closest('form');
-          if (form) { form.dispatchEvent(new Event('submit', { bubbles: true })); }
-          return;
+        if (inp.placeholder && inp.placeholder.includes('검색') && inp.value === q) {
+          // 부모 ~ 형제 중 button, a, span[onclick] 찾기
+          let el = inp;
+          while (el && el.tagName !== 'BODY') {
+            const btns = el.querySelectorAll('button, a[href="javascript"], span[onclick]');
+            for (const btn of btns) {
+              if (btn !== inp && (btn.querySelector('svg, img') || btn.innerText?.includes('검색'))) {
+                btn.click();
+                return 'btn';
+              }
+            }
+            // 형제 요소 확인
+            if (el.nextElementSibling) {
+              const sib = el.nextElementSibling;
+              if (sib.tagName === 'BUTTON' || sib.tagName === 'A' || sib.querySelector('svg, img')) {
+                sib.click();
+                return 'sibling';
+              }
+            }
+            el = el.parentElement;
+          }
+          return 'not_found';
         }
       }
-    });
+      return 'no_input';
+    }, region);
+    console.log(`      검색 버튼: ${searchClicked}`);
+
+    // 버튼 못 찾았으면 Enter로 검색
+    if (searchClicked === 'not_found' || searchClicked === 'no_input') {
+      await ppurioPage.keyboard.press('Enter');
+      console.log(`      Enter로 검색 실행`);
+    }
     await ppurioPage.waitForTimeout(2000);
     console.log(`      검색 완료: "${region}"`);
   } catch (e) {
