@@ -3257,11 +3257,40 @@ async function sendSMS(order, _isRetry = false) {
       if (page < 5) {
         console.log(`      페이지 ${page}에 없음 → 다음 페이지...`);
         try {
-          await ppurioPage.click('.jconfirm [class*="next"], .jconfirm button:has-text("다음"), .jconfirm button:has-text(">"), .jconfirm button:has-text("›")', { timeout: 2000 });
+          // 문자함 팝업 내부를 스크롤해서 다음 페이지 버튼 노출
+          await ppurioPage.evaluate(() => {
+            const popup = document.querySelector('.jconfirm-box') || document.querySelector('.jconfirm');
+            if (popup) popup.scrollTop = popup.scrollHeight;
+            // 팝업 내 스크롤 가능한 영역도 시도
+            const scrollable = popup?.querySelector('[style*="overflow"], [class*="scroll"], .jconfirm-content');
+            if (scrollable) scrollable.scrollTop = scrollable.scrollHeight;
+          });
+          await ppurioPage.waitForTimeout(1000);
+
+          // 다음 페이지 버튼 클릭 (다양한 선택자 시도)
+          const nextClicked = await ppurioPage.evaluate(() => {
+            // 모든 링크/버튼에서 "다음", ">", "›", ">>" 찾기
+            const allEls = document.querySelectorAll('.jconfirm a, .jconfirm button, .jconfirm span[onclick], .jconfirm li[onclick]');
+            for (const el of allEls) {
+              const t = el.innerText?.trim();
+              if (t === '다음' || t === '>' || t === '›' || t === '»' || t === '>>') {
+                el.click();
+                return true;
+              }
+            }
+            // class에 next 포함된 요소
+            const nextEl = document.querySelector('.jconfirm [class*="next"]:not([class*="prevent"])');
+            if (nextEl) { nextEl.click(); return true; }
+            return false;
+          });
+
+          if (!nextClicked) {
+            console.log(`      다음 페이지 버튼 없음`);
+            break;
+          }
           await ppurioPage.waitForTimeout(1500);
         } catch {
-          // 다음 페이지 버튼 없으면 종료
-          console.log(`      다음 페이지 버튼 없음`);
+          console.log(`      다음 페이지 이동 실패`);
           break;
         }
       }
