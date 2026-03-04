@@ -2356,14 +2356,14 @@ async function checkForNewOrders() {
 // 새 공연 추가 시 여기만 수정하면 됨
 const STORE_URL = 'https://smartstore.naver.com/melon_symphony_orchestra';
 const PERFORMANCES = {
-  '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리', link: '', sms: { dateText: '3월 1일 (일) 오후 4시', venue: '대전 예술의전당 아트홀', addr: '대전광역시 서구 둔산대로 135 대전예술의전당' } },
-  '대구_디즈니': { date: '3/7(토)', name: '대구 디즈니+지브리', link: '', sms: null },
-  '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '', sms: null },
-  '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '', sms: null },
-  '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '', sms: null },
-  '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬', link: '', sms: { dateText: '3월 29일 (일) 오후 4시', venue: '대전 예술의전당 아트홀', addr: '대전광역시 서구 둔산대로 135 대전예술의전당' } },
-  '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬', link: '', sms: null },
-  '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '', sms: null },
+  '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리', link: '' },
+  '대구_디즈니': { date: '3/7(토)', name: '대구 디즈니+지브리', link: '' },
+  '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '' },
+  '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '' },
+  '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '' },
+  '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬', link: '' },
+  '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬', link: '' },
+  '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '' },
 };
 
 // ============================================================
@@ -3167,47 +3167,6 @@ function extractRegion(productName) {
   return m ? m[1] : '';
 }
 
-// 상품명에서 perfKey 찾기 (SMS용)
-function findPerfKeyForOrder(order) {
-  const info = parseProductInfo(order.productName, '');
-  return info.perfKey || '';
-}
-
-// 같은 지역에 공연이 2개 이상인지 체크
-function checkDuplicateRegion(region) {
-  const sameRegion = Object.entries(PERFORMANCES).filter(([key]) => key.startsWith(region + '_'));
-  return sameRegion.length >= 2 ? sameRegion : null;
-}
-
-// SMS 메시지 본문 생성
-function buildSmsContent(order, perfKey) {
-  const perf = PERFORMANCES[perfKey];
-  const smsInfo = perf?.sms;
-
-  if (!smsInfo) return null; // sms 정보 없으면 null
-
-  const buyerName = order.buyerName || '고객';
-  const phone = order.phone?.replace(/-/g, '') || '';
-  const lastFour = phone.slice(-4) || '0000';
-  const seatMatch = order.productName?.match(/,\s*(\S+석)\s*$/);
-  const seatType = seatMatch ? seatMatch[1] : '석';
-  const qty = order.qty || 1;
-
-  let content = `[멜론] 공연 예매가 완료되었습니다.\n\n■ 공연 정보\n- 일시: ${smsInfo.dateText}\n- 장소: ${smsInfo.venue}\n[ ${smsInfo.addr} ]\n\n■ 티켓 정보\n- 예매자: ${buyerName}님 (뒷자리 ${lastFour})\n- 좌석: ${seatType} ${qty}매 (비지정석)`;
-
-  // 모바일 티켓 URL 추가 (있으면)
-  if (order._ticketUrls && order._ticketUrls.length > 0) {
-    content += `\n- 티켓확인: ${order._ticketUrls[0]}`;
-    if (order._ticketUrls.length > 1) {
-      content += `\n\n(총 ${order._ticketUrls.length}장 — 추가 티켓은 별도 안내)`;
-    }
-  }
-
-  content += `\n\n■ 티켓 수령 안내\n공연 당일 티켓 창구 옆 '네이버스토어 창구'에서 예매자 성함과 전화번호 뒤 네 자리를 알려주시면 티켓을 수령하실 수 있습니다.\n\n예매해 주셔서 감사합니다.\n공연장에서 따뜻한 봄날의 행복한 순간을 함께하길 기대합니다.\n\nMelOn Symphony Orchestra.\n\n* 인스타그램 :\n[ https://www.instagram.com/melon_symphony.iproduction ]\n* 1:1 카카오톡 문의 :\n[ http://pf.kakao.com/_uSyhX ]`;
-
-  return content;
-}
-
 async function sendSMS(order, _isRetry = false) {
   if (!ppurioPage) {
     // 세션 없으면 자동 재로그인 시도
@@ -3225,20 +3184,17 @@ async function sendSMS(order, _isRetry = false) {
     return false;
   }
 
-  // 같은 지역 공연 2개 이상 → perfKey로 정확히 구분
-  const perfKey = findPerfKeyForOrder(order);
-  const duplicates = checkDuplicateRegion(region);
-  if (duplicates) {
-    console.log(`   ⚠️ ${region} 지역에 공연 ${duplicates.length}개: ${duplicates.map(([k,v]) => `${v.name} ${v.date}`).join(', ')}`);
-    if (perfKey) {
-      console.log(`   → 상품명에서 매칭된 공연: ${perfKey} (${PERFORMANCES[perfKey]?.name || '?'})`);
-    }
+  // 같은 지역 공연 2개 이상이면 텔레그램 알림
+  const sameRegion = Object.entries(PERFORMANCES).filter(([key]) => key.startsWith(region + '_'));
+  if (sameRegion.length >= 2) {
+    await sendMessage(
+      `⚠️ <b>${region} 지역에 공연이 ${sameRegion.length}개 있습니다!</b>\n\n` +
+      sameRegion.map(([k, v]) => `• ${v.name} ${v.date}`).join('\n') +
+      `\n\n문자함 템플릿이 올바른 공연으로 설정되어 있는지 확인해주세요!`
+    );
   }
 
-  // sms 정보가 있으면 직접 메시지 작성, 없으면 문자함 fallback
-  const smsContent = perfKey ? buildSmsContent(order, perfKey) : null;
-
-  console.log(`📱 문자 발송: ${order.buyerName} (${region}${perfKey ? ' → ' + perfKey : ''})`);
+  console.log(`📱 문자 발송: ${order.buyerName} (${region})`);
   await ppurioPage.goto('https://www.ppurio.com/send/sms/gn/view');
   await ppurioPage.waitForTimeout(3000);
 
@@ -3263,65 +3219,53 @@ async function sendSMS(order, _isRetry = false) {
     throw new Error('뿌리오 세션 만료');
   }
 
-  // sms 정보가 없으면 → 문자함에서 템플릿 로드 (기존 방식 fallback)
-  if (!smsContent) {
-    // 같은 지역 중복 공연이면 알림 후 중단
-    if (duplicates) {
-      await sendMessage(
-        `⚠️ <b>${region} 지역에 공연이 ${duplicates.length}개 있습니다!</b>\n\n` +
-        duplicates.map(([k, v]) => `• ${v.name} ${v.date}`).join('\n') +
-        `\n\n해당 공연의 SMS 정보(sms 필드)가 PERFORMANCES에 없어서 문자함 템플릿으로 보내면 잘못된 공연이 발송될 수 있습니다.\n\nSMS 정보를 추가해주세요!`
-      );
-      console.log(`   ❌ ${region} 중복 공연 + sms 정보 없음 → 발송 중단`);
-      return false;
-    }
+  // 1. 내 문자함 열기
+  console.log('   1️⃣ 내 문자함...');
+  await ppurioPage.click('button:has-text("내 문자함")');
+  await ppurioPage.waitForTimeout(2000);
 
-    // 중복 없으면 기존 문자함 방식
-    console.log('   1️⃣ 내 문자함 (sms 정보 없음 → fallback)...');
-    await ppurioPage.click('button:has-text("내 문자함")');
-    await ppurioPage.waitForTimeout(2000);
-
-    // "로그인 후 사용이 가능합니다" 팝업 체크
-    const alertText = await ppurioPage.evaluate(() => {
-      const allText = document.body.innerText;
-      return allText.includes('로그인 후 사용이 가능합니다') ? '로그인필요' : '';
-    });
-    if (alertText) {
-      console.log('   ❌ 로그인 필요 알림 감지 → 자동 재로그인 시도');
-      await ppurioPage.keyboard.press('Escape');
-      await ppurioPage.close().catch(() => {});
-      ppurioPage = null;
-      if (ppurioCtx) await ppurioCtx.close().catch(() => {});
-      ppurioCtx = null;
-      if (!_isRetry) {
-        const ok = await ppurioAutoRelogin();
-        if (ok) return sendSMS(order, true);
-      }
-      throw new Error('뿌리오 세션 만료');
-    }
-
-    console.log(`   2️⃣ 템플릿 선택: ${region}`);
-    try {
-      await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 5000 });
-      await ppurioPage.waitForTimeout(1500);
-    } catch (e) {
-      console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료`);
-      await ppurioPage.keyboard.press('Escape');
-      return false;
-    }
-
+  // "로그인 후 사용이 가능합니다" 팝업 체크
+  const alertText = await ppurioPage.evaluate(() => {
+    const allText = document.body.innerText;
+    return allText.includes('로그인 후 사용이 가능합니다') ? '로그인필요' : '';
+  });
+  if (alertText) {
+    console.log('   ❌ 로그인 필요 알림 감지 → 자동 재로그인 시도');
     await ppurioPage.keyboard.press('Escape');
-    await ppurioPage.waitForTimeout(1500);
-
-    // 단문전환 알림 팝업 닫기 (있으면)
-    try {
-      await ppurioPage.click('.jconfirm button', { timeout: 2000 });
-      await ppurioPage.waitForTimeout(500);
-    } catch {}
+    await ppurioPage.close().catch(() => {});
+    ppurioPage = null;
+    if (ppurioCtx) await ppurioCtx.close().catch(() => {});
+    ppurioCtx = null;
+    if (!_isRetry) {
+      const ok = await ppurioAutoRelogin();
+      if (ok) return sendSMS(order, true);
+    }
+    throw new Error('뿌리오 세션 만료');
   }
 
-  // 왼쪽 문자내용 영역에 메시지 입력/교체
-  console.log('   2️⃣ 문자 내용 입력...');
+  // 2. 해당 지역 템플릿 클릭 (예: "[멜론] 대전 공연 예매 완료")
+  console.log(`   2️⃣ 템플릿 선택: ${region}`);
+  try {
+    await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 5000 });
+    await ppurioPage.waitForTimeout(1500);
+  } catch (e) {
+    console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료`);
+    await ppurioPage.keyboard.press('Escape');
+    return false;
+  }
+
+  // 내 문자함 팝업 닫기
+  await ppurioPage.keyboard.press('Escape');
+  await ppurioPage.waitForTimeout(1500);
+
+  // 단문전환 알림 팝업 닫기 (있으면)
+  try {
+    await ppurioPage.click('.jconfirm button', { timeout: 2000 });
+    await ppurioPage.waitForTimeout(500);
+  } catch {}
+
+  // 2.5 왼쪽 문자내용 영역에서 변수 교체
+  console.log('   2️⃣-2 문자 내용 교체...');
   const allTextareas = await ppurioPage.$$('textarea.user_message');
   let leftTextarea = null;
   for (const ta of allTextareas) {
@@ -3333,34 +3277,30 @@ async function sendSMS(order, _isRetry = false) {
   }
 
   if (leftTextarea) {
+    let content = await leftTextarea.inputValue();
+
+    // 예매자 이름 + 연락처 교체 ("- 예매자:" 뒤 전체를 교체)
     const buyerName = order.buyerName || '고객';
     const phone = order.phone?.replace(/-/g, '') || '';
     const lastFour = phone.slice(-4) || '0000';
+    content = content.replace(/- 예매자: .+/, `- 예매자: ${buyerName}님 (뒷자리 ${lastFour})`);
+
+    // 좌석 정보 교체 ("- 좌석:" 뒤 전체를 교체)
     const seatMatch = order.productName?.match(/,\s*(\S+석)\s*$/);
     const seatType = seatMatch ? seatMatch[1] : '석';
     const qty = order.qty || 1;
+    content = content.replace(/- 좌석: .+/, `- 좌석: ${seatType} ${qty}매 (비지정석)`);
 
-    let content;
-    if (smsContent) {
-      // 직접 작성 방식 (sms 정보 있음)
-      content = smsContent;
-    } else {
-      // 문자함 템플릿 로드 후 변수 교체 (fallback)
-      content = await leftTextarea.inputValue();
-      content = content.replace(/- 예매자: .+/, `- 예매자: ${buyerName}님 (뒷자리 ${lastFour})`);
-      content = content.replace(/- 좌석: .+/, `- 좌석: ${seatType} ${qty}매 (비지정석)`);
-
-      // 모바일 티켓 URL 추가 (있으면)
-      if (order._ticketUrls && order._ticketUrls.length > 0) {
-        const ticketLine = `- 티켓확인: ${order._ticketUrls[0]}`;
-        if (content.includes('- 티켓확인:')) {
-          content = content.replace(/- 티켓확인: .+/, ticketLine);
-        } else {
-          content = content.replace(/(- 좌석: .+)/, `$1\n${ticketLine}`);
-        }
-        if (order._ticketUrls.length > 1) {
-          content += `\n\n(총 ${order._ticketUrls.length}장 — 추가 티켓은 별도 안내)`;
-        }
+    // 모바일 티켓 URL 추가 (있으면)
+    if (order._ticketUrls && order._ticketUrls.length > 0) {
+      const ticketLine = `- 티켓확인: ${order._ticketUrls[0]}`;
+      if (content.includes('- 티켓확인:')) {
+        content = content.replace(/- 티켓확인: .+/, ticketLine);
+      } else {
+        content = content.replace(/(- 좌석: .+)/, `$1\n${ticketLine}`);
+      }
+      if (order._ticketUrls.length > 1) {
+        content += `\n\n(총 ${order._ticketUrls.length}장 — 추가 티켓은 별도 안내)`;
       }
     }
 
