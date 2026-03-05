@@ -652,11 +652,24 @@ async function naverLoginWith2FA() {
     page = await ctx.newPage();
     page.setDefaultTimeout(30_000);
 
-    // 1. 네이버 로그인 페이지
-    await page.goto('https://nid.naver.com/nidlogin.login', { timeout: 20000, waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(2000);
+    // 1. 스마트스토어로 접속 → 네이버 로그인 페이지로 자동 리다이렉트
+    console.log('   🔄 스마트스토어 경유 로그인 시도...');
+    await page.goto('https://sell.smartstore.naver.com/', { timeout: 20000, waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(3000);
+
+    // 네이버 로그인 페이지로 리다이렉트 확인
+    const loginUrl = page.url();
+    console.log(`   📍 리다이렉트 URL: ${loginUrl}`);
+
+    // 이미 로그인된 상태라면 (스마트스토어 바로 접속)
+    if (loginUrl.includes('sell.smartstore.naver.com') && !loginUrl.includes('login')) {
+      console.log('   ✅ 이미 로그인된 상태!');
+      // 바로 스마트스토어 확인으로 점프
+    } else {
+      // 로그인 페이지에서 ID/PW 입력
 
     // 2. ID/PW 입력 (clipboard paste 방식으로 봇 감지 우회)
+    await page.waitForSelector('#id', { timeout: 10000 });
     const idField = page.locator('#id');
     const pwField = page.locator('#pw');
 
@@ -729,9 +742,16 @@ async function naverLoginWith2FA() {
       return false;
     }
 
-    // 5. 로그인한 컨텍스트에서 바로 스마트스토어로 이동 (새 컨텍스트 생성 X)
-    console.log('   🔄 로그인 컨텍스트에서 바로 스마트스토어 접속...');
-    await page.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    } // ← 로그인 페이지 분기 닫기 (이미 로그인된 경우 스킵)
+
+    // 5. 스마트스토어 접속 확인 (리다이렉트로 이미 스마트스토어에 있을 수 있음)
+    const afterLoginUrl = page.url();
+    console.log(`   📍 로그인 후 URL: ${afterLoginUrl}`);
+
+    if (!afterLoginUrl.includes('sell.smartstore.naver.com')) {
+      console.log('   🔄 스마트스토어로 이동...');
+      await page.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    }
     await page.waitForTimeout(10000);
 
     // 팝업 닫기 시도
