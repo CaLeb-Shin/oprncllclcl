@@ -729,25 +729,17 @@ async function naverLoginWith2FA() {
       return false;
     }
 
-    // 5. 세션 저장 후 스마트스토어 접속
-    await ctx.storageState({ path: CONFIG.smartstoreStateFile });
-    await page.close().catch(() => {});
-    await ctx.close().catch(() => {});
-
-    // 6. 새 세션으로 스마트스토어 접속 확인
-    smartstoreCtx = await browser.newContext({ storageState: CONFIG.smartstoreStateFile });
-    smartstorePage = await smartstoreCtx.newPage();
-    smartstorePage.setDefaultTimeout(60_000);
-
-    await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(10000);
+    // 5. 로그인한 컨텍스트에서 바로 스마트스토어로 이동 (새 컨텍스트 생성 X)
+    console.log('   🔄 로그인 컨텍스트에서 바로 스마트스토어 접속...');
+    await page.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(10000);
 
     // 팝업 닫기 시도
-    try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
-    try { await smartstorePage.click('text=닫기', { timeout: 1000 }); } catch {}
-    await smartstorePage.waitForTimeout(1000);
+    try { await page.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+    try { await page.click('text=닫기', { timeout: 1000 }); } catch {}
+    await page.waitForTimeout(1000);
 
-    const checkSS = () => smartstorePage.evaluate(() =>
+    const checkSS = () => page.evaluate(() =>
       document.body.textContent.includes('판매관리') ||
       document.body.textContent.includes('정산관리') ||
       document.body.textContent.includes('주문/배송') ||
@@ -758,32 +750,36 @@ async function naverLoginWith2FA() {
 
     // 실패 시 리로드 후 재확인
     if (!ssLoggedIn) {
-      const curUrl = smartstorePage.url();
-      const bodySnippet = await smartstorePage.evaluate(() => document.body.textContent?.substring(0, 200) || '').catch(() => '');
+      const curUrl = page.url();
+      const bodySnippet = await page.evaluate(() => document.body.textContent?.substring(0, 200) || '').catch(() => '');
       console.log(`   ⚠️ 1차 실패 → URL: ${curUrl}`);
       console.log(`   ⚠️ 페이지 내용: ${bodySnippet}`);
 
       console.log('   🔄 리로드 후 재확인...');
-      await smartstorePage.reload({ timeout: 30000, waitUntil: 'domcontentloaded' });
-      await smartstorePage.waitForTimeout(10000);
-      try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
-      await smartstorePage.waitForTimeout(1000);
+      await page.reload({ timeout: 30000, waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(10000);
+      try { await page.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+      await page.waitForTimeout(1000);
       ssLoggedIn = await checkSS();
     }
 
     if (ssLoggedIn) {
+      // 성공 → 로그인 컨텍스트를 스마트스토어 컨텍스트로 전환
+      smartstoreCtx = ctx;
+      smartstorePage = page;
+      smartstorePage.setDefaultTimeout(60_000);
       await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
       console.log('   ✅ 네이버 재로그인 + 스마트스토어 접속 성공!');
       await sendMessage('✅ <b>네이버 자동 재로그인 성공!</b>\n\n스마트스토어 정상 접속 확인됨');
+      ctx = null; // catch에서 닫히지 않도록
+      page = null;
       return true;
     }
 
-    const failUrl = smartstorePage.url();
+    const failUrl = page.url();
     console.log(`   ❌ 네이버 로그인은 됐지만 스마트스토어 접속 실패 (URL: ${failUrl})`);
-    await smartstorePage.close().catch(() => {});
-    smartstorePage = null;
-    if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
-    smartstoreCtx = null;
+    await page.close().catch(() => {});
+    await ctx.close().catch(() => {});
     return false;
 
   } catch (err) {
