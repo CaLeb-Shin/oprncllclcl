@@ -2378,7 +2378,15 @@ function assignSeats(unsoldSeats, activeOrders, region) {
     // 같은 행이면 구역 우선순위 (B > A/C > E > ...)
     const ROW_ADVANTAGE = 3; // 이 열수 이상 앞이면 낮은 우선순위 구역이라도 우선
     const getPriority = (r) => priority[`${r.floor}${r.section}`] || priority[r.section] || 99;
+    const getFloorNum = (r) => {
+      const m = (r.floor || '').match(/(\d+)층/);
+      return m ? parseInt(m[1]) : 1; // 층 정보 없으면 1층 취급
+    };
     availableRows.sort((a, b) => {
+      // 층이 다르면 낮은 층 무조건 우선
+      const fa = getFloorNum(a);
+      const fb = getFloorNum(b);
+      if (fa !== fb) return fa - fb;
       const pa = getPriority(a);
       const pb = getPriority(b);
       // 같은 구역 우선순위면 앞열 우선
