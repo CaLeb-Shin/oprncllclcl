@@ -2373,13 +2373,21 @@ function assignSeats(unsoldSeats, activeOrders, region) {
       continue;
     }
 
-    // 구역 우선순위 정렬 (층+구역 → 구역만 fallback)
+    // 구역 우선순위 정렬
+    // 양옆이 중앙보다 3열 이상 앞이면 양옆 우선, 2열 이하면 중앙(구역우선) 우선
+    // 같은 행이면 구역 우선순위 (B > A/C > E > ...)
+    const ROW_ADVANTAGE = 3; // 이 열수 이상 앞이면 낮은 우선순위 구역이라도 우선
     const getPriority = (r) => priority[`${r.floor}${r.section}`] || priority[r.section] || 99;
     availableRows.sort((a, b) => {
       const pa = getPriority(a);
       const pb = getPriority(b);
-      if (pa !== pb) return pa - pb;
-      return a.row - b.row;
+      // 같은 구역 우선순위면 앞열 우선
+      if (pa === pb) return a.row - b.row;
+      // 다른 구역: 열 차이가 ROW_ADVANTAGE 이상이면 앞열 우선
+      const rowDiff = Math.abs(a.row - b.row);
+      if (rowDiff >= ROW_ADVANTAGE) return a.row - b.row;
+      // 열 차이 2 이하: 구역 우선순위대로
+      return pa - pb;
     });
 
     // 각 행의 중앙값 계산
