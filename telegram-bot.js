@@ -2515,6 +2515,7 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
   }
 
   let totalAssigned = 0;
+  let totalSeats = 0;
   const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
   const sortedGrades = [...Object.keys(byGrade)].sort((a, b) => {
     const ai = gradeOrder.indexOf(a);
@@ -2540,6 +2541,7 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
         msg += `${orderNum}. ${name} ${qty}매 → ${floorPrefix}${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
       }
       totalAssigned++;
+      totalSeats += a.seats ? a.seats.length : (a.split ? a.split.reduce((s, p) => s + p.seats.length, 0) : 0);
     }
   }
 
@@ -2552,7 +2554,7 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
   }
 
   msg += `\n━━━━━━━━━━━━━━━━\n`;
-  msg += `✅ 총 배정: ${totalAssigned}명`;
+  msg += `✅ 총 배정: ${totalAssigned}명 / ${totalSeats}좌석`;
   if (unassigned.length > 0) msg += ` / ⚠️ 미배정: ${unassigned.length}명`;
 
   return msg;
