@@ -55,7 +55,7 @@ function getBrowserLaunchOptions() {
 
 // Windows execSync 래퍼 (CMD 창 숨김)
 function execSyncHidden(cmd, options = {}) {
-  return execSync(cmd, { ...options, windowsHide: true });
+  return execSync(cmd, { ...options, windowsHide: true, stdio: 'pipe' });
 }
 
 // ============================================================
@@ -4297,8 +4297,8 @@ async function pollAndSendSms() {
       await new Promise((r) => setTimeout(r, 3000));
     }
   } catch (err) {
-    // 폴링 자체 실패 (네트워크 등)는 조용히 무시
-    if (!err.message?.includes('Unauthorized')) {
+    // 폴링 자체 실패 (네트워크/500 등)는 조용히 무시
+    if (!err.message?.includes('Unauthorized') && !err.message?.includes('500') && !err.message?.includes('Internal Server Error')) {
       console.error('SMS 폴링 오류:', err.message);
     }
   } finally {
