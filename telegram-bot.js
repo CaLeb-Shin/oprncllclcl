@@ -276,6 +276,66 @@ async function createMelonTicket(order, eventId) {
   });
 }
 
+/**
+ * 좌석 배정 결과를 멜론티켓 Firebase에 푸시
+ * assignments: [{ buyer: { buyerName, seatType, qty }, grade, floor, section, row, seats: [numbers] }]
+ */
+async function pushSeatsToFirebase(assignments, perf, region) {
+  // perfKey 추출 (region + 디즈니/지브리)
+  const isDisney = perf.title.includes('디즈니');
+  const type = isDisney ? '디즈니' : '지브리';
+  const perfKey = `${region}_${type}`;
+  const eventId = CONFIG.firebase.eventMap[perfKey];
+
+  if (!eventId) {
+    await sendMessage(`ℹ️ Firebase eventMap에 <b>${perfKey}</b> 매핑 없음 — 좌석 푸시 건너뜀`);
+    return;
+  }
+
+  // 같은 buyer의 여러 좌석을 하나의 assignment로 합치기
+  const buyerMap = {};
+  for (const a of assignments) {
+    const key = `${a.buyer.buyerName}_${a.grade}`;
+    if (!buyerMap[key]) {
+      buyerMap[key] = {
+        buyerName: a.buyer.buyerName,
+        seatGrade: a.grade,
+        seats: [],
+      };
+    }
+    for (const num of a.seats) {
+      buyerMap[key].seats.push({
+        floor: a.floor || '',
+        section: a.section || '',
+        row: a.row,
+        number: num,
+      });
+    }
+  }
+
+  const cfAssignments = Object.values(buyerMap);
+
+  try {
+    const result = await callFirebaseCF('updateTicketSeatsHttp', {
+      eventId,
+      assignments: cfAssignments,
+    });
+
+    if (result.success) {
+      await sendMessage(
+        `🔗 Firebase 좌석 푸시 완료\n` +
+        `  ✅ 업데이트: ${result.updated}건\n` +
+        `  ⏭ 건너뜀: ${result.skipped}건` +
+        (result.errors?.length ? `\n  ⚠️ 오류: ${result.errors.join(', ')}` : '')
+      );
+    } else {
+      await sendMessage(`⚠️ Firebase 좌석 푸시 실패: ${JSON.stringify(result)}`);
+    }
+  } catch (err) {
+    await sendMessage(`❌ Firebase 좌석 푸시 오류: ${err.message}`);
+  }
+}
+
 function sendMessage(text, replyMarkup = null) {
   const body = { chat_id: CONFIG.telegramChatId, text, parse_mode: 'HTML' };
   if (replyMarkup) body.reply_markup = replyMarkup;
@@ -3517,6 +3577,11 @@ async function handleMessage(msg) {
         if (chunk) await sendMessage(chunk);
       } else {
         await sendMessage(resultMsg);
+      }
+
+      // Firebase에 좌석 배정 결과 푸시
+      if (assignments.length > 0) {
+        await pushSeatsToFirebase(assignments, perf, region);
       }
 
       seatAssignWaiting = null;
