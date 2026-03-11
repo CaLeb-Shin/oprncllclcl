@@ -305,6 +305,10 @@ function matchEventByKeywords(events, productName) {
   if (!productName || events.length === 0) return null;
   const name = productName.toLowerCase();
 
+  // 상품명에서 지역 추출 (예: "[창원] ..." → "창원")
+  const regionMatch = productName.match(/^\[([^\]]+)\]/) || productName.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
+  const productRegion = regionMatch ? regionMatch[1] : null;
+
   let bestMatch = null;
   let bestScore = 0;
 
@@ -316,6 +320,14 @@ function matchEventByKeywords(events, productName) {
     for (const kw of keywords) {
       if (name.includes(kw)) score++;
     }
+    // 지역이 일치하면 보너스 점수 (다른 지역 이벤트보다 우선)
+    const eventTitle = (event.title || '') + ' ' + (event.naverProductKeyword || '');
+    if (productRegion && eventTitle.includes(productRegion)) {
+      score += 100;
+    } else if (productRegion && !eventTitle.includes(productRegion)) {
+      // 지역이 불일치하면 매칭 후보에서 제외
+      continue;
+    }
     if (score > bestScore) {
       bestScore = score;
       bestMatch = event;
@@ -324,10 +336,12 @@ function matchEventByKeywords(events, productName) {
 
   if (bestMatch && bestScore > 0) return bestMatch;
 
-  // 폴백: title 부분 매칭
+  // 폴백: title 부분 매칭 (지역 필터 적용)
   for (const event of events) {
     const title = (event.title || '').toLowerCase();
     if (!title) continue;
+    // 지역 불일치 이벤트 제외
+    if (productRegion && !title.includes(productRegion.toLowerCase())) continue;
     const titleWords = title.split(/\s+/).filter(w => w.length >= 2);
     let matched = 0;
     for (const word of titleWords) {
