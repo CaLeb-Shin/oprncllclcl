@@ -1541,8 +1541,21 @@ async function getFinalSummaryList() {
     finalSummaryData[key].orders.push(order);
   }
 
-  // 키 목록 저장
-  finalSummaryKeys = Object.keys(finalSummaryData);
+  // 하루 지난 공연까지만 표시 (오래된 공연 제외)
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setHours(0, 0, 0, 0);
+
+  finalSummaryKeys = Object.keys(finalSummaryData).filter(key => {
+    const perf = finalSummaryData[key];
+    if (!perf.date) return true; // 날짜 없으면 포함
+    // 날짜 파싱: "2026.03.14 16:00" 또는 "2026-03-14" 등
+    const dateStr = perf.date.replace(/[./]/g, '-').trim();
+    const match = dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (!match) return true; // 파싱 실패하면 포함
+    const perfDate = new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+    return perfDate >= yesterday;
+  });
 
   return finalSummaryKeys;
 }
@@ -3810,10 +3823,26 @@ async function handleMessage(msg) {
     }
     const key = finalSummaryKeys[perfIndex];
     const perf = finalSummaryData[key];
-    // PERFORMANCES에서 tadminCode 찾기
-    const perfConfig = PERFORMANCES[key];
+    // PERFORMANCES에서 tadminCode 찾기 (지역명 기반 매칭)
+    // key: 뿌리오 발송결과 키 (예: "울산 공연 예매 완료"), PERFORMANCES key: "울산_디즈니"
+    const title = perf.title || key;
+    let perfConfig = PERFORMANCES[key]; // 직접 매칭 시도
     if (!perfConfig || !perfConfig.tadminCode) {
-      await sendMessage(`❌ ${perf.title}의 TADMIN 상품코드가 등록되지 않았습니다.`);
+      // 지역명으로 매칭: title/key에 지역명이 포함된 PERFORMANCES 찾기
+      const regions = ['울산', '대구', '창원', '광주', '대전', '부산', '고양', '인천', '부천', '구미'];
+      const matchedRegion = regions.find(r => title.includes(r) || key.includes(r));
+      if (matchedRegion) {
+        // 해당 지역의 미래 공연 중 가장 가까운 것
+        const candidates = Object.entries(PERFORMANCES).filter(([k, v]) =>
+          k.includes(matchedRegion) && v.tadminCode && isPerfFuture(k)
+        );
+        if (candidates.length > 0) {
+          perfConfig = candidates[0][1];
+        }
+      }
+    }
+    if (!perfConfig || !perfConfig.tadminCode) {
+      await sendMessage(`❌ ${title}의 TADMIN 상품코드가 등록되지 않았습니다.`);
       return;
     }
     await sendMessage(`🎫 <b>${perf.title}</b> 좌석현황 다운로드 중...\n(TADMIN 접속 → 잔여석/판매석/보류석 3종)`);
