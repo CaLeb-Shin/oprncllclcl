@@ -277,6 +277,70 @@ async function createMelonTicket(order, eventId) {
 }
 
 /**
+ * 이벤트 자동매칭: eventMap 수동매핑 → naverKeywords 자동매칭 폴백
+ */
+async function resolveEventId(productName) {
+  // 1차: 기존 eventMap 수동 매핑
+  const info = parseProductInfo(productName);
+  if (CONFIG.firebase.eventMap[info.perfKey]) {
+    return CONFIG.firebase.eventMap[info.perfKey];
+  }
+
+  // 2차: Firebase 이벤트 목록에서 naverKeywords 자동 매칭
+  try {
+    const data = await callFirebaseCF('listEventsHttp', {});
+    const events = data.events || [];
+    const matched = matchEventByKeywords(events, productName);
+    return matched ? matched.id : null;
+  } catch (err) {
+    console.log('   ⚠️ 이벤트 목록 조회 실패:', err.message);
+    return null;
+  }
+}
+
+function matchEventByKeywords(events, productName) {
+  if (!productName || events.length === 0) return null;
+  const name = productName.toLowerCase();
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const event of events) {
+    const keyword = (event.naverProductKeyword || '').toLowerCase();
+    if (!keyword) continue;
+    const keywords = keyword.split(/[,\s]+/).filter(Boolean);
+    let score = 0;
+    for (const kw of keywords) {
+      if (name.includes(kw)) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = event;
+    }
+  }
+
+  if (bestMatch && bestScore > 0) return bestMatch;
+
+  // 폴백: title 부분 매칭
+  for (const event of events) {
+    const title = (event.title || '').toLowerCase();
+    if (!title) continue;
+    const titleWords = title.split(/\s+/).filter(w => w.length >= 2);
+    let matched = 0;
+    for (const word of titleWords) {
+      if (name.includes(word)) matched++;
+    }
+    const ratio = titleWords.length > 0 ? matched / titleWords.length : 0;
+    if (ratio > 0.5 && matched > bestScore) {
+      bestScore = matched;
+      bestMatch = event;
+    }
+  }
+
+  return bestMatch;
+}
+
+/**
  * 좌석 배정 결과를 멜론티켓 Firebase에 푸시
  * assignments: [{ buyer: { buyerName, seatType, qty }, grade, floor, section, row, seats: [numbers] }]
  */
@@ -3106,8 +3170,9 @@ async function requestApproval(order) {
   const replyMarkup = {
     inline_keyboard: [
       [
-        { text: '✅ 승인', callback_data: `approve_${order.orderId}` },
-        { text: '❌ 거부', callback_data: `reject_${order.orderId}` },
+        { text: '✅ 문자만', callback_data: `approve_${order.orderId}` },
+        { text: '🎫 문자+발권', callback_data: `approve_ticket_${order.orderId}` },
+        { text: '❌ 보류', callback_data: `reject_${order.orderId}` },
       ],
     ],
   };
@@ -3418,14 +3483,35 @@ async function processDelivery(orderId) {
 }
 
 // ============================================================
-// 주문 처리 (문자 발송)
+// 주문 처리 (문자 발송 + 선택적 모바일 티켓 발권)
 // ============================================================
-async function processOrder(order) {
+async function processOrder(order, options = {}) {
   try {
     await ensureBrowser();
 
-    // 모바일 티켓 발권은 멜론티켓 봇(/issue)에서 별도 처리
-    // 여기서는 뿌리오 SMS 발송만 담당
+    // 🎫 문자+발권 모드: 모바일 티켓 생성
+    if (options.withTicket) {
+      try {
+        const eventId = await resolveEventId(order.productName);
+        if (eventId) {
+          console.log(`🎫 멜론티켓 발권: eventId=${eventId}`);
+          const ticketResult = await createMelonTicket(order, eventId);
+          const urls = ticketResult.tickets.map(t => t.url);
+          order._ticketUrls = urls;
+          await sendMessage(
+            `🎫 <b>모바일 티켓 생성 완료!</b>\n\n` +
+            `주문: ${order.orderId}\n` +
+            `구매자: ${order.buyerName} (${order.qty}매)\n\n` +
+            `📱 티켓 URL:\n${urls.map((u, i) => `${i + 1}️⃣ ${u}`).join('\n')}`
+          );
+        } else {
+          await sendMessage(`⚠️ 매칭되는 이벤트 없음 — 모바일 발권 건너뜀. 문자만 발송합니다.`);
+        }
+      } catch (cfErr) {
+        console.log('   ⚠️ 멜론티켓 발권 오류:', cfErr.message);
+        await sendMessage(`⚠️ <b>모바일 티켓 생성 실패</b>\n\n${cfErr.message}\n\n문자 발송은 계속 진행합니다.`);
+      }
+    }
 
     let smsSent = false;
     try {
@@ -3478,7 +3564,21 @@ async function processOrder(order) {
 async function handleCallbackQuery(cq) {
   const { data, id: queryId } = cq;
 
-  if (data.startsWith('approve_')) {
+  if (data.startsWith('approve_ticket_')) {
+    // 🎫 문자+발권: 모바일티켓 생성 후 SMS 발송
+    const orderId = data.replace('approve_ticket_', '');
+    const order = pendingOrders[orderId];
+    if (order) {
+      await answerCallbackQuery(queryId, '발권+문자 처리 중...');
+      await sendMessage(`⏳ <b>${order.buyerName}</b> 모바일 발권 + 문자 발송 중...`);
+      await processOrder(order, { withTicket: true });
+      delete pendingOrders[orderId];
+      savePendingOrders(pendingOrders);
+    } else {
+      await answerCallbackQuery(queryId, '주문을 찾을 수 없습니다.');
+    }
+  } else if (data.startsWith('approve_')) {
+    // ✅ 문자만: 기존 SMS만 발송
     const orderId = data.replace('approve_', '');
     const order = pendingOrders[orderId];
     if (order) {
@@ -3502,11 +3602,88 @@ async function handleCallbackQuery(cq) {
 }
 
 // ============================================================
+// 네이버 주문 메시지 파싱 (수동 /issue용)
+// ============================================================
+function parseNaverOrderMessage(text) {
+  if (!text) return null;
+  const result = {};
+
+  const perfMatch = text.match(/🎫\s*공연:\s*(.+)/);
+  if (perfMatch) {
+    const perfLine = perfMatch[1].trim();
+    const gradeMatch = perfLine.match(/,\s*(VIP|R|S|A)석\s*\((\d+)매\)\s*$/i);
+    if (gradeMatch) {
+      result.productName = perfLine.slice(0, gradeMatch.index).trim();
+      result.seatGrade = gradeMatch[1].toUpperCase();
+      result.qty = parseInt(gradeMatch[2], 10);
+    } else {
+      const qtyMatch = perfLine.match(/\((\d+)매\)\s*$/);
+      result.productName = qtyMatch ? perfLine.slice(0, qtyMatch.index).trim() : perfLine;
+      result.qty = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
+      result.seatGrade = 'A';
+    }
+  }
+
+  const buyerMatch = text.match(/👤\s*구매자:\s*(.+)/);
+  if (buyerMatch) result.buyerName = buyerMatch[1].trim();
+
+  const phoneMatch = text.match(/📱\s*연락처:\s*([\d\-]+)/);
+  if (phoneMatch) result.phone = phoneMatch[1].trim();
+
+  const orderMatch = text.match(/주문번호:\s*(\S+)/);
+  if (orderMatch) result.orderId = orderMatch[1].trim();
+
+  if (!result.buyerName || !result.phone || !result.orderId) return null;
+  return result;
+}
+
+/**
+ * /issue 수동 발권 처리
+ */
+async function handleIssueCommand(orderText) {
+  const parsed = parseNaverOrderMessage(orderText);
+  if (!parsed) {
+    await sendMessage(
+      '⚠️ 주문 메시지 파싱 실패\n\n' +
+      '사용법:\n<code>/issue 📦 새 주문!\n🎫 공연: [대구] ..., S석 3매\n👤 구매자: 홍길동\n📱 연락처: 010-1234-5678\n주문번호: 123456</code>'
+    );
+    return;
+  }
+
+  await sendMessage(
+    `🔄 <b>수동 발권 처리 중...</b>\n\n` +
+    `👤 ${parsed.buyerName} (${parsed.phone})\n` +
+    `🎫 ${parsed.seatGrade || 'A'}석 ${parsed.qty}매\n` +
+    `📋 주문번호: ${parsed.orderId}\n` +
+    (parsed.productName ? `📦 ${parsed.productName}` : '')
+  );
+
+  // 모바일 티켓 발권 + SMS 발송
+  await processOrder(parsed, { withTicket: true });
+}
+
+// ============================================================
 // 메시지 처리
 // ============================================================
 async function handleMessage(msg) {
   const chatId = String(msg.chat.id);
   const isPersonalChat = chatId === CONFIG.telegramChatId;
+
+  // /issue 수동 발권 명령어
+  const rawText = msg.text || '';
+  if (rawText.trim().startsWith('/issue') && isPersonalChat) {
+    const orderText = rawText.trim().replace(/^\/issue\s*/, '').trim();
+    if (!orderText) {
+      await sendMessage(
+        '🎫 <b>수동 발권</b>\n\n' +
+        '/issue + 주문 메시지를 붙여넣으세요.\n\n' +
+        '예시:\n<code>/issue 📦 새 주문!\n🎫 공연: [대구] 콘서트, S석 3매\n👤 구매자: 홍길동\n📱 연락처: 010-1234-5678\n주문번호: 123456</code>'
+      );
+      return;
+    }
+    await handleIssueCommand(orderText);
+    return;
+  }
 
   // 좌석배정 엑셀 파일 수신 처리
   if (msg.document && isPersonalChat && seatAssignWaiting) {
@@ -4080,6 +4257,9 @@ async function handleMessage(msg) {
       `<b>📦 주문관리</b>\n` +
       `• 체크 - 새 주문 확인\n` +
       `• 발송완료 - 발송처리 완료\n\n` +
+      `<b>🎫 모바일 티켓</b>\n` +
+      `• /issue + 주문메시지 - 수동 발권\n` +
+      `  (자동 감지 주문은 🎫 버튼으로 발권)\n\n` +
       `<b>📊 매출</b>\n` +
       `• 결산 - 놀티켓 + 네이버\n` +
       `• 스토어 - 네이버 판매현황\n` +
@@ -4238,6 +4418,9 @@ async function startPolling() {
       `<b>📦 주문관리</b>\n` +
       `• 체크 - 새 주문 확인\n` +
       `• 발송완료 - 발송처리 완료\n\n` +
+      `<b>🎫 모바일 티켓</b>\n` +
+      `• /issue + 주문메시지 - 수동 발권\n` +
+      `  (자동 감지 주문은 🎫 버튼으로 발권)\n\n` +
       `<b>📊 매출</b>\n` +
       `• 결산 - 놀티켓 + 네이버\n` +
       `• 스토어 - 네이버 판매현황\n` +
