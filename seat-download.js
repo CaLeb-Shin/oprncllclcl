@@ -273,85 +273,66 @@ async function downloadSeatExcel(targetGoodsCode) {
       console.log('   ⚠️ 회차 데이터 없음');
     }
 
-    // 5. 상태 드롭다운 → 잔여석 선택
-    console.log('5️⃣ 상태: 잔여석 선택...');
-    // 스크린샷에서 "잔여석" 드롭다운이 보임
-    try {
-      // select 요소에서 잔여석 옵션 선택
+    // 5~7. 상태별 조회 → Excel 다운로드 (잔여석/판매석/보류석)
+    const statuses = [
+      { value: '0', name: '잔여석' },
+      { value: '1', name: '판매석' },
+      { value: '2', name: '보류석' },
+    ];
+
+    const venueName = target.venue || target.productName;
+    // 공연명에서 지역명 추출 (예: "콘서트 - 울산" → "울산")
+    const regionMatch = target.productName.match(/[-–]\s*([^\s]+?)\s*$/);
+    const regionName = regionMatch ? regionMatch[1] : venueName;
+    const dateStr = target.startDate; // 20260314
+
+    const downloadedFiles = [];
+
+    for (const status of statuses) {
+      console.log(`5️⃣ 상태: ${status.name} 선택...`);
       const selects = await page.$$('select');
-      console.log(`   📋 select 요소 ${selects.length}개`);
       for (const sel of selects) {
         const options = await sel.evaluate(el =>
           Array.from(el.options).map(o => ({ value: o.value, text: o.textContent }))
         );
-        console.log(`   → 옵션:`, options.map(o => `${o.value}(${o.text})`).join(', '));
-        // "잔여석" 텍스트를 가진 옵션 선택
-        const remaining = options.find(o => o.text.includes('잔여석'));
-        if (remaining) {
-          await sel.selectOption({ value: remaining.value });
-          console.log(`   ✅ 잔여석 선택 (value=${remaining.value})`);
+        const opt = options.find(o => o.value === status.value);
+        if (opt) {
+          await sel.selectOption({ value: status.value });
+          console.log(`   ✅ ${status.name} 선택`);
           break;
         }
       }
-    } catch (e) {
-      console.log(`   ⚠️ 잔여석 선택 실패: ${e.message}`);
-    }
-    console.log('');
 
-    // 6. 조회 버튼 클릭
-    console.log('6️⃣ 조회 버튼 클릭...');
-    await page.click('#btnSearch');
-    await page.waitForTimeout(3000);
-    console.log('   ✅ 조회 완료\n');
+      // 조회
+      console.log(`6️⃣ 조회...`);
+      await page.click('#btnSearch');
+      await page.waitForTimeout(3000);
 
-    await page.screenshot({ path: 'debug-seat-result.png' });
+      // Excel 다운로드
+      console.log(`7️⃣ Excel 다운로드 (${status.name})...`);
+      try {
+        const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
+        await page.click('#btnExcel0');
+        const download = await downloadPromise;
 
-    // 결과 데이터 확인
-    const resultInfo = await page.evaluate(() => {
-      // 결과 그리드의 Provider 찾기
-      for (const key of Object.keys(window)) {
-        if (key.endsWith('_Provider') && !key.includes('Lookup')) {
-          const p = window[key];
-          if (p && typeof p.getRowCount === 'function') {
-            const rowCount = p.getRowCount();
-            if (rowCount > 0) {
-              const firstRow = p.getJsonRow(0);
-              return { provider: key, rowCount, fields: Object.keys(firstRow), sample: firstRow };
-            }
-          }
-        }
+        const fileName = `${status.name}_${regionName}_${dateStr}.xls`;
+        const savePath = path.join(downloadDir, fileName);
+        await download.saveAs(savePath);
+        console.log(`   ✅ ${savePath}\n`);
+        downloadedFiles.push({ path: savePath, name: status.name });
+      } catch (e) {
+        console.log(`   ⚠️ ${status.name} 다운로드 실패: ${e.message}\n`);
       }
-      return { error: 'No data provider found' };
-    });
-    console.log(`   📊 결과:`, JSON.stringify(resultInfo, null, 2));
-
-    // 7. Excel 버튼 클릭 → 다운로드
-    console.log('7️⃣ Excel 다운로드...');
-
-    // 다운로드 이벤트 대기
-    const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
-
-    // Excel 버튼 클릭
-    const excelBtn = await page.$('text=Excel') || await page.$('[title="Excel"]') || await page.$('.btn_excel');
-    if (excelBtn) {
-      await excelBtn.click();
-    } else {
-      // 텍스트로 찾기
-      await page.click('text=Excel');
     }
 
-    const download = await downloadPromise;
-    const suggestedName = download.suggestedFilename();
-    const savePath = path.join(downloadDir, suggestedName || `seat_${target.productCode}_${Date.now()}.xlsx`);
-    await download.saveAs(savePath);
-    console.log(`   ✅ 다운로드 완료: ${savePath}\n`);
+    // 8. 텔레그램으로 3개 파일 전송
+    for (const file of downloadedFiles) {
+      const caption = `🎫 <b>${file.name}</b>\n${regionName} | ${dateStr}`;
+      await sendTelegramFile(file.path, caption);
+    }
 
-    // 8. 텔레그램으로 전송
-    const venueName = target.venue || target.productName;
-    const caption = `🎫 <b>미판매좌석 (잔여석)</b>\n${venueName}\n공연일: ${target.startDate}`;
-    await sendTelegramFile(savePath, caption);
-
-    return savePath;
+    console.log(`✅ 총 ${downloadedFiles.length}개 파일 전송 완료`);
+    return downloadedFiles.map(f => f.path);
 
   } catch (error) {
     console.error('❌ 오류:', error.message);

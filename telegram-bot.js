@@ -2266,14 +2266,14 @@ async function checkForNewOrders() {
 // 새 공연 추가 시 여기만 수정하면 됨
 const STORE_URL = 'https://smartstore.naver.com/melon_symphony_orchestra';
 const PERFORMANCES = {
-  '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리', link: '' },
-  '대구_디즈니': { date: '3/7(토)', name: '대구 디즈니+지브리', link: '' },
-  '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '' },
-  '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '' },
-  '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '' },
-  '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬', link: '' },
-  '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬', link: '' },
-  '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '' },
+  '대전_디즈니': { date: '3/1(일)', name: '대전 디즈니+지브리', link: '', tadminCode: '26000118' },
+  '대구_디즈니': { date: '3/7(토)', name: '대구 디즈니+지브리', link: '', tadminCode: '26000121' },
+  '울산_디즈니': { date: '3/14(토)', name: '울산 디즈니+지브리', link: '', tadminCode: '26000680' },
+  '창원_디즈니': { date: '3/21(토)', name: '창원 디즈니+지브리', link: '', tadminCode: '26000642' },
+  '광주_지브리': { date: '3/28(토)', name: '광주 지브리&뮤지컬', link: '', tadminCode: '26000634' },
+  '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬', link: '', tadminCode: '26000629' },
+  '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬', link: '', tadminCode: '26001746' },
+  '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '', tadminCode: '26001872' },
 };
 
 // ============================================================
@@ -3796,6 +3796,51 @@ async function handleMessage(msg) {
   }
 
   // 좌석배정: "좌석배정1", "좌석배정 2"
+  // 좌석현황 엑셀 다운로드: "좌석현황1" → TADMIN에서 해당 공연 잔여석/판매석/보류석 엑셀 다운로드
+  if (text.match(/^좌석현황\s*(\d+)$/)) {
+    const num = parseInt(text.match(/^좌석현황\s*(\d+)$/)[1]);
+    if (finalSummaryKeys.length === 0) {
+      await sendMessage('⚠️ 먼저 "최종결산"을 입력해서 공연 목록을 불러오세요.');
+      return;
+    }
+    const perfIndex = num - 1;
+    if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) {
+      await sendMessage(`❌ 1~${finalSummaryKeys.length} 사이로 입력해주세요.`);
+      return;
+    }
+    const key = finalSummaryKeys[perfIndex];
+    const perf = finalSummaryData[key];
+    // PERFORMANCES에서 tadminCode 찾기
+    const perfConfig = PERFORMANCES[key];
+    if (!perfConfig || !perfConfig.tadminCode) {
+      await sendMessage(`❌ ${perf.title}의 TADMIN 상품코드가 등록되지 않았습니다.`);
+      return;
+    }
+    await sendMessage(`🎫 <b>${perf.title}</b> 좌석현황 다운로드 중...\n(TADMIN 접속 → 잔여석/판매석/보류석 3종)`);
+    try {
+      const child = spawn('node', ['seat-download.js', perfConfig.tadminCode], {
+        cwd: CONFIG.baseDir,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          TELEGRAM_CHAT_ID: chatId,
+        },
+      });
+      child.stdout.on('data', (d) => process.stdout.write(d));
+      child.stderr.on('data', (d) => process.stderr.write(d));
+      child.on('close', (code) => {
+        if (code === 0) {
+          console.log(`✅ 좌석현황 다운로드 완료 (${perf.title})`);
+        } else {
+          console.error(`❌ 좌석현황 다운로드 실패 (code=${code})`);
+        }
+      });
+    } catch (err) {
+      await sendMessage(`❌ 좌석현황 다운로드 오류: ${err.message}`);
+    }
+    return;
+  }
+
   if (text.match(/^좌석배정\s*(\d+)$/)) {
     const num = parseInt(text.match(/^좌석배정\s*(\d+)$/)[1]);
     if (finalSummaryKeys.length === 0) {
@@ -3852,7 +3897,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n좌석 배정: <b>좌석배정1</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n좌석 배정: <b>좌석배정1</b>\n좌석현황 엑셀: <b>좌석현황1</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
@@ -4513,6 +4558,63 @@ function startNaverProductSync() {
 }
 
 // ============================================================
+// 좌석현황 자동 다운로드 스케줄러
+// ============================================================
+function startSeatDownloadScheduler() {
+  // PERFORMANCES에서 오늘 이후 공연의 마감 시간 계산 → setTimeout 예약
+  const now = new Date();
+  const year = now.getFullYear();
+
+  for (const [key, perf] of Object.entries(PERFORMANCES)) {
+    if (!perf.tadminCode) continue;
+
+    // date 형식: "3/14(토)" → 월/일 추출
+    const dateMatch = perf.date.match(/(\d+)\/(\d+)/);
+    if (!dateMatch) continue;
+    const month = parseInt(dateMatch[1]);
+    const day = parseInt(dateMatch[2]);
+
+    const perfDate = new Date(year, month - 1, day);
+    if (perfDate < now && (now - perfDate) > 2 * 24 * 60 * 60 * 1000) continue; // 이미 지난 공연 스킵
+
+    // 요일 확인 (0=일, 1=월, ..., 6=토)
+    const dayOfWeek = perfDate.getDay();
+
+    // 마감 시간 계산: 평일 → 전날 18:00, 일요일 → 금요일 18:00
+    // 다운로드: 마감 30분 전 = 17:30
+    let downloadDate;
+    if (dayOfWeek === 0) {
+      // 일요일 공연 → 금요일 17:30 (2일 전)
+      downloadDate = new Date(year, month - 1, day - 2, 17, 30, 0);
+    } else {
+      // 나머지 → 전날 17:30
+      downloadDate = new Date(year, month - 1, day - 1, 17, 30, 0);
+    }
+
+    const delay = downloadDate.getTime() - now.getTime();
+    if (delay <= 0) continue; // 이미 지난 시간
+
+    const delayHours = Math.round(delay / 1000 / 60 / 60 * 10) / 10;
+    console.log(`⏰ 좌석현황 예약: ${perf.name} → ${downloadDate.toLocaleString('ko-KR')} (${delayHours}시간 후)`);
+
+    setTimeout(() => {
+      console.log(`🎫 좌석현황 자동 다운로드 시작: ${perf.name} (${perf.tadminCode})`);
+      const child = spawn('node', ['seat-download.js', perf.tadminCode], {
+        cwd: CONFIG.baseDir,
+        windowsHide: true,
+        env: { ...process.env },
+      });
+      child.stdout.on('data', (d) => process.stdout.write(d));
+      child.stderr.on('data', (d) => process.stderr.write(d));
+      child.on('close', (code) => {
+        if (code === 0) console.log(`✅ 좌석현황 자동 다운로드 완료: ${perf.name}`);
+        else console.error(`❌ 좌석현황 자동 다운로드 실패: ${perf.name} (code=${code})`);
+      });
+    }, delay);
+  }
+}
+
+// ============================================================
 // 프로세스 종료 처리
 // ============================================================
 async function gracefulShutdown(signal) {
@@ -4550,3 +4652,4 @@ startPpurioKeepAlive();
 startSmsPoll();
 startNaverProductSync();
 startDailyReport();
+startSeatDownloadScheduler();
