@@ -108,6 +108,7 @@ let isSmartstoreRunning = false;
 let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
 let isEnsureBrowserRunning = false; // ensureBrowser 동시 호출 방지
 let lastSessionExpireNotice = 0;  // 세션 만료 알림 쿨다운
+let lastPendingReminder = 0;  // 승인 대기 리마인드 쿨다운
 
 function shouldNotifySessionExpire() {
   const now = Date.now();
@@ -4430,6 +4431,38 @@ async function startPolling() {
     console.log('⚠️ 시작 알림 전송 실패:', e.message);
   }
 
+  // 봇 시작 시 승인 대기 건 리마인드
+  try {
+    const pendingKeys = Object.keys(pendingOrders);
+    const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
+    if (pendingKeys.length > 0) {
+      let pendingMsg = `⏳ <b>승인 대기 (${pendingKeys.length}건)</b>\n승인/거절을 선택해주세요!\n`;
+      for (const key of pendingKeys) {
+        const po = pendingOrders[key];
+        const qtyStr = ` ${po.qty || 1}매`;
+        pendingMsg += `\n• ${po.buyerName}${qtyStr} - 승인&거절 선택 필요`;
+      }
+      // 버튼 포함해서 다시 보내기
+      for (const key of pendingKeys) {
+        const po = pendingOrders[key];
+        await requestApproval(po);
+      }
+    }
+    if (pendingDelivery.length > 0) {
+      let msg = `📬 <b>발송처리 대기 (${pendingDelivery.length}건)</b>\n문자발송 완료, 발송처리 필요!\n`;
+      for (const pd of pendingDelivery) {
+        const seatMatch = pd.productName?.match(/,\s*(\S+석)\s*$/);
+        const seat = seatMatch ? seatMatch[1] : '';
+        const qtyStr = ` ${pd.qty || 1}매`;
+        msg += `\n• ${pd.buyerName} - ${seat}${qtyStr}`;
+      }
+      msg += '\n\n✅ 발송처리 완료 후 <b>발송완료</b> 입력';
+      await sendMessage(msg);
+    }
+  } catch (e) {
+    console.log('⚠️ 대기 건 알림 실패:', e.message);
+  }
+
   console.log('🔄 폴링 루프 시작...');
 
   // 메인 루프
@@ -4519,6 +4552,30 @@ function startAutoSmartstore() {
         checkForNewOrders(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('주문확인 2분 타임아웃')), 120000)),
       ]);
+
+      // 승인 대기 건 리마인드 (10분마다)
+      const pendingKeys = Object.keys(pendingOrders);
+      const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
+      const now = Date.now();
+      if ((pendingKeys.length > 0 || pendingDelivery.length > 0) && now - lastPendingReminder > 10 * 60 * 1000) {
+        lastPendingReminder = now;
+        // 승인 대기 건: 버튼 포함해서 다시 보내기
+        for (const key of pendingKeys) {
+          await requestApproval(pendingOrders[key]);
+        }
+        // 발송처리 대기 건
+        if (pendingDelivery.length > 0) {
+          let msg = `📬 <b>발송처리 대기 (${pendingDelivery.length}건)</b>\n문자발송 완료, 발송처리 필요!\n`;
+          for (const pd of pendingDelivery) {
+            const seatMatch = pd.productName?.match(/,\s*(\S+석)\s*$/);
+            const seat = seatMatch ? seatMatch[1] : '';
+            const qtyStr = ` ${pd.qty || 1}매`;
+            msg += `\n• ${pd.buyerName} - ${seat}${qtyStr}`;
+          }
+          msg += '\n\n✅ 발송처리 완료 후 <b>발송완료</b> 입력';
+          await sendMessage(msg);
+        }
+      }
     } catch (err) {
       console.error('스마트스토어 오류:', err.message);
       isSmartstoreRunning = false;

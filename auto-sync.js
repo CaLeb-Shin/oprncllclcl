@@ -66,11 +66,20 @@ async function checkAndSync() {
     log('📦 npm install 중...');
     run('npm install');
 
-    // 봇 재시작: stop → 3초 대기 → start (프로세스 겹침 방지)
+    // 봇 재시작: stop → 좀비 정리 → start (프로세스 겹침 방지)
     log('🔄 봇 재시작 중...');
     const stopResult = run(`pm2 stop ${BOT_PROCESS_NAME}`);
     if (stopResult) {
       await sleep(3000); // 이전 프로세스 완전 종료 대기
+      // Windows: pm2 stop 후에도 남아있는 좀비 node 프로세스 강제 정리
+      if (process.platform === 'win32') {
+        const pid = run(`pm2 pid ${BOT_PROCESS_NAME}`);
+        if (pid && pid !== '0' && pid !== '') {
+          run(`taskkill /PID ${pid} /F /T 2>nul`);
+          log(`   🧹 좀비 프로세스 정리 (PID: ${pid})`);
+          await sleep(1000);
+        }
+      }
       run(`pm2 start ${BOT_PROCESS_NAME}`);
       log('✅ 봇 재시작 완료!');
     } else {
