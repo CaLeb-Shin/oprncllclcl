@@ -4401,14 +4401,14 @@ async function startPolling() {
   console.log('   📦 스마트스토어: 체크, 확인, check');
   console.log('');
 
-  // 이전 메시지 건너뛰기
+  // 이전 메시지 건너뛰기 (offset -1 → 마지막 메시지만 가져와서 그 이후부터 처리)
   console.log('📡 이전 메시지 확인 중...');
   try {
-    const old = await getUpdates(0, 0);
+    const old = await getUpdates(-1, 1);
     console.log('📡 getUpdates 응답:', old?.ok, '개수:', old?.result?.length);
     if (old.ok && old.result.length > 0) {
       lastUpdateId = old.result[old.result.length - 1].update_id;
-      console.log(`📭 이전 메시지 ${old.result.length}개 건너뜀 (lastId: ${lastUpdateId})`);
+      console.log(`📭 이전 메시지 건너뜀 (lastId: ${lastUpdateId})`);
     }
   } catch (e) {
     console.log('이전 메시지 확인 실패:', e.message);
