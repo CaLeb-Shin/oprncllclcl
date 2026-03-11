@@ -1,16 +1,15 @@
 /**
  * 자동 동기화 스크립트 (서버용)
- * 
- * 30초마다 GitHub에서 변경사항 확인 → 있으면 pull + 봇 재시작
- * 
+ *
+ * 2분마다 GitHub에서 변경사항 확인 → 있으면 pull + 봇 재시작
+ *
  * 사용법 (서버 Windows에서):
  *   node auto-sync.js
  *   또는
  *   pm2 start auto-sync.js --name "auto-sync"
  */
 
-const { execSync, exec } = require('child_process');
-const path = require('path');
+const { execSync } = require('child_process');
 
 const PROJECT_DIR = __dirname;
 const CHECK_INTERVAL = 2 * 60_000; // 2분마다 체크
@@ -29,16 +28,18 @@ function log(msg) {
   console.log(`[${now}] ${msg}`);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function checkAndSync() {
   try {
-    // 원격 최신 정보 가져오기
     const fetchResult = run('git fetch origin main');
     if (fetchResult === null) {
       log('⚠️ git fetch 실패 (인터넷 끊김?)');
       return;
     }
 
-    // 로컬과 원격 비교
     const local = run('git rev-parse HEAD');
     const remote = run('git rev-parse origin/main');
 
@@ -48,11 +49,9 @@ async function checkAndSync() {
     }
 
     if (local === remote) {
-      // 변경 없음 - 조용히 넘어감
-      return;
+      return; // 변경 없음
     }
 
-    // 변경 감지!
     log('🔄 코드 변경 감지! pull 중...');
 
     const pullResult = run('git pull origin main');
@@ -64,17 +63,17 @@ async function checkAndSync() {
     log('✅ 코드 업데이트 완료');
     log(pullResult);
 
-    // npm install (package.json 변경됐을 수 있으니)
     log('📦 npm install 중...');
     run('npm install');
 
-    // 봇 재시작 (pm2 사용)
+    // 봇 재시작: stop → 3초 대기 → start (프로세스 겹침 방지)
     log('🔄 봇 재시작 중...');
-    const restartResult = run(`pm2 restart ${BOT_PROCESS_NAME}`);
-    if (restartResult) {
+    const stopResult = run(`pm2 stop ${BOT_PROCESS_NAME}`);
+    if (stopResult) {
+      await sleep(3000); // 이전 프로세스 완전 종료 대기
+      run(`pm2 start ${BOT_PROCESS_NAME}`);
       log('✅ 봇 재시작 완료!');
     } else {
-      // pm2에 봇이 없으면 새로 시작
       log('⚠️ pm2에 봇 없음 → 새로 시작');
       run(`pm2 start telegram-bot.js --name "${BOT_PROCESS_NAME}"`);
     }
@@ -92,8 +91,6 @@ log(`   📁 프로젝트: ${PROJECT_DIR}`);
 log(`   ⏱️ 체크 간격: ${CHECK_INTERVAL / 1000}초`);
 log('');
 
-// 즉시 한번 체크
-checkAndSync();
-
-// 이후 30초마다 체크
+// 시작 시 즉시 체크 하지 않음 (seller-bot이 이미 실행 중이므로)
+// 첫 체크는 2분 뒤
 setInterval(checkAndSync, CHECK_INTERVAL);
