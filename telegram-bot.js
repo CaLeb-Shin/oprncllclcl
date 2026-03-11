@@ -1541,21 +1541,39 @@ async function getFinalSummaryList() {
     finalSummaryData[key].orders.push(order);
   }
 
-  // 하루 지난 공연까지만 표시 (오래된 공연 제외)
+  // 날짜 파싱 헬퍼: "3월 14일 (토) 오후 4시" 또는 "2026.03.14 16:00" → Date
+  const parsePerfDate = (dateStr) => {
+    if (!dateStr) return null;
+    const now = new Date();
+    const year = now.getFullYear();
+    // "3월 14일" 형식
+    const korMatch = dateStr.match(/(\d{1,2})월\s*(\d{1,2})일/);
+    if (korMatch) return new Date(year, parseInt(korMatch[1]) - 1, parseInt(korMatch[2]));
+    // "2026.03.14" 또는 "2026-03-14" 형식
+    const isoMatch = dateStr.replace(/[./]/g, '-').match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) return new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+    return null;
+  };
+
+  // 하루 지난 공연까지만 표시 + 가까운 공연순 정렬
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
   yesterday.setHours(0, 0, 0, 0);
 
-  finalSummaryKeys = Object.keys(finalSummaryData).filter(key => {
-    const perf = finalSummaryData[key];
-    if (!perf.date) return true; // 날짜 없으면 포함
-    // 날짜 파싱: "2026.03.14 16:00" 또는 "2026-03-14" 등
-    const dateStr = perf.date.replace(/[./]/g, '-').trim();
-    const match = dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-    if (!match) return true; // 파싱 실패하면 포함
-    const perfDate = new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
-    return perfDate >= yesterday;
-  });
+  finalSummaryKeys = Object.keys(finalSummaryData)
+    .filter(key => {
+      const perfDate = parsePerfDate(finalSummaryData[key].date);
+      if (!perfDate) return true;
+      return perfDate >= yesterday;
+    })
+    .sort((a, b) => {
+      const da = parsePerfDate(finalSummaryData[a].date);
+      const db = parsePerfDate(finalSummaryData[b].date);
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return da - db; // 가까운 날짜 먼저
+    });
 
   return finalSummaryKeys;
 }
