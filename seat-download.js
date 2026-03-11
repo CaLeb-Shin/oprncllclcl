@@ -2,24 +2,31 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// Windows headless shell 콘솔 창 방지
+// 브라우저 실행 옵션 (시스템 Chrome 우선 사용 — bot의 taskkill과 충돌 방지)
 function getBrowserLaunchOptions() {
   const opts = {
     headless: true,
     args: ['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'],
   };
   if (process.platform === 'win32') {
-    try {
-      const defaultPath = chromium.executablePath();
-      if (defaultPath.includes('headless_shell') || defaultPath.includes('chrome-headless-shell')) {
-        const fullChromePath = defaultPath
-          .replace(/chromium_headless_shell-(\d+)/, 'chromium-$1')
-          .replace(/chrome-headless-shell-win64[\\\/]chrome-headless-shell\.exe/i, 'chrome-win\\chrome.exe');
-        if (fs.existsSync(fullChromePath)) {
-          opts.executablePath = fullChromePath;
-        }
+    // 시스템 Chrome 사용 (bot이 chrome-headless-shell.exe를 taskkill하므로 충돌 방지)
+    const chromePaths = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+    for (const p of chromePaths) {
+      if (fs.existsSync(p)) {
+        opts.executablePath = p;
+        opts.channel = undefined; // executablePath 사용 시 channel 불필요
+        console.log(`   🌐 시스템 Chrome 사용: ${p}`);
+        break;
       }
-    } catch {}
+    }
+    // 시스템 Chrome이 없으면 channel로 시도
+    if (!opts.executablePath) {
+      opts.channel = 'chrome';
+    }
   }
   return opts;
 }
