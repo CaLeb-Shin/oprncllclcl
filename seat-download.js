@@ -225,167 +225,52 @@ async function downloadSeatExcel(targetGoodsCode) {
     // 4. 회차 돋보기 클릭 → 팝업에서 회차 선택
     console.log('4️⃣ 회차 검색 팝업 열기...');
 
-    // 디버그: 페이지 내 모든 버튼/검색 요소 출력
-    const allBtns = await page.evaluate(() => {
-      const results = [];
-      // 모든 버튼 및 검색 아이콘 수집
-      document.querySelectorAll('button, [id*="btnSearch"], [id*="lookup"], [class*="search"], img[src*="search"], a[onclick*="lookup"]').forEach(el => {
-        const rect = el.getBoundingClientRect();
-        results.push({
-          tag: el.tagName,
-          id: el.id || '',
-          class: el.className?.toString().slice(0, 50) || '',
-          text: el.textContent?.trim().slice(0, 30) || '',
-          onclick: el.getAttribute('onclick')?.slice(0, 80) || '',
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          w: Math.round(rect.width),
-          h: Math.round(rect.height),
-        });
-      });
-      return results;
-    });
-    console.log('   📋 페이지 내 버튼/검색 요소:');
-    allBtns.forEach(b => {
-      if (b.w > 0 && b.h > 0) { // visible만
-        console.log(`      ${b.tag} #${b.id} .${b.class} "${b.text}" onclick="${b.onclick}" (${b.x},${b.y} ${b.w}x${b.h})`);
-      }
-    });
-
-    // 회차 돋보기 찾기: "회차" 텍스트 근처의 검색 버튼
-    // TADMIN 패턴: lookupGoodsSales = 상품 관련, lookupPlay = 회차 관련
-    // 이전 실행에서 lookupGoodsSales 잘못 클릭됨 → 제외
-    let scheduleClicked = false;
-
-    // 방법 1: ID 패턴으로 찾기 (lookupPlay, lookupSchedule, lookupRound 등)
-    const schedulePatterns = ['lookupPlay', 'lookupSchedule', 'lookupRound', 'lookupPerf'];
-    for (const pattern of schedulePatterns) {
-      const btn = await page.$(`#btnSearch_${pattern}`);
-      if (btn) {
-        console.log(`   → #btnSearch_${pattern} 클릭`);
-        await btn.click();
-        scheduleClicked = true;
-        break;
-      }
-    }
-
-    // 방법 2: "회차" 텍스트 근처의 돋보기 이미지/버튼 클릭
-    if (!scheduleClicked) {
-      console.log('   🔍 "회차" 근처 돋보기 찾기...');
-      scheduleClicked = await page.evaluate(() => {
-        // "회차" 텍스트를 포함하는 요소 찾기
-        const allText = document.querySelectorAll('td, th, label, span');
-        for (const el of allText) {
-          if (el.textContent.trim() === '회차') {
-            // 같은 행(tr) 또는 근처 요소에서 검색 버튼 찾기
-            const parent = el.closest('tr') || el.parentElement;
-            if (parent) {
-              const btn = parent.querySelector('button, [id*="btnSearch"], img[src*="search"]');
-              if (btn) {
-                btn.click();
-                return true;
-              }
-            }
-          }
-        }
-        return false;
-      });
-      if (scheduleClicked) console.log('   → "회차" 근처 버튼 클릭 성공');
-    }
-
-    // 방법 3: 두 번째 검색 돋보기 (상품 돋보기 다음 것, lookupGoodsSales 제외)
-    if (!scheduleClicked) {
-      console.log('   🔍 fallback: 검색 버튼 순서로 찾기...');
-      const searchBtns = await page.$$('[id*="btnSearch_lookup"]');
-      for (const btn of searchBtns) {
-        const btnId = await btn.getAttribute('id');
-        if (btnId && btnId !== 'btnSearch_lookupGoods' && btnId !== 'btnSearch_lookupGoodsSales') {
-          console.log(`   → 클릭: #${btnId}`);
-          await btn.click();
-          scheduleClicked = true;
-          break;
-        }
-      }
-    }
-
-    if (!scheduleClicked) {
-      console.log('   ⚠️ 회차 검색 버튼을 찾지 못함');
-    }
-
+    // 회차 돋보기 = #btnSearch_lookupGoodsSales (상품과 같은 LookupGrid 재사용)
+    console.log('   → #btnSearch_lookupGoodsSales 클릭');
+    await page.click('#btnSearch_lookupGoodsSales');
     await page.waitForTimeout(2000);
-    await page.screenshot({ path: 'debug-schedule-popup.png' });
 
-    // 회차 팝업 디버그
-    const scheduleInfo = await page.evaluate(() => {
-      const providers = [];
-      for (const key of Object.keys(window)) {
-        if (key.endsWith('_Provider')) {
-          const p = window[key];
-          const count = (p && typeof p.getRowCount === 'function') ? p.getRowCount() : '?';
-          providers.push(`${key}(${count})`);
-        }
-      }
-      return { providers };
-    });
-    console.log(`   📋 Providers: ${scheduleInfo.providers.join(', ')}`);
-
-    // 회차 팝업 데이터 확인 + 첫 번째 행 더블클릭
+    // 회차 팝업도 LookupGrid_Provider를 재사용함
     const scheduleData = await page.evaluate(() => {
-      // LookupGrid_Provider가 아닌 다른 Provider에서 데이터 찾기
-      for (const key of Object.keys(window)) {
-        if (key.endsWith('_Provider') && key !== 'LookupGrid_Provider') {
-          const p = window[key];
-          if (p && typeof p.getRowCount === 'function' && p.getRowCount() > 0) {
-            const rows = [];
-            for (let i = 0; i < p.getRowCount(); i++) {
-              rows.push(p.getJsonRow(i));
-            }
-            return { providerKey: key, rows };
-          }
-        }
+      const p = window.LookupGrid_Provider;
+      if (!p || typeof p.getRowCount !== 'function' || p.getRowCount() === 0) {
+        return { error: 'No schedule data' };
       }
-      return { error: 'No schedule provider found' };
+      const rows = [];
+      for (let i = 0; i < p.getRowCount(); i++) {
+        rows.push(p.getJsonRow(i));
+      }
+      return { rows };
     });
-    console.log(`   📋 회차 데이터:`, JSON.stringify(scheduleData, null, 2));
+    console.log(`   📋 회차 데이터:`, JSON.stringify(scheduleData));
 
     if (scheduleData.rows && scheduleData.rows.length > 0) {
-      // 회차 그리드 canvas 찾기
-      const allCanvases = await page.$$('canvas');
-      let scheduleCanvas = null;
-
-      for (const c of allCanvases) {
-        const parentId = await c.evaluate(el => {
-          let p = el.parentElement;
-          while (p) {
-            if (p.id && p.id.includes('lookup') && !p.id.includes('lookupGoods')) return p.id;
-            p = p.parentElement;
-          }
-          return '';
-        });
-        if (parentId) {
-          scheduleCanvas = c;
-          console.log(`   → 회차 canvas 발견: #${parentId}`);
-          break;
-        }
-      }
-
-      // 못 찾으면 가장 최근에 나타난 (마지막) canvas 사용
-      if (!scheduleCanvas && allCanvases.length > 1) {
-        scheduleCanvas = allCanvases[allCanvases.length - 1];
-        console.log('   → 마지막 canvas 사용 (fallback)');
-      }
-
+      // LookupGrid_lookupGoodsSales canvas에서 첫 행 더블클릭
+      const scheduleCanvas = await page.$('#LookupGrid_lookupGoodsSales canvas');
       if (scheduleCanvas) {
         const sBox = await scheduleCanvas.boundingBox();
         const sClickX = sBox.x + 100;
-        const sClickY = sBox.y + 25 + 10;
+        const sClickY = sBox.y + 25 + 10; // 헤더(25) + 행 중앙
         console.log(`   📍 회차 행 더블클릭 (x:${Math.round(sClickX)}, y:${Math.round(sClickY)})`);
         await page.mouse.dblclick(sClickX, sClickY);
         await page.waitForTimeout(1500);
         console.log('   ✅ 회차 선택 완료\n');
+      } else {
+        // canvas 못 찾으면 모든 canvas 중 마지막 것 사용
+        const allCanvases = await page.$$('canvas');
+        if (allCanvases.length > 0) {
+          const lastCanvas = allCanvases[allCanvases.length - 1];
+          const sBox = await lastCanvas.boundingBox();
+          const sClickX = sBox.x + 100;
+          const sClickY = sBox.y + 25 + 10;
+          console.log(`   📍 fallback canvas 더블클릭 (x:${Math.round(sClickX)}, y:${Math.round(sClickY)})`);
+          await page.mouse.dblclick(sClickX, sClickY);
+          await page.waitForTimeout(1500);
+          console.log('   ✅ 회차 선택 완료\n');
+        }
       }
     } else {
-      console.log('   ⚠️ 회차 데이터 없음 - debug-schedule-popup.png 확인');
+      console.log('   ⚠️ 회차 데이터 없음');
     }
 
     // 5. 상태 드롭다운 → 잔여석 선택
