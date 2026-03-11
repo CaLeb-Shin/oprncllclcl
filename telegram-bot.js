@@ -3418,41 +3418,14 @@ async function processDelivery(orderId) {
 }
 
 // ============================================================
-// 주문 처리 (멜론티켓 등록 + 문자 발송)
+// 주문 처리 (문자 발송)
 // ============================================================
 async function processOrder(order) {
   try {
     await ensureBrowser();
 
-    // 0) 멜론티켓 시스템에 주문 등록 (eventId 매핑이 있을 때만)
-    let ticketResult = null;
-    const info = parseProductInfo(order.productName);
-    const eventId = CONFIG.firebase.eventMap[info.perfKey];
-    if (eventId) {
-      try {
-        console.log(`🎫 멜론티켓 CF 호출: ${info.perfKey} → ${eventId}`);
-        ticketResult = await createMelonTicket(order, eventId);
-        const urls = ticketResult.tickets.map(t => t.url).join('\n');
-        await sendMessage(
-          `🎫 <b>모바일 티켓 생성 완료!</b>\n\n` +
-          `주문: ${order.orderId}\n` +
-          `구매자: ${order.buyerName}\n` +
-          `등급: ${info.seatGrade} ${order.qty}매\n\n` +
-          `📱 티켓 URL:\n${urls}`
-        );
-      } catch (cfErr) {
-        console.log('   ⚠️ 멜론티켓 CF 오류:', cfErr.message);
-        await sendMessage(`⚠️ <b>모바일 티켓 생성 실패</b>\n\n${cfErr.message}\n\n문자 발송은 계속 진행합니다.`);
-      }
-    } else {
-      console.log(`   ℹ️ eventId 매핑 없음 (${info.perfKey}) — 멜론티켓 등록 건너뜀`);
-    }
-
-    // 1) 문자 발송 (ppurioPage 없어도 sendSMS 내부에서 자동 재로그인 시도)
-    // ticketResult가 있으면 URL을 order에 첨부해서 SMS에 포함
-    if (ticketResult && ticketResult.tickets) {
-      order._ticketUrls = ticketResult.tickets.map(t => t.url);
-    }
+    // 모바일 티켓 발권은 멜론티켓 봇(/issue)에서 별도 처리
+    // 여기서는 뿌리오 SMS 발송만 담당
 
     let smsSent = false;
     try {
