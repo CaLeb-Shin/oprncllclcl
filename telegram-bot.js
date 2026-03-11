@@ -102,6 +102,7 @@ const CONFIG = {
 // 상태
 // ============================================================
 let lastUpdateId = 0;
+const recentMessageIds = new Set(); // 중복 메시지 방지
 let isSalesRunning = false;
 let isSmartstoreRunning = false;
 let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
@@ -4454,6 +4455,19 @@ async function startPolling() {
 
         for (const update of res.result) {
           lastUpdateId = update.update_id;
+
+          // 중복 update 방지 (PM2 재시작 등으로 같은 update 재처리 방지)
+          if (recentMessageIds.has(update.update_id)) {
+            console.log(`   ⏭️ 중복 update 스킵: ${update.update_id}`);
+            continue;
+          }
+          recentMessageIds.add(update.update_id);
+          // 메모리 관리: 최근 200개만 유지
+          if (recentMessageIds.size > 200) {
+            const oldest = recentMessageIds.values().next().value;
+            recentMessageIds.delete(oldest);
+          }
+
           if (update.callback_query) {
             await handleCallbackQuery(update.callback_query);
           }
