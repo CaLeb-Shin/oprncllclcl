@@ -13,8 +13,8 @@ const { execSync, exec } = require('child_process');
 const path = require('path');
 
 const PROJECT_DIR = __dirname;
-const CHECK_INTERVAL = 5 * 60_000; // 5분마다 체크
-const BOT_PROCESS_NAME = 'ticket-bot';
+const CHECK_INTERVAL = 2 * 60_000; // 2분마다 체크
+const BOT_PROCESS_NAME = 'seller-bot';
 
 function run(cmd) {
   try {
