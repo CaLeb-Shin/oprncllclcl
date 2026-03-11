@@ -4639,7 +4639,7 @@ function startSeatDownloadScheduler() {
     }
 
     const delay = downloadDate.getTime() - now.getTime();
-    if (delay <= 0) continue; // 이미 지난 시간
+    if (delay <= 60 * 1000) continue; // 이미 지난 시간 또는 1분 이내면 스킵
 
     const delayHours = Math.round(delay / 1000 / 60 / 60 * 10) / 10;
     console.log(`⏰ 좌석현황 예약: ${perf.name} → ${downloadDate.toLocaleString('ko-KR')} (${delayHours}시간 후)`);
