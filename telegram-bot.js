@@ -4855,6 +4855,14 @@ function startSeatDownloadScheduler() {
     const delay = downloadDate.getTime() - now.getTime();
     if (delay <= 60 * 1000) continue; // 이미 지난 시간 또는 1분 이내면 스킵
 
+    // setTimeout 최대값 = 2^31-1 ms (약 24.8일). 초과하면 스킵 (다음 재시작 때 다시 체크)
+    const MAX_TIMEOUT = 2147483647;
+    if (delay > MAX_TIMEOUT) {
+      const delayDays = Math.round(delay / 1000 / 60 / 60 / 24);
+      console.log(`⏰ 좌석현황 예약 대기: ${perf.name} → ${downloadDate.toLocaleString('ko-KR')} (${delayDays}일 후, 너무 먼 미래 → 다음 재시작 시 재확인)`);
+      continue;
+    }
+
     const delayHours = Math.round(delay / 1000 / 60 / 60 * 10) / 10;
     console.log(`⏰ 좌석현황 예약: ${perf.name} → ${downloadDate.toLocaleString('ko-KR')} (${delayHours}시간 후)`);
 
