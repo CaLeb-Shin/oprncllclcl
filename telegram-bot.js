@@ -4448,7 +4448,6 @@ async function startPolling() {
   // 봇 시작 시 승인 대기 건 리마인드
   try {
     const pendingKeys = Object.keys(pendingOrders);
-    const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
     if (pendingKeys.length > 0) {
       let pendingMsg = `⏳ <b>승인 대기 (${pendingKeys.length}건)</b>\n승인/거절을 선택해주세요!\n`;
       for (const key of pendingKeys) {
@@ -4462,17 +4461,7 @@ async function startPolling() {
         await requestApproval(po);
       }
     }
-    if (pendingDelivery.length > 0) {
-      let msg = `📬 <b>발송처리 대기 (${pendingDelivery.length}건)</b>\n문자발송 완료, 발송처리 필요!\n`;
-      for (const pd of pendingDelivery) {
-        const seatMatch = pd.productName?.match(/,\s*(\S+석)\s*$/);
-        const seat = seatMatch ? seatMatch[1] : '';
-        const qtyStr = ` ${pd.qty || 1}매`;
-        msg += `\n• ${pd.buyerName} - ${seat}${qtyStr}`;
-      }
-      msg += '\n\n✅ 발송처리 완료 후 <b>발송완료</b> 입력';
-      await sendMessage(msg);
-    }
+    // 발송처리 대기는 수동 조회만 (자동 알림 제거)
   } catch (e) {
     console.log('⚠️ 대기 건 알림 실패:', e.message);
   }
@@ -4569,25 +4558,11 @@ function startAutoSmartstore() {
 
       // 승인 대기 건 리마인드 (10분마다)
       const pendingKeys = Object.keys(pendingOrders);
-      const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
       const now = Date.now();
-      if ((pendingKeys.length > 0 || pendingDelivery.length > 0) && now - lastPendingReminder > 10 * 60 * 1000) {
+      if (pendingKeys.length > 0 && now - lastPendingReminder > 10 * 60 * 1000) {
         lastPendingReminder = now;
-        // 승인 대기 건: 버튼 포함해서 다시 보내기
         for (const key of pendingKeys) {
           await requestApproval(pendingOrders[key]);
-        }
-        // 발송처리 대기 건
-        if (pendingDelivery.length > 0) {
-          let msg = `📬 <b>발송처리 대기 (${pendingDelivery.length}건)</b>\n문자발송 완료, 발송처리 필요!\n`;
-          for (const pd of pendingDelivery) {
-            const seatMatch = pd.productName?.match(/,\s*(\S+석)\s*$/);
-            const seat = seatMatch ? seatMatch[1] : '';
-            const qtyStr = ` ${pd.qty || 1}매`;
-            msg += `\n• ${pd.buyerName} - ${seat}${qtyStr}`;
-          }
-          msg += '\n\n✅ 발송처리 완료 후 <b>발송완료</b> 입력';
-          await sendMessage(msg);
         }
       }
     } catch (err) {
