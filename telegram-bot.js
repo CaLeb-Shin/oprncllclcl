@@ -261,7 +261,7 @@ function callFirebaseCF(functionName, bodyData, timeoutMs = 30_000) {
  * 멜론티켓 시스템에 네이버 주문 등록 + MobileTicket 생성
  * @returns { success, orderId, tickets: [{ ticketId, accessToken, entryNumber, url }] }
  */
-async function createMelonTicket(order, eventId) {
+async function createMelonTicket(order, eventId, options = {}) {
   const info = parseProductInfo(order.productName);
   return callFirebaseCF('createNaverOrderHttp', {
     eventId,
@@ -273,6 +273,7 @@ async function createMelonTicket(order, eventId) {
     quantity: order.qty || 1,
     orderDate: new Date().toISOString(),
     memo: `봇 자동 등록`,
+    skipSms: options.skipSms || false,
   });
 }
 
@@ -3489,20 +3490,22 @@ async function processOrder(order, options = {}) {
   try {
     await ensureBrowser();
 
-    // 🎫 문자+발권 모드: 모바일 티켓 생성
+    // 🎫 문자+발권 모드: 모바일 티켓 생성 (SMS는 보내지 않고 텔레그램에 링크만)
     if (options.withTicket) {
       try {
         const eventId = await resolveEventId(order.productName);
         if (eventId) {
           console.log(`🎫 멜론티켓 발권: eventId=${eventId}`);
-          const ticketResult = await createMelonTicket(order, eventId);
+          const ticketResult = await createMelonTicket(order, eventId, { skipSms: true });
           const urls = ticketResult.tickets.map(t => t.url);
           order._ticketUrls = urls;
+          // 그룹티켓 링크 (첫 번째 티켓 = 그룹 허브)
+          const groupUrl = urls[0];
           await sendMessage(
-            `🎫 <b>모바일 티켓 생성 완료!</b>\n\n` +
-            `주문: ${order.orderId}\n` +
-            `구매자: ${order.buyerName} (${order.qty}매)\n\n` +
-            `📱 티켓 URL:\n${urls.map((u, i) => `${i + 1}️⃣ ${u}`).join('\n')}`
+            `🎫 <b>모바일 티켓 발권 완료!</b>\n\n` +
+            `👤 ${order.buyerName} (${order.qty || 1}매)\n` +
+            `📋 주문: ${order.orderId}\n\n` +
+            `🔗 그룹티켓 링크:\n${groupUrl}`
           );
         } else {
           await sendMessage(`⚠️ 매칭되는 이벤트 없음 — 모바일 발권 건너뜀. 문자만 발송합니다.`);
