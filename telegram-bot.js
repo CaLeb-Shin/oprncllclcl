@@ -4551,17 +4551,19 @@ function startAutoSmartstore() {
     console.log('\n⏰ 3분 스마트스토어 자동 확인...');
     if (wasDisconnected) { console.log('   인터넷 끊김 → 스킵'); return; }
     try {
-      await Promise.race([
+      const newOrders = await Promise.race([
         checkForNewOrders(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('주문확인 2분 타임아웃')), 120000)),
       ]);
 
-      // 승인 대기 건 리마인드 (10분마다)
+      // 승인 대기 건 리마인드 (10분마다, 방금 추가된 주문 제외)
       const pendingKeys = Object.keys(pendingOrders);
+      const newOrderIds = new Set((newOrders || []).map(o => o.orderId));
+      const reminderKeys = pendingKeys.filter(k => !newOrderIds.has(k));
       const now = Date.now();
-      if (pendingKeys.length > 0 && now - lastPendingReminder > 10 * 60 * 1000) {
+      if (reminderKeys.length > 0 && now - lastPendingReminder > 10 * 60 * 1000) {
         lastPendingReminder = now;
-        for (const key of pendingKeys) {
+        for (const key of reminderKeys) {
           await requestApproval(pendingOrders[key]);
         }
       }
