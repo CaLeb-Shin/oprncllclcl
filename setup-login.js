@@ -333,8 +333,17 @@ async function main() {
 
   console.log('');
   console.log('═══════════════════════════════════════════════════════');
-  console.log('✅ 설정 완료! 봇 재시작: botrestart');
+  console.log('✅ 설정 완료! 봇 재시작 중...');
   console.log('═══════════════════════════════════════════════════════');
+
+  const { execSync } = require('child_process');
+  try {
+    execSync('pm2 stop seller-bot', { stdio: 'inherit' });
+    execSync('pm2 start seller-bot', { stdio: 'inherit' });
+    console.log('🚀 봇 재시작 완료!');
+  } catch (e) {
+    console.log('⚠️ 봇 재시작 실패 (수동으로 재시작 필요):', e.message);
+  }
 }
 
 main();
