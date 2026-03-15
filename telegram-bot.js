@@ -3419,6 +3419,45 @@ async function sendSMS(order, _isRetry = false) {
     await ppurioPage.waitForTimeout(500);
     console.log(`      이름: ${buyerName}, 연락처: ${lastFour}, 좌석: ${seatType} ${qty}매`);
     if (order._ticketUrls) console.log(`      티켓URL: ${order._ticketUrls[0]}`);
+
+    // URL 포함 등으로 내용이 길면 자동으로 LMS(장문) 전환
+    const contentBytes = Buffer.byteLength(content, 'euc-kr');
+    if (contentBytes > 90) {
+      console.log(`      📏 메시지 ${contentBytes}바이트 → LMS 전환 시도`);
+      try {
+        // 장문(LMS) 라디오/탭 클릭 시도
+        const switched = await ppurioPage.evaluate(() => {
+          // 방법1: LMS 라디오 버튼
+          const lmsRadio = document.querySelector('input[value="LMS"], input[name="msgType"][value="4"]');
+          if (lmsRadio) { lmsRadio.click(); return 'radio'; }
+          // 방법2: LMS 탭/버튼
+          const els = document.querySelectorAll('a, button, span, label');
+          for (const el of els) {
+            const t = el.innerText?.trim();
+            if (t === 'LMS' || t === '장문') { el.click(); return 'tab'; }
+          }
+          return null;
+        });
+        if (switched) {
+          console.log(`      ✅ LMS 전환 완료 (${switched})`);
+          await ppurioPage.waitForTimeout(1000);
+          // LMS 전환 후 팝업이 뜰 수 있음
+          try { await ppurioPage.click('.jconfirm button', { timeout: 2000 }); } catch {}
+          // LMS 전환 후 내용 다시 입력 (전환 시 내용이 초기화될 수 있음)
+          const currentContent = await leftTextarea.inputValue().catch(() => '');
+          if (!currentContent || currentContent.length < content.length / 2) {
+            await leftTextarea.click();
+            await leftTextarea.fill(content);
+            await ppurioPage.waitForTimeout(500);
+            console.log(`      📝 LMS 전환 후 내용 재입력`);
+          }
+        } else {
+          console.log(`      ℹ️ LMS 전환 버튼 못 찾음 (이미 장문일 수 있음)`);
+        }
+      } catch (e) {
+        console.log(`      ⚠️ LMS 전환 오류 (무시):`, e.message);
+      }
+    }
   }
 
   // 3. 오른쪽 "직접입력" 영역에 수신번호 입력 (x > 800인 textarea.user_message)
@@ -3467,38 +3506,107 @@ async function sendSMS(order, _isRetry = false) {
   await ppurioPage.click('#btn_sendRequest');
   await ppurioPage.waitForTimeout(2000);
 
-  // 6. "발송하시겠습니까?" 팝업 → 파란 확인 버튼 클릭
+  // 6. 발송 후 팝업 처리 (장문전환, 발송확인, 글자수초과 등 다양한 팝업 대응)
   console.log('   6️⃣ 발송 확인...');
   let confirmClicked = false;
-  try {
-    await ppurioPage.click('button.btn_b.bg_blue:has-text("확인")', { timeout: 5000 });
-    confirmClicked = true;
-    await ppurioPage.waitForTimeout(2000);
-  } catch {
-    console.log('   ⚠️ 확인 버튼 못 찾음');
+  const maxPopupAttempts = 3;
+
+  for (let attempt = 0; attempt < maxPopupAttempts && !confirmClicked; attempt++) {
+    // 현재 팝업 내용 확인
+    const popupInfo = await ppurioPage.evaluate(() => {
+      const popup = document.querySelector('.jconfirm-box, .modal-content, [role="dialog"]');
+      if (!popup) return null;
+      const text = popup.innerText || '';
+      const buttons = [...popup.querySelectorAll('button')].map(b => ({
+        text: b.innerText?.trim(),
+        classes: b.className,
+      }));
+      return { text: text.substring(0, 300), buttons };
+    }).catch(() => null);
+
+    if (popupInfo) {
+      console.log(`      팝업 감지 (시도 ${attempt + 1}): ${popupInfo.text.substring(0, 100)}`);
+      console.log(`      버튼들: ${popupInfo.buttons.map(b => b.text).join(', ')}`);
+
+      // 장문전환/글자수 초과 팝업 → 확인 클릭 후 다시 발송
+      if (popupInfo.text.includes('장문') || popupInfo.text.includes('초과') || popupInfo.text.includes('LMS') || popupInfo.text.includes('전환')) {
+        console.log('      📏 장문 전환 팝업 → 확인 클릭');
+        try {
+          await ppurioPage.click('.jconfirm button:has-text("확인")', { timeout: 3000 }).catch(() =>
+            ppurioPage.click('.jconfirm button', { timeout: 3000 })
+          );
+          await ppurioPage.waitForTimeout(1500);
+          // 장문 전환 후 다시 발송하기 클릭 필요할 수 있음
+          if (attempt === 0) {
+            await ppurioPage.click('#btn_sendRequest').catch(() => {});
+            await ppurioPage.waitForTimeout(2000);
+          }
+          continue; // 다음 팝업 확인
+        } catch {}
+      }
+
+      // "발송하시겠습니까?" 확인 팝업 → 파란 확인 클릭
+      if (popupInfo.text.includes('발송') || popupInfo.text.includes('전송')) {
+        try {
+          // 방법1: 파란 확인 버튼
+          await ppurioPage.click('button.btn_b.bg_blue:has-text("확인")', { timeout: 3000 });
+          confirmClicked = true;
+        } catch {
+          try {
+            // 방법2: jconfirm 확인 버튼
+            await ppurioPage.click('.jconfirm button:has-text("확인")', { timeout: 3000 });
+            confirmClicked = true;
+          } catch {
+            try {
+              // 방법3: 아무 확인/전송 버튼
+              await ppurioPage.click('button:has-text("확인")', { timeout: 3000 });
+              confirmClicked = true;
+            } catch {}
+          }
+        }
+        if (confirmClicked) {
+          await ppurioPage.waitForTimeout(2000);
+        }
+        continue;
+      }
+
+      // 에러 팝업 (잔액 부족, 발송 실패 등)
+      if (popupInfo.text.includes('실패') || popupInfo.text.includes('부족') || popupInfo.text.includes('오류')) {
+        console.log(`   ❌ 에러 팝업: ${popupInfo.text.substring(0, 150)}`);
+        try { await ppurioPage.click('.jconfirm button', { timeout: 2000 }); } catch {}
+        return false;
+      }
+
+      // 알 수 없는 팝업 → 확인 클릭 시도
+      try {
+        await ppurioPage.click('.jconfirm button:has-text("확인")', { timeout: 2000 }).catch(() =>
+          ppurioPage.click('.jconfirm button', { timeout: 2000 })
+        );
+        await ppurioPage.waitForTimeout(1500);
+      } catch {}
+    } else if (attempt === 0) {
+      // 팝업 없음 → 기존 방식으로 시도
+      try {
+        await ppurioPage.click('button.btn_b.bg_blue:has-text("확인")', { timeout: 5000 });
+        confirmClicked = true;
+        await ppurioPage.waitForTimeout(2000);
+      } catch {
+        console.log('   ⚠️ 확인 버튼/팝업 못 찾음');
+      }
+    }
   }
 
   if (!confirmClicked) {
     console.log('   ❌ 발송 확인 실패 — 문자가 전송되지 않았을 수 있음');
+    // 스크린샷 저장 (디버그용)
+    try {
+      await ppurioPage.screenshot({ path: path.join(__dirname, 'debug-sms-fail.png') });
+      console.log('   📸 실패 스크린샷: debug-sms-fail.png');
+    } catch {}
     return false;
   }
 
-  // 발송 결과 확인 (성공 시 "발송되었습니다" 등의 메시지가 표시됨)
-  try {
-    const resultText = await ppurioPage.evaluate(() => document.body.innerText).catch(() => '');
-    if (resultText.includes('발송') && (resultText.includes('완료') || resultText.includes('되었습니다') || resultText.includes('접수'))) {
-      console.log('   ✅ 문자 발송 완료!');
-      return true;
-    }
-    // 에러 메시지 확인
-    if (resultText.includes('실패') || resultText.includes('오류') || resultText.includes('부족')) {
-      console.log('   ❌ 발송 실패 감지:', resultText.substring(0, 200));
-      return false;
-    }
-  } catch {}
-
-  // 확인 버튼은 클릭했으나 결과를 명확히 판별 못한 경우 → 성공으로 간주
-  console.log('   ✅ 문자 발송 완료! (확인 버튼 클릭됨)');
+  console.log('   ✅ 문자 발송 완료!');
   return true;
 }
 
@@ -4283,6 +4391,82 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 미발송 확인 (뿌리오 발송결과 vs 처리된 주문 대조)
+  if (['미발송확인', '미발송', '발송확인'].includes(text)) {
+    await sendMessage('🔍 뿌리오 발송결과와 처리 완료 주문을 대조 중...\n(모든 페이지 확인하느라 시간이 걸릴 수 있어요)');
+    try {
+      // 1. 뿌리오 발송결과 스크래핑 (모든 페이지)
+      const ppurioResults = await scrapePpurioResults();
+
+      // 뿌리오에서 발송된 사람 목록 (이름 기준)
+      const sentNames = new Set();
+      const sentDetails = {}; // name → { date, title, qty }
+      for (const perf of ppurioResults) {
+        for (const order of perf.orders) {
+          const key = `${order.name}_${perf.title}`;
+          sentNames.add(key);
+          sentDetails[key] = { date: perf.date, title: perf.title, qty: order.qty };
+        }
+      }
+
+      // 2. pending-delivery.json 확인 (SMS 완료 처리된 주문들)
+      const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
+
+      // 3. 대조: pending-delivery에 있지만 뿌리오에 없는 건 찾기
+      const missing = [];
+      for (const pd of pendingDelivery) {
+        const name = pd.buyerName?.replace(/\(.+\)/, '') || ''; // 주문자(수취인) → 주문자만
+        const region = extractRegion(pd.productName || '');
+
+        // 뿌리오 제목에서 매칭 시도
+        let found = false;
+        for (const perf of ppurioResults) {
+          if (region && perf.title.includes(region)) {
+            for (const order of perf.orders) {
+              if (order.name === name || order.name === pd.buyerName) {
+                found = true;
+                break;
+              }
+            }
+          }
+          if (found) break;
+        }
+
+        if (!found) {
+          missing.push({
+            buyerName: pd.buyerName,
+            productName: pd.productName,
+            qty: pd.qty,
+            smsAt: pd.smsAt,
+            hasTicket: !!(pd.ticketUrls && pd.ticketUrls.length > 0),
+            orderId: pd.orderId,
+          });
+        }
+      }
+
+      // 4. 결과 메시지
+      if (missing.length === 0) {
+        await sendMessage(`✅ <b>미발송 건 없음!</b>\n\n처리 완료된 ${pendingDelivery.length}건 모두 뿌리오 발송결과에서 확인됨`);
+      } else {
+        let msg = `⚠️ <b>미발송 의심 ${missing.length}건</b>\n\n`;
+        msg += `처리완료 ${pendingDelivery.length}건 중 뿌리오 발송결과에서 못 찾은 건:\n\n`;
+        for (const m of missing) {
+          const ticket = m.hasTicket ? ' 🎫' : '';
+          const date = m.smsAt ? new Date(m.smsAt).toLocaleDateString('ko-KR') : '';
+          msg += `• <b>${m.buyerName}</b> ${m.qty || 1}매${ticket}\n`;
+          msg += `  ${m.productName || ''}\n`;
+          msg += `  처리일: ${date} | 주문: ${m.orderId || ''}\n\n`;
+        }
+        msg += `\n🎫 = 그룹티켓 발권 건\n`;
+        msg += `이 주문들의 문자를 수동으로 재발송해주세요.`;
+        await sendMessage(msg);
+      }
+    } catch (err) {
+      await sendMessage(`❌ 미발송 확인 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 뿌리오 재로그인 (자동)
   if (['ppuriologin', '뿌리오로그인', '뿌리오재로그인'].includes(text)) {
     await sendMessage('🔐 뿌리오 자동 재로그인 시도 중...');
@@ -4324,6 +4508,7 @@ async function handleMessage(msg) {
       `<b>⚙️ 관리</b>\n` +
       `• 봇재시작 - 브라우저 재초기화\n` +
       `• 뿌리오로그인 - 뿌리오 재로그인\n` +
+      `• 미발송확인 - 뿌리오 발송결과 대조\n` +
       `• 도움말 - 이 안내 다시 보기`
     );
     return;
@@ -4468,6 +4653,7 @@ async function startPolling() {
       `<b>⚙️ 관리</b>\n` +
       `• 봇재시작 - 브라우저 재초기화\n` +
       `• 뿌리오로그인 - 뿌리오 재로그인\n` +
+      `• 미발송확인 - 뿌리오 발송결과 대조\n` +
       `• 도움말 - 전체 명령어`
     );
     console.log('✅ 시작 알림 전송 완료');
