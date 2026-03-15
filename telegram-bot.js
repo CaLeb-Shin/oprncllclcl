@@ -3736,7 +3736,7 @@ async function processOrder(order, options = {}) {
           const groupUrl = urls[0];
           await sendMessage(
             `🎫 <b>모바일 티켓 발권 완료!</b>\n\n` +
-            `👤 ${order.buyerName} (${order.seatGrade || ''}석 ${order.qty || 1}매)\n` +
+            `👤 ${order.buyerName} (${order.seatGrade || parseProductInfo(order.productName).seatGrade || 'A'}석 ${order.qty || 1}매)\n` +
             `📋 주문: ${order.orderId}\n\n` +
             `🔗 그룹티켓 링크:\n${groupUrl}`
           );
