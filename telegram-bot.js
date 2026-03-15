@@ -3487,25 +3487,16 @@ async function sendSMS(order, _isRetry = false) {
     const qty = order.qty || 1;
     content = content.replace(/- 좌석: .+/, `- 좌석: ${seatType} ${qty}매 (비지정석)`);
 
-    // 모바일 티켓 URL 추가 (있으면)
-    if (order._ticketUrls && order._ticketUrls.length > 0) {
-      const ticketLine = `- 티켓확인: ${order._ticketUrls[0]}`;
-      if (content.includes('- 티켓확인:')) {
-        content = content.replace(/- 티켓확인: .+/, ticketLine);
-      } else {
-        content = content.replace(/(- 좌석: .+)/, `$1\n${ticketLine}`);
-      }
-      if (order._ticketUrls.length > 1) {
-        content += `\n\n(총 ${order._ticketUrls.length}장 — 추가 티켓은 별도 안내)`;
-      }
-    }
+    // 티켓확인 URL은 문자에 포함하지 않음 (공연 당일 별도 발송)
+    // 기존 템플릿에 "- 티켓확인:" 줄이 있으면 제거
+    content = content.replace(/\n?- 티켓확인: .+/, '');
 
     // 교체된 내용 입력
     await leftTextarea.click();
     await leftTextarea.fill(content);
     await ppurioPage.waitForTimeout(500);
     console.log(`      이름: ${buyerName}, 연락처: ${lastFour}, 좌석: ${seatType} ${qty}매`);
-    if (order._ticketUrls) console.log(`      티켓URL: ${order._ticketUrls[0]}`);
+    // 티켓URL 로그는 문자에 포함하지 않으므로 생략
 
     // URL 포함 등으로 내용이 길면 자동으로 LMS(장문) 전환
     const contentBytes = Buffer.byteLength(content, 'euc-kr');
