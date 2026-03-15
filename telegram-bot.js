@@ -4536,6 +4536,202 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 재발송 (미발송 건 자동 재발송 — Firebase 주문에서 전화번호 가져와서 뿌리오 발송)
+  if (text.startsWith('재발송')) {
+    // "재발송" 또는 "재발송 3/12" (날짜 필터)
+    const dateArg = text.replace('재발송', '').trim();
+    let filterDate = null;
+    if (dateArg) {
+      const dm = dateArg.match(/(\d+)\/(\d+)/);
+      if (dm) {
+        filterDate = new Date(2026, parseInt(dm[1]) - 1, parseInt(dm[2]));
+      }
+    }
+
+    await sendMessage(`📱 <b>미발송 건 재발송 시작</b>${filterDate ? `\n📅 ${dateArg} 이후 주문만` : ''}\n\n뿌리오 + 네이버 스크래핑 → Firebase 전화번호 조회 → 자동 발송`);
+
+    try {
+      // 1. 뿌리오 발송결과
+      const ppurioResults = await scrapePpurioResults();
+      const sentNames = new Set();
+      for (const r of ppurioResults) {
+        if (r.buyerName) sentNames.add(r.buyerName);
+      }
+
+      // 2. 네이버 스토어 주문 스크래핑
+      while (isKeepAliveRunning) await new Promise((r) => setTimeout(r, 2000));
+      isSmartstoreRunning = true;
+      await ensureBrowser();
+      await smartstorePage.goto('https://sell.smartstore.naver.com/#/home/about', { timeout: 15000, waitUntil: 'domcontentloaded' });
+      await smartstorePage.waitForTimeout(2000);
+      await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
+      await smartstorePage.waitForTimeout(5000);
+      try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+      await smartstorePage.waitForTimeout(1000);
+
+      let frame = null;
+      for (let i = 0; i < 5; i++) {
+        frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+        if (frame) break;
+        await smartstorePage.waitForTimeout(3000);
+      }
+      if (!frame) throw new Error('주문 프레임 못 찾음');
+
+      try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
+      await frame.waitForTimeout(500);
+      await frame.evaluate(() => {
+        const btns = document.querySelectorAll('button, a, input[type="button"]');
+        for (const btn of btns) { if (btn.textContent.trim() === '검색') { btn.click(); return; } }
+      });
+      await smartstorePage.waitForTimeout(8000);
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+      const scrapeOrders = async () => {
+        return await frame.evaluate(() => {
+          const rows = document.querySelectorAll('table tbody tr');
+          const orders = [];
+          for (const tr of rows) {
+            const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+            if (cells.length < 11) continue;
+            const date = cells[0] || '';
+            if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
+            const status = cells[1] || '';
+            if (status.includes('취소') || status.includes('반품')) continue;
+            const product = cells[7] || '';
+            const optionInfo = cells[8] || '';
+            const qty = parseInt(cells[9]) || 1;
+            const buyerName = cells[10] || '';
+            if (!product || !buyerName) continue;
+            orders.push({ date, product, optionInfo, qty, buyerName });
+          }
+          return orders;
+        });
+      };
+
+      let allNaverOrders = [];
+      allNaverOrders.push(...(await scrapeOrders()));
+      for (let nextPage = 2; nextPage <= 10; nextPage++) {
+        const hasNext = await frame.evaluate((pageNum) => {
+          const links = document.querySelectorAll('a, button');
+          for (const link of links) {
+            if (link.textContent.trim() === String(pageNum)) { link.click(); return true; }
+          }
+          return false;
+        }, nextPage).catch(() => false);
+        if (!hasNext) break;
+        await smartstorePage.waitForTimeout(3000);
+        frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+        const pageData = await scrapeOrders();
+        allNaverOrders.push(...pageData);
+        if (pageData.length === 0) break;
+      }
+      try { await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile }); } catch {}
+      isSmartstoreRunning = false;
+
+      // 3. 미발송 필터 (활성 공연 + 날짜 필터 + 뿌리오 미존재)
+      const baseName = (name) => name.replace(/\(.*?\)/g, '').trim();
+      const missing = [];
+      for (const o of allNaverOrders) {
+        const info = parseProductInfo(o.product, o.optionInfo);
+        if (!info.perfKey || !isPerfFuture(info.perfKey)) continue;
+        const name = baseName(o.buyerName);
+        if (sentNames.has(name) || sentNames.has(o.buyerName)) continue;
+        // 날짜 필터
+        if (filterDate) {
+          const orderDate = new Date(o.date.replace(/\./g, '-'));
+          if (orderDate < filterDate) continue;
+        }
+        missing.push({ ...o, perfKey: info.perfKey, seat: info.seat });
+      }
+
+      if (missing.length === 0) {
+        await sendMessage('✅ 재발송할 미발송 건이 없습니다!');
+        return;
+      }
+
+      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\nFirebase에서 전화번호 조회 후 자동 발송합니다...`);
+
+      // 4. Firebase에서 전화번호 가져오기
+      let firebaseOrders = [];
+      try {
+        const eventsData = await callFirebaseCF('listEventsHttp', {});
+        const events = eventsData.events || [];
+        for (const event of events) {
+          try {
+            const data = await callFirebaseCF('listNaverOrdersHttp', { eventId: event.id }, 15000);
+            firebaseOrders.push(...(data.orders || []));
+          } catch {}
+        }
+      } catch (e) {
+        console.log('   ⚠️ Firebase 조회 실패:', e.message);
+      }
+
+      // Firebase 이름→전화번호 맵
+      const phoneMap = {};
+      for (const fo of firebaseOrders) {
+        if (fo.buyerName && fo.buyerPhone) {
+          phoneMap[fo.buyerName] = fo.buyerPhone;
+          phoneMap[baseName(fo.buyerName)] = fo.buyerPhone;
+        }
+      }
+
+      // 5. 재발송
+      let sentCount = 0;
+      let failCount = 0;
+      const noPhoneList = [];
+
+      for (const m of missing) {
+        const name = baseName(m.buyerName);
+        const phone = phoneMap[name] || phoneMap[m.buyerName];
+
+        if (!phone) {
+          noPhoneList.push(m);
+          continue;
+        }
+
+        console.log(`   📱 재발송: ${m.buyerName} (${phone}) - ${m.seat} ${m.qty}매`);
+        try {
+          const order = {
+            buyerName: m.buyerName,
+            phone,
+            productName: m.product,
+            qty: m.qty,
+          };
+          const sent = await sendSMS(order);
+          if (sent) {
+            sentCount++;
+            await sendMessage(`✅ 재발송 완료: <b>${m.buyerName}</b> ${m.seat} ${m.qty}매`);
+          } else {
+            failCount++;
+            await sendMessage(`❌ 재발송 실패: <b>${m.buyerName}</b>`);
+          }
+          await new Promise((r) => setTimeout(r, 3000)); // 연속 발송 간격
+        } catch (e) {
+          failCount++;
+          console.log(`   ❌ ${m.buyerName} 재발송 오류:`, e.message);
+          await sendMessage(`❌ 재발송 오류: <b>${m.buyerName}</b> - ${e.message}`);
+        }
+      }
+
+      // 6. 결과 보고
+      let resultMsg = `📊 <b>재발송 결과</b>\n\n`;
+      resultMsg += `✅ 성공: ${sentCount}건\n`;
+      if (failCount > 0) resultMsg += `❌ 실패: ${failCount}건\n`;
+      if (noPhoneList.length > 0) {
+        resultMsg += `\n⚠️ <b>전화번호 없음 (${noPhoneList.length}건)</b>\n`;
+        resultMsg += `Firebase에 전화번호가 없어 수동 발송 필요:\n`;
+        for (const m of noPhoneList) {
+          resultMsg += `  • ${m.buyerName} - ${m.seat} ${m.qty}매 (${m.date})\n`;
+        }
+      }
+      await sendMessage(resultMsg);
+    } catch (err) {
+      isSmartstoreRunning = false;
+      await sendMessage(`❌ 재발송 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 뿌리오 재로그인 (자동)
   if (['ppuriologin', '뿌리오로그인', '뿌리오재로그인'].includes(text)) {
     await sendMessage('🔐 뿌리오 자동 재로그인 시도 중...');
@@ -4578,6 +4774,7 @@ async function handleMessage(msg) {
       `• 봇재시작 - 브라우저 재초기화\n` +
       `• 뿌리오로그인 - 뿌리오 재로그인\n` +
       `• 미발송확인 - 뿌리오 발송결과 대조\n` +
+      `• 재발송 / 재발송 3/12 - 미발송 건 자동 재발송\n` +
       `• 도움말 - 이 안내 다시 보기`
     );
     return;
@@ -4723,6 +4920,7 @@ async function startPolling() {
       `• 봇재시작 - 브라우저 재초기화\n` +
       `• 뿌리오로그인 - 뿌리오 재로그인\n` +
       `• 미발송확인 - 뿌리오 발송결과 대조\n` +
+      `• 재발송 / 재발송 3/12 - 미발송 건 자동 재발송\n` +
       `• 도움말 - 전체 명령어`
     );
     console.log('✅ 시작 알림 전송 완료');
