@@ -80,6 +80,7 @@ const CONFIG = {
   pendingOrdersFile: path.join(__dirname, 'pending-orders.json'),
   pendingDeliveryFile: path.join(__dirname, 'pending-delivery.json'),
   cancelledOrdersFile: path.join(__dirname, 'cancelled-orders.json'),
+  smsLogFile: path.join(__dirname, 'sms-log.json'),
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
@@ -3205,6 +3206,22 @@ async function requestApproval(order) {
   await sendMessage(msg, replyMarkup);
   pendingOrders[order.orderId] = order;
   savePendingOrders(pendingOrders);
+
+  // SMS 로그에 주문 정보 기록 (재발송 시 전화번호 조회용)
+  try {
+    const smsLog = readJson(CONFIG.smsLogFile, []);
+    if (!smsLog.find(l => l.orderId === order.orderId)) {
+      smsLog.push({
+        orderId: order.orderId,
+        buyerName: order.buyerName,
+        phone: order.phone,
+        productName: order.productName,
+        qty: order.qty,
+        date: new Date().toISOString(),
+      });
+      writeJson(CONFIG.smsLogFile, smsLog);
+    }
+  } catch {}
 }
 
 // ============================================================
@@ -4649,31 +4666,49 @@ async function handleMessage(msg) {
         return;
       }
 
-      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\n⏳ 2단계: Firebase에서 전화번호 조회 중...`);
+      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\n⏳ 2단계: 전화번호 조회 중... (SMS로그 → 대기주문 → Firebase)`);
 
-      // 4. Firebase에서 전화번호 가져오기
-      let firebaseOrders = [];
+      // 4. 전화번호 조회 (SMS 로그 → pendingOrders → Firebase 순)
+      const phoneMap = {};
+
+      // 4-1. sms-log.json (봇이 처리한 모든 주문 기록)
+      const smsLog = readJson(CONFIG.smsLogFile, []);
+      for (const l of smsLog) {
+        if (l.buyerName && l.phone) {
+          phoneMap[l.buyerName] = l.phone;
+          phoneMap[baseName(l.buyerName)] = l.phone;
+        }
+      }
+      console.log(`   📋 SMS로그: ${smsLog.length}건, 전화번호 ${Object.keys(phoneMap).length}개`);
+
+      // 4-2. pendingOrders (현재 대기 중인 주문)
+      for (const [, po] of Object.entries(pendingOrders)) {
+        if (po.buyerName && po.phone) {
+          phoneMap[po.buyerName] = po.phone;
+          phoneMap[baseName(po.buyerName)] = po.phone;
+        }
+      }
+
+      // 4-3. Firebase fallback
       try {
         const eventsData = await callFirebaseCF('listEventsHttp', {});
         const events = eventsData.events || [];
         for (const event of events) {
           try {
             const data = await callFirebaseCF('listNaverOrdersHttp', { eventId: event.id }, 15000);
-            firebaseOrders.push(...(data.orders || []));
+            for (const fo of (data.orders || [])) {
+              if (fo.buyerName && fo.buyerPhone && !phoneMap[baseName(fo.buyerName)]) {
+                phoneMap[fo.buyerName] = fo.buyerPhone;
+                phoneMap[baseName(fo.buyerName)] = fo.buyerPhone;
+              }
+            }
           } catch {}
         }
       } catch (e) {
         console.log('   ⚠️ Firebase 조회 실패:', e.message);
       }
 
-      // Firebase 이름→전화번호 맵
-      const phoneMap = {};
-      for (const fo of firebaseOrders) {
-        if (fo.buyerName && fo.buyerPhone) {
-          phoneMap[fo.buyerName] = fo.buyerPhone;
-          phoneMap[baseName(fo.buyerName)] = fo.buyerPhone;
-        }
-      }
+      console.log(`   📋 전화번호 총 ${Object.keys(phoneMap).length}개 확보`);
 
       // 5. 재발송
       const withPhone = missing.filter(m => phoneMap[baseName(m.buyerName)] || phoneMap[m.buyerName]);
