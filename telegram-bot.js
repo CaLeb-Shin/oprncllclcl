@@ -4548,7 +4548,7 @@ async function handleMessage(msg) {
       }
     }
 
-    await sendMessage(`📱 <b>미발송 건 재발송 시작</b>${filterDate ? `\n📅 ${dateArg} 이후 주문만` : ''}\n\n뿌리오 + 네이버 스크래핑 → Firebase 전화번호 조회 → 자동 발송`);
+    await sendMessage(`📱 <b>미발송 건 재발송 시작</b>${filterDate ? `\n📅 ${dateArg} 주문만` : ''}\n\n⏳ 1단계: 뿌리오 발송결과 + 네이버 주문 스크래핑 중...`);
 
     try {
       // 1. 뿌리오 발송결과
@@ -4649,7 +4649,7 @@ async function handleMessage(msg) {
         return;
       }
 
-      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\nFirebase에서 전화번호 조회 후 자동 발송합니다...`);
+      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\n⏳ 2단계: Firebase에서 전화번호 조회 중...`);
 
       // 4. Firebase에서 전화번호 가져오기
       let firebaseOrders = [];
@@ -4676,11 +4676,14 @@ async function handleMessage(msg) {
       }
 
       // 5. 재발송
+      const withPhone = missing.filter(m => phoneMap[baseName(m.buyerName)] || phoneMap[m.buyerName]);
+      await sendMessage(`⏳ 3단계: 뿌리오 문자 발송 시작 (${withPhone.length}건)\n${missing.length - withPhone.length > 0 ? `⚠️ 전화번호 없음: ${missing.length - withPhone.length}건` : ''}`);
       let sentCount = 0;
       let failCount = 0;
       const noPhoneList = [];
 
-      for (const m of missing) {
+      for (let i = 0; i < missing.length; i++) {
+        const m = missing[i];
         const name = baseName(m.buyerName);
         const phone = phoneMap[name] || phoneMap[m.buyerName];
 
@@ -4689,7 +4692,7 @@ async function handleMessage(msg) {
           continue;
         }
 
-        console.log(`   📱 재발송: ${m.buyerName} (${phone}) - ${m.seat} ${m.qty}매`);
+        await sendMessage(`📱 [${i + 1}/${missing.length}] <b>${m.buyerName}</b> ${m.seat} ${m.qty}매 발송 중...`);
         try {
           const order = {
             buyerName: m.buyerName,
@@ -4700,10 +4703,10 @@ async function handleMessage(msg) {
           const sent = await sendSMS(order);
           if (sent) {
             sentCount++;
-            await sendMessage(`✅ 재발송 완료: <b>${m.buyerName}</b> ${m.seat} ${m.qty}매`);
+            await sendMessage(`✅ [${i + 1}/${missing.length}] <b>${m.buyerName}</b> 완료`);
           } else {
             failCount++;
-            await sendMessage(`❌ 재발송 실패: <b>${m.buyerName}</b>`);
+            await sendMessage(`❌ [${i + 1}/${missing.length}] <b>${m.buyerName}</b> 실패`);
           }
           await new Promise((r) => setTimeout(r, 3000)); // 연속 발송 간격
         } catch (e) {
