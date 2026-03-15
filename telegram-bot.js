@@ -4636,10 +4636,10 @@ async function handleMessage(msg) {
         if (!info.perfKey || !isPerfFuture(info.perfKey)) continue;
         const name = baseName(o.buyerName);
         if (sentNames.has(name) || sentNames.has(o.buyerName)) continue;
-        // 날짜 필터
+        // 날짜 필터 (해당일만)
         if (filterDate) {
           const orderDate = new Date(o.date.replace(/\./g, '-'));
-          if (orderDate < filterDate) continue;
+          if (orderDate.getMonth() !== filterDate.getMonth() || orderDate.getDate() !== filterDate.getDate()) continue;
         }
         missing.push({ ...o, perfKey: info.perfKey, seat: info.seat });
       }
