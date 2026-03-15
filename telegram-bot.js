@@ -2975,9 +2975,13 @@ function parseProductInfo(productStr, optionInfo) {
   const perfKey = `${region}_${type}`;
   const perfInfo = PERFORMANCES[perfKey];
 
+  // seatGrade: "S석" → "S", "VIP석" → "VIP"
+  const seatGrade = seat !== '미분류' ? seat.replace(/석$/, '') : '';
+
   return {
     region,
     seat,
+    seatGrade,
     perfKey,
     perfName: perfInfo ? perfInfo.name : `${region}`,
     perfDate: perfInfo ? perfInfo.date : '',
@@ -3278,14 +3282,12 @@ async function verifySmsSent(buyerName, phone) {
     if (!loggedIn) return null; // 검증 불가
 
     // 최근 발송결과에서 이름 또는 전화번호 매칭 확인
-    const found = await ppurioPage.evaluate((name, tel) => {
+    const found = await ppurioPage.evaluate(({ name, tel }) => {
       const text = document.body.innerText;
-      // 최근 10분 이내 발송건에서 이름 또는 전화번호 확인
-      // 발송결과 페이지 첫 페이지(최신순)에서 찾기
       const hasName = text.includes(name);
       const hasTel = tel ? text.includes(tel.replace(/-/g, '').slice(-4)) : false;
       return hasName || hasTel;
-    }, buyerName, phone || '');
+    }, { name: buyerName, tel: phone || '' });
 
     console.log(`   🔍 발송 검증: ${buyerName} → ${found ? '확인됨 ✅' : '미확인 ❌'}`);
     return found;
@@ -3764,10 +3766,11 @@ async function processOrder(order, options = {}) {
       await new Promise(r => setTimeout(r, 3000)); // 발송결과 반영 대기
       verified = await verifySmsSent(order.buyerName, order.phone);
 
-      if (verified === false) {
-        // 발송결과에 없음 → 1회 재시도
-        console.log(`   ⚠️ 발송 검증 실패 → 재시도 (${order.buyerName})`);
-        await sendMessage(`⚠️ <b>${order.buyerName}</b> 문자 발송 검증 실패 → 자동 재시도 중...`);
+      if (verified !== true) {
+        // 발송결과에서 미확인 또는 검증 에러 → 1회 재시도
+        const reason = verified === false ? '발송결과 미확인' : '검증 오류';
+        console.log(`   ⚠️ ${reason} → 재시도 (${order.buyerName})`);
+        await sendMessage(`⚠️ <b>${order.buyerName}</b> ${reason} → 자동 재시도 중...`);
         smsSent = false;
         try {
           smsSent = await sendSMS(order);
@@ -3778,19 +3781,20 @@ async function processOrder(order, options = {}) {
         if (smsSent) {
           await new Promise(r => setTimeout(r, 3000));
           verified = await verifySmsSent(order.buyerName, order.phone);
-          if (verified === false) {
-            smsSent = false; // 재시도도 검증 실패 → 실패 처리
+          if (verified !== true) {
+            // 재시도도 검증 안 됨 → 경고하되 일단 성공 처리 (processed에는 넣지 않음)
+            console.log(`   ❌ 재시도 후에도 검증 안 됨: ${order.buyerName}`);
+            smsSent = false;
           }
         }
       }
     }
 
     if (smsSent) {
-      const verifyNote = verified === true ? ' (발송 확인됨)' : verified === null ? ' (검증 생략)' : '';
+      const verifyNote = verified === true ? ' (발송 확인됨)' : '';
       await sendMessage(`✅ <b>문자 발송 완료!</b>${verifyNote}\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n\n⚠️ 배송처리는 직접 해주세요.`);
     } else {
-      const retryNote = verified === false ? '\n🔍 발송결과에서 확인되지 않음 (재시도도 실패)' : '';
-      await sendMessage(`⚠️ <b>문자 발송 실패</b>${retryNote}\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n다음 체크 때 다시 알려드릴게요.`);
+      await sendMessage(`⚠️ <b>문자 발송 실패</b>\n🔍 뿌리오 발송결과에서 확인되지 않음\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n다음 체크 때 다시 알려드릴게요.`);
     }
 
     // 2) 문자 발송 성공했을 때만 처리 완료 저장 (실패 시 다음에 다시 새 주문으로 감지)
