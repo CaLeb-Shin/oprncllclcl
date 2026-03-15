@@ -4395,17 +4395,17 @@ async function handleMessage(msg) {
   if (['미발송확인', '미발송', '발송확인'].includes(text)) {
     await sendMessage('🔍 뿌리오 발송결과와 처리 완료 주문을 대조 중...\n(모든 페이지 확인하느라 시간이 걸릴 수 있어요)');
     try {
-      // 1. 뿌리오 발송결과 스크래핑 (모든 페이지)
+      // 1. 뿌리오 발송결과 스크래핑 (모든 페이지) — flat 배열 [{ title, buyerName, ... }]
       const ppurioResults = await scrapePpurioResults();
 
-      // 뿌리오에서 발송된 사람 목록 (이름 기준)
-      const sentNames = new Set();
-      const sentDetails = {}; // name → { date, title, qty }
-      for (const perf of ppurioResults) {
-        for (const order of perf.orders) {
-          const key = `${order.name}_${perf.title}`;
-          sentNames.add(key);
-          sentDetails[key] = { date: perf.date, title: perf.title, qty: order.qty };
+      // 뿌리오에서 발송된 사람 목록 (이름+지역 기준)
+      const sentKeys = new Set();
+      for (const r of ppurioResults) {
+        // title: "[멜론] 창원 공연 예매 완료" → 지역 추출
+        const regionMatch = r.title?.match(/\[멜론\]\s*(\S+)\s*공연/);
+        const region = regionMatch ? regionMatch[1] : '';
+        if (r.buyerName) {
+          sentKeys.add(`${r.buyerName}_${region}`);
         }
       }
 
@@ -4418,19 +4418,8 @@ async function handleMessage(msg) {
         const name = pd.buyerName?.replace(/\(.+\)/, '') || ''; // 주문자(수취인) → 주문자만
         const region = extractRegion(pd.productName || '');
 
-        // 뿌리오 제목에서 매칭 시도
-        let found = false;
-        for (const perf of ppurioResults) {
-          if (region && perf.title.includes(region)) {
-            for (const order of perf.orders) {
-              if (order.name === name || order.name === pd.buyerName) {
-                found = true;
-                break;
-              }
-            }
-          }
-          if (found) break;
-        }
+        // 뿌리오 발송결과에서 이름+지역 매칭
+        const found = sentKeys.has(`${name}_${region}`) || sentKeys.has(`${pd.buyerName}_${region}`);
 
         if (!found) {
           missing.push({
