@@ -795,6 +795,7 @@ async function smartstoreKeepAlive() {
   if (!smartstorePage || !smartstoreCtx) return;
   // 주문 확인/결산 중이면 충돌 방지
   if (isSmartstoreRunning) { console.log('🔄 keep-alive: 스토어 작업 중 → 스킵'); return; }
+  if (isOrderProcessing) { console.log('🔄 keep-alive: 주문 처리 중 → 스킵'); return; }
   if (isKeepAliveRunning) return;
   if (wasDisconnected) { console.log('🔄 keep-alive: 인터넷 끊김 → 스킵'); return; }
   isKeepAliveRunning = true;
@@ -866,7 +867,8 @@ async function smartstoreKeepAlive() {
 // 뿌리오 세션 keep-alive (페이지 새로고침 + 세션 갱신)
 async function ppurioKeepAlive() {
   if (!ppurioPage || !ppurioCtx) return;
-  if (isSmartstoreRunning) { console.log('🔄 뿌리오 keep-alive: 작업 중 → 스킵'); return; }
+  if (isSmartstoreRunning) { console.log('🔄 뿌리오 keep-alive: 스토어 작업 중 → 스킵'); return; }
+  if (isOrderProcessing) { console.log('🔄 뿌리오 keep-alive: 주문 처리 중 → 스킵'); return; }
   if (wasDisconnected) { console.log('🔄 뿌리오 keep-alive: 인터넷 끊김 → 스킵'); return; }
 
   try {
@@ -2332,6 +2334,10 @@ async function checkForNewOrders() {
     console.log('   이미 확인 중...');
     return [];
   }
+  if (isOrderProcessing) {
+    console.log('   주문 처리 중 → 스킵');
+    return [];
+  }
   isSmartstoreRunning = true;
 
   try {
@@ -3687,6 +3693,8 @@ async function sendSMS(order, _isRetry = false) {
     return false;
   }
 
+  // 뿌리오가 실제 발송 처리할 시간 확보 (페이지 이동 전 대기)
+  await ppurioPage.waitForTimeout(3000);
   console.log('   ✅ 문자 발송 완료!');
   return true;
 }
