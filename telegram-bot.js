@@ -1214,12 +1214,20 @@ async function getNewOrders() {
     }
   }
 
-  console.log(`   📦 총 ${allOrders.length}개 신규주문 발견`);
+  // 중복 주문 제거 (발주 전/후 양쪽에 같은 주문이 있을 수 있음)
+  const seen = new Set();
+  const uniqueOrders = allOrders.filter(o => {
+    if (seen.has(o.orderId)) return false;
+    seen.add(o.orderId);
+    return true;
+  });
+
+  console.log(`   📦 총 ${uniqueOrders.length}개 신규주문 발견${allOrders.length !== uniqueOrders.length ? ` (중복 ${allOrders.length - uniqueOrders.length}건 제거)` : ''}`);
   // 디버그: 주문자/수취인 정보 출력
-  for (const o of allOrders) {
+  for (const o of uniqueOrders) {
     console.log(`      👤 ${o.buyerName} | 수취인: ${o.recipientName} | 디버그: ${o._nameDebug}`);
   }
-  return allOrders;
+  return uniqueOrders;
 }
 
 // ============================================================
@@ -3461,14 +3469,36 @@ async function sendSMS(order, _isRetry = false) {
 
   // 6. "발송하시겠습니까?" 팝업 → 파란 확인 버튼 클릭
   console.log('   6️⃣ 발송 확인...');
+  let confirmClicked = false;
   try {
     await ppurioPage.click('button.btn_b.bg_blue:has-text("확인")', { timeout: 5000 });
+    confirmClicked = true;
     await ppurioPage.waitForTimeout(2000);
   } catch {
     console.log('   ⚠️ 확인 버튼 못 찾음');
   }
 
-  console.log('   ✅ 문자 발송 완료!');
+  if (!confirmClicked) {
+    console.log('   ❌ 발송 확인 실패 — 문자가 전송되지 않았을 수 있음');
+    return false;
+  }
+
+  // 발송 결과 확인 (성공 시 "발송되었습니다" 등의 메시지가 표시됨)
+  try {
+    const resultText = await ppurioPage.evaluate(() => document.body.innerText).catch(() => '');
+    if (resultText.includes('발송') && (resultText.includes('완료') || resultText.includes('되었습니다') || resultText.includes('접수'))) {
+      console.log('   ✅ 문자 발송 완료!');
+      return true;
+    }
+    // 에러 메시지 확인
+    if (resultText.includes('실패') || resultText.includes('오류') || resultText.includes('부족')) {
+      console.log('   ❌ 발송 실패 감지:', resultText.substring(0, 200));
+      return false;
+    }
+  } catch {}
+
+  // 확인 버튼은 클릭했으나 결과를 명확히 판별 못한 경우 → 성공으로 간주
+  console.log('   ✅ 문자 발송 완료! (확인 버튼 클릭됨)');
   return true;
 }
 
