@@ -4391,76 +4391,146 @@ async function handleMessage(msg) {
     return;
   }
 
-  // 미발송 확인 (Firebase 주문 vs 뿌리오 발송결과 대조)
+  // 미발송 확인 (네이버 스토어 주문 vs 뿌리오 발송결과 대조)
   if (['미발송확인', '미발송', '발송확인'].includes(text)) {
-    await sendMessage('🔍 Firebase 티켓 주문과 뿌리오 발송결과를 대조 중...\n(시간이 걸릴 수 있어요)');
+    await sendMessage('🔍 네이버 스토어 주문과 뿌리오 발송결과를 대조 중...\n(네이버 + 뿌리오 양쪽 스크래핑이라 시간이 걸려요)');
     try {
-      // 1. Firebase에서 모든 이벤트 + 주문 가져오기
-      const eventsData = await callFirebaseCF('listEventsHttp', {});
-      const events = eventsData.events || [];
-
-      // 오늘 이후 이벤트만 (지난 공연 제외)
-      const now = new Date();
-      const futureEvents = events.filter(e => {
-        if (!e.date) return true;
-        const d = new Date(e.date);
-        return d >= new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7); // 일주일 전까지
-      });
-
-      let allFirebaseOrders = [];
-      for (const event of futureEvents) {
-        try {
-          const data = await callFirebaseCF('listNaverOrdersHttp', { eventId: event.id }, 15000);
-          const orders = (data.orders || []).map(o => ({ ...o, eventTitle: event.title }));
-          allFirebaseOrders.push(...orders);
-        } catch (e) {
-          console.log(`   ⚠️ ${event.title} 주문 조회 실패: ${e.message}`);
-        }
-      }
-
-      // 취소 건 제외
-      allFirebaseOrders = allFirebaseOrders.filter(o => o.status !== 'cancelled');
-
-      if (allFirebaseOrders.length === 0) {
-        await sendMessage('📋 Firebase에 등록된 주문이 없습니다.');
-        return;
-      }
-
-      // 2. 뿌리오 발송결과 스크래핑
+      // 1. 뿌리오 발송결과 스크래핑
       const ppurioResults = await scrapePpurioResults();
-
-      // 뿌리오에서 발송된 이름 목록 (이름 기준)
       const sentNames = new Set();
       for (const r of ppurioResults) {
         if (r.buyerName) sentNames.add(r.buyerName);
       }
+      console.log(`   📋 뿌리오 발송 ${ppurioResults.length}건, 이름 ${sentNames.size}명`);
 
-      // 3. 대조: Firebase에 있지만 뿌리오에 없는 건
+      // 2. 네이버 스토어 주문 스크래핑 (3개월)
+      while (isKeepAliveRunning) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      isSmartstoreRunning = true;
+
+      await ensureBrowser();
+      await smartstorePage.goto('https://sell.smartstore.naver.com/#/home/about', { timeout: 15000, waitUntil: 'domcontentloaded' });
+      await smartstorePage.waitForTimeout(2000);
+      await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
+      await smartstorePage.waitForTimeout(5000);
+      try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
+      await smartstorePage.waitForTimeout(1000);
+
+      let frame = null;
+      for (let i = 0; i < 5; i++) {
+        frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+        if (frame) break;
+        await smartstorePage.waitForTimeout(3000);
+      }
+      if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
+
+      try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
+      await frame.waitForTimeout(500);
+      await frame.evaluate(() => {
+        const btns = document.querySelectorAll('button, a, input[type="button"]');
+        for (const btn of btns) { if (btn.textContent.trim() === '검색') { btn.click(); return; } }
+      });
+      await smartstorePage.waitForTimeout(8000);
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+      const scrapeOrders = async () => {
+        return await frame.evaluate(() => {
+          const rows = document.querySelectorAll('table tbody tr');
+          const orders = [];
+          for (const tr of rows) {
+            const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+            if (cells.length < 11) continue;
+            const date = cells[0] || '';
+            if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
+            const status = cells[1] || '';
+            if (status.includes('취소') || status.includes('반품')) continue;
+            const product = cells[7] || '';
+            const optionInfo = cells[8] || '';
+            const qty = parseInt(cells[9]) || 1;
+            const buyerName = cells[10] || '';
+            if (!product || !buyerName) continue;
+            orders.push({ date, product, optionInfo, qty, buyerName });
+          }
+          return orders;
+        });
+      };
+
+      let allNaverOrders = [];
+      allNaverOrders.push(...(await scrapeOrders()));
+
+      for (let nextPage = 2; nextPage <= 10; nextPage++) {
+        const hasNext = await frame.evaluate((pageNum) => {
+          const links = document.querySelectorAll('a, button');
+          for (const link of links) {
+            if (link.textContent.trim() === String(pageNum)) { link.click(); return true; }
+          }
+          return false;
+        }, nextPage).catch(() => false);
+        if (!hasNext) break;
+        await smartstorePage.waitForTimeout(3000);
+        frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+        const pageData = await scrapeOrders();
+        allNaverOrders.push(...pageData);
+        if (pageData.length === 0) break;
+      }
+
+      try { await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile }); } catch {}
+      isSmartstoreRunning = false;
+
+      // 오늘 이후 공연만 필터
+      const activeOrders = allNaverOrders.filter(o => {
+        const info = parseProductInfo(o.product, o.optionInfo);
+        return info.perfKey && isPerfFuture(info.perfKey);
+      });
+
+      console.log(`   📦 네이버 주문 ${allNaverOrders.length}건, 활성 공연 ${activeOrders.length}건`);
+
+      // 3. 대조: 네이버에 있지만 뿌리오에 없는 건
       const missing = [];
-      for (const order of allFirebaseOrders) {
-        const name = order.buyerName?.replace(/\(.+\)/, '') || '';
-        if (!sentNames.has(name) && !sentNames.has(order.buyerName)) {
-          missing.push(order);
+      const baseName = (name) => name.replace(/\(.*?\)/g, '').trim();
+      for (const o of activeOrders) {
+        const name = baseName(o.buyerName);
+        if (!sentNames.has(name) && !sentNames.has(o.buyerName)) {
+          const info = parseProductInfo(o.product, o.optionInfo);
+          missing.push({
+            buyerName: o.buyerName,
+            product: o.product,
+            seat: info.seat || '',
+            qty: o.qty,
+            date: o.date,
+            perfKey: info.perfKey,
+          });
         }
       }
 
       // 4. 결과
       if (missing.length === 0) {
-        await sendMessage(`✅ <b>미발송 건 없음!</b>\n\nFirebase ${allFirebaseOrders.length}건 모두 뿌리오 발송결과에서 확인됨`);
+        await sendMessage(`✅ <b>미발송 건 없음!</b>\n\n네이버 활성 주문 ${activeOrders.length}건 모두 뿌리오 발송결과에서 확인됨`);
       } else {
-        let msg = `⚠️ <b>미발송 의심 ${missing.length}건</b>\n\n`;
-        msg += `Firebase ${allFirebaseOrders.length}건 중 뿌리오에서 못 찾은 건:\n\n`;
+        // 공연별로 그룹
+        const byPerf = {};
         for (const m of missing) {
-          const ticket = m.ticketCount > 0 ? ' 🎫' : '';
-          msg += `• <b>${m.buyerName}</b> ${m.seatGrade || ''}석 ${m.quantity}매${ticket}\n`;
-          msg += `  ${m.eventTitle || ''}\n`;
-          msg += `  📱 ${m.buyerPhone || '번호없음'}\n\n`;
+          const key = m.perfKey || '기타';
+          if (!byPerf[key]) byPerf[key] = [];
+          byPerf[key].push(m);
         }
-        msg += `🎫 = 모바일 티켓 발권됨\n`;
-        msg += `이 주문들의 문자를 수동으로 재발송해주세요.`;
+
+        let msg = `⚠️ <b>미발송 의심 ${missing.length}건</b>\n\n`;
+        msg += `네이버 ${activeOrders.length}건 중 뿌리오에서 못 찾은 건:\n`;
+
+        for (const [perfKey, orders] of Object.entries(byPerf)) {
+          const perfInfo = PERFORMANCES[perfKey];
+          msg += `\n<b>📌 ${perfInfo ? perfInfo.name : perfKey}</b>\n`;
+          for (const m of orders) {
+            msg += `  • ${m.buyerName} - ${m.seat} ${m.qty}매 (${m.date})\n`;
+          }
+        }
+        msg += `\n이 주문들의 문자를 수동으로 재발송해주세요.`;
         await sendMessage(msg);
       }
     } catch (err) {
+      isSmartstoreRunning = false;
       await sendMessage(`❌ 미발송 확인 오류: ${err.message}`);
     }
     return;
