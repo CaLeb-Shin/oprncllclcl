@@ -4391,62 +4391,72 @@ async function handleMessage(msg) {
     return;
   }
 
-  // 미발송 확인 (뿌리오 발송결과 vs 처리된 주문 대조)
+  // 미발송 확인 (Firebase 주문 vs 뿌리오 발송결과 대조)
   if (['미발송확인', '미발송', '발송확인'].includes(text)) {
-    await sendMessage('🔍 뿌리오 발송결과와 처리 완료 주문을 대조 중...\n(모든 페이지 확인하느라 시간이 걸릴 수 있어요)');
+    await sendMessage('🔍 Firebase 티켓 주문과 뿌리오 발송결과를 대조 중...\n(시간이 걸릴 수 있어요)');
     try {
-      // 1. 뿌리오 발송결과 스크래핑 (모든 페이지) — flat 배열 [{ title, buyerName, ... }]
+      // 1. Firebase에서 모든 이벤트 + 주문 가져오기
+      const eventsData = await callFirebaseCF('listEventsHttp', {});
+      const events = eventsData.events || [];
+
+      // 오늘 이후 이벤트만 (지난 공연 제외)
+      const now = new Date();
+      const futureEvents = events.filter(e => {
+        if (!e.date) return true;
+        const d = new Date(e.date);
+        return d >= new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7); // 일주일 전까지
+      });
+
+      let allFirebaseOrders = [];
+      for (const event of futureEvents) {
+        try {
+          const data = await callFirebaseCF('listNaverOrdersHttp', { eventId: event.id }, 15000);
+          const orders = (data.orders || []).map(o => ({ ...o, eventTitle: event.title }));
+          allFirebaseOrders.push(...orders);
+        } catch (e) {
+          console.log(`   ⚠️ ${event.title} 주문 조회 실패: ${e.message}`);
+        }
+      }
+
+      // 취소 건 제외
+      allFirebaseOrders = allFirebaseOrders.filter(o => o.status !== 'cancelled');
+
+      if (allFirebaseOrders.length === 0) {
+        await sendMessage('📋 Firebase에 등록된 주문이 없습니다.');
+        return;
+      }
+
+      // 2. 뿌리오 발송결과 스크래핑
       const ppurioResults = await scrapePpurioResults();
 
-      // 뿌리오에서 발송된 사람 목록 (이름+지역 기준)
-      const sentKeys = new Set();
+      // 뿌리오에서 발송된 이름 목록 (이름 기준)
+      const sentNames = new Set();
       for (const r of ppurioResults) {
-        // title: "[멜론] 창원 공연 예매 완료" → 지역 추출
-        const regionMatch = r.title?.match(/\[멜론\]\s*(\S+)\s*공연/);
-        const region = regionMatch ? regionMatch[1] : '';
-        if (r.buyerName) {
-          sentKeys.add(`${r.buyerName}_${region}`);
-        }
+        if (r.buyerName) sentNames.add(r.buyerName);
       }
 
-      // 2. pending-delivery.json 확인 (SMS 완료 처리된 주문들)
-      const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
-
-      // 3. 대조: pending-delivery에 있지만 뿌리오에 없는 건 찾기
+      // 3. 대조: Firebase에 있지만 뿌리오에 없는 건
       const missing = [];
-      for (const pd of pendingDelivery) {
-        const name = pd.buyerName?.replace(/\(.+\)/, '') || ''; // 주문자(수취인) → 주문자만
-        const region = extractRegion(pd.productName || '');
-
-        // 뿌리오 발송결과에서 이름+지역 매칭
-        const found = sentKeys.has(`${name}_${region}`) || sentKeys.has(`${pd.buyerName}_${region}`);
-
-        if (!found) {
-          missing.push({
-            buyerName: pd.buyerName,
-            productName: pd.productName,
-            qty: pd.qty,
-            smsAt: pd.smsAt,
-            hasTicket: !!(pd.ticketUrls && pd.ticketUrls.length > 0),
-            orderId: pd.orderId,
-          });
+      for (const order of allFirebaseOrders) {
+        const name = order.buyerName?.replace(/\(.+\)/, '') || '';
+        if (!sentNames.has(name) && !sentNames.has(order.buyerName)) {
+          missing.push(order);
         }
       }
 
-      // 4. 결과 메시지
+      // 4. 결과
       if (missing.length === 0) {
-        await sendMessage(`✅ <b>미발송 건 없음!</b>\n\n처리 완료된 ${pendingDelivery.length}건 모두 뿌리오 발송결과에서 확인됨`);
+        await sendMessage(`✅ <b>미발송 건 없음!</b>\n\nFirebase ${allFirebaseOrders.length}건 모두 뿌리오 발송결과에서 확인됨`);
       } else {
         let msg = `⚠️ <b>미발송 의심 ${missing.length}건</b>\n\n`;
-        msg += `처리완료 ${pendingDelivery.length}건 중 뿌리오 발송결과에서 못 찾은 건:\n\n`;
+        msg += `Firebase ${allFirebaseOrders.length}건 중 뿌리오에서 못 찾은 건:\n\n`;
         for (const m of missing) {
-          const ticket = m.hasTicket ? ' 🎫' : '';
-          const date = m.smsAt ? new Date(m.smsAt).toLocaleDateString('ko-KR') : '';
-          msg += `• <b>${m.buyerName}</b> ${m.qty || 1}매${ticket}\n`;
-          msg += `  ${m.productName || ''}\n`;
-          msg += `  처리일: ${date} | 주문: ${m.orderId || ''}\n\n`;
+          const ticket = m.ticketCount > 0 ? ' 🎫' : '';
+          msg += `• <b>${m.buyerName}</b> ${m.seatGrade || ''}석 ${m.quantity}매${ticket}\n`;
+          msg += `  ${m.eventTitle || ''}\n`;
+          msg += `  📱 ${m.buyerPhone || '번호없음'}\n\n`;
         }
-        msg += `\n🎫 = 그룹티켓 발권 건\n`;
+        msg += `🎫 = 모바일 티켓 발권됨\n`;
         msg += `이 주문들의 문자를 수동으로 재발송해주세요.`;
         await sendMessage(msg);
       }
