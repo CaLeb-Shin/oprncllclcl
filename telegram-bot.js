@@ -4467,7 +4467,9 @@ async function handleMessage(msg) {
             const qty = parseInt(cells[9]) || 1;
             const buyerName = cells[10] || '';
             if (!product || !buyerName) continue;
-            orders.push({ date, product, optionInfo, qty, buyerName });
+            // 전화번호: 모든 셀에서 010 패턴 찾기
+            const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
+            orders.push({ date, product, optionInfo, qty, buyerName, phone });
           }
           return orders;
         });
@@ -4619,7 +4621,9 @@ async function handleMessage(msg) {
             const qty = parseInt(cells[9]) || 1;
             const buyerName = cells[10] || '';
             if (!product || !buyerName) continue;
-            orders.push({ date, product, optionInfo, qty, buyerName });
+            // 전화번호: 모든 셀에서 010 패턴 찾기
+            const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
+            orders.push({ date, product, optionInfo, qty, buyerName, phone });
           }
           return orders;
         });
@@ -4666,10 +4670,19 @@ async function handleMessage(msg) {
         return;
       }
 
-      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\n⏳ 2단계: 전화번호 조회 중... (SMS로그 → 대기주문 → Firebase)`);
+      await sendMessage(`📋 미발송 ${missing.length}건 발견\n\n⏳ 2단계: 전화번호 조회 중...`);
 
-      // 4. 전화번호 조회 (SMS 로그 → pendingOrders → Firebase 순)
+      // 4. 전화번호 조회 (네이버 스크래핑 → SMS로그 → pendingOrders → Firebase 순)
       const phoneMap = {};
+
+      // 4-0. 네이버 스크래핑에서 이미 가져온 전화번호
+      for (const o of allNaverOrders) {
+        if (o.buyerName && o.phone) {
+          phoneMap[o.buyerName] = o.phone;
+          phoneMap[baseName(o.buyerName)] = o.phone;
+        }
+      }
+      console.log(`   📋 네이버 스크래핑: 전화번호 ${Object.keys(phoneMap).length}개`);
 
       // 4-1. sms-log.json (봇이 처리한 모든 주문 기록)
       const smsLog = readJson(CONFIG.smsLogFile, []);
