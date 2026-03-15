@@ -135,6 +135,37 @@ let ppurioCtx = null;
 let ppurioPage = null;
 
 // ============================================================
+// 주문 처리 큐 (동시 실행 방지)
+// ============================================================
+const orderQueue = [];
+let isOrderProcessing = false;
+
+async function enqueueOrder(order, options = {}) {
+  return new Promise((resolve, reject) => {
+    orderQueue.push({ order, options, resolve, reject });
+    processOrderQueue();
+  });
+}
+
+async function processOrderQueue() {
+  if (isOrderProcessing || orderQueue.length === 0) return;
+  isOrderProcessing = true;
+  const { order, options, resolve, reject } = orderQueue.shift();
+  try {
+    const result = await processOrder(order, options);
+    resolve(result);
+  } catch (err) {
+    reject(err);
+  } finally {
+    isOrderProcessing = false;
+    if (orderQueue.length > 0) {
+      console.log(`📋 대기 중인 주문 ${orderQueue.length}건 → 다음 처리 시작`);
+      processOrderQueue();
+    }
+  }
+}
+
+// ============================================================
 // 유틸: JSON 파일 읽기/쓰기 (안전)
 // ============================================================
 function readJson(filePath, fallback = []) {
@@ -3233,6 +3264,37 @@ function extractRegion(productName) {
   return m ? m[1] : '';
 }
 
+// ============================================================
+// 뿌리오 발송결과에서 최근 발송 검증
+// ============================================================
+async function verifySmsSent(buyerName, phone) {
+  if (!ppurioPage) return null; // 검증 불가
+  try {
+    // 발송결과 페이지로 이동
+    await ppurioPage.goto('https://www.ppurio.com/result/message');
+    await ppurioPage.waitForTimeout(3000);
+
+    const loggedIn = await isPpurioLoggedIn(ppurioPage);
+    if (!loggedIn) return null; // 검증 불가
+
+    // 최근 발송결과에서 이름 또는 전화번호 매칭 확인
+    const found = await ppurioPage.evaluate((name, tel) => {
+      const text = document.body.innerText;
+      // 최근 10분 이내 발송건에서 이름 또는 전화번호 확인
+      // 발송결과 페이지 첫 페이지(최신순)에서 찾기
+      const hasName = text.includes(name);
+      const hasTel = tel ? text.includes(tel.replace(/-/g, '').slice(-4)) : false;
+      return hasName || hasTel;
+    }, buyerName, phone || '');
+
+    console.log(`   🔍 발송 검증: ${buyerName} → ${found ? '확인됨 ✅' : '미확인 ❌'}`);
+    return found;
+  } catch (err) {
+    console.log(`   ⚠️ 발송 검증 실패: ${err.message}`);
+    return null; // 검증 불가
+  }
+}
+
 async function sendSMS(order, _isRetry = false) {
   if (!ppurioPage) {
     // 세션 없으면 자동 재로그인 시도
@@ -3688,16 +3750,47 @@ async function processOrder(order, options = {}) {
     }
 
     let smsSent = false;
+    let verified = null;
+
+    // 1차 발송 시도
     try {
       smsSent = await sendSMS(order);
     } catch (smsErr) {
       console.log('   문자 발송 에러:', smsErr.message);
     }
 
+    // 발송 성공이라고 판단됐으면 → 뿌리오 발송결과에서 실제 확인
     if (smsSent) {
-      await sendMessage(`✅ <b>문자 발송 완료!</b>\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n\n⚠️ 배송처리는 직접 해주세요.`);
+      await new Promise(r => setTimeout(r, 3000)); // 발송결과 반영 대기
+      verified = await verifySmsSent(order.buyerName, order.phone);
+
+      if (verified === false) {
+        // 발송결과에 없음 → 1회 재시도
+        console.log(`   ⚠️ 발송 검증 실패 → 재시도 (${order.buyerName})`);
+        await sendMessage(`⚠️ <b>${order.buyerName}</b> 문자 발송 검증 실패 → 자동 재시도 중...`);
+        smsSent = false;
+        try {
+          smsSent = await sendSMS(order);
+        } catch (retryErr) {
+          console.log('   재시도 발송 에러:', retryErr.message);
+        }
+
+        if (smsSent) {
+          await new Promise(r => setTimeout(r, 3000));
+          verified = await verifySmsSent(order.buyerName, order.phone);
+          if (verified === false) {
+            smsSent = false; // 재시도도 검증 실패 → 실패 처리
+          }
+        }
+      }
+    }
+
+    if (smsSent) {
+      const verifyNote = verified === true ? ' (발송 확인됨)' : verified === null ? ' (검증 생략)' : '';
+      await sendMessage(`✅ <b>문자 발송 완료!</b>${verifyNote}\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n\n⚠️ 배송처리는 직접 해주세요.`);
     } else {
-      await sendMessage(`⚠️ <b>문자 발송 실패</b>\n\n주문: ${order.orderId}\n다음 체크 때 다시 알려드릴게요.`);
+      const retryNote = verified === false ? '\n🔍 발송결과에서 확인되지 않음 (재시도도 실패)' : '';
+      await sendMessage(`⚠️ <b>문자 발송 실패</b>${retryNote}\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n다음 체크 때 다시 알려드릴게요.`);
     }
 
     // 2) 문자 발송 성공했을 때만 처리 완료 저장 (실패 시 다음에 다시 새 주문으로 감지)
@@ -3744,8 +3837,8 @@ async function handleCallbackQuery(cq) {
     const order = pendingOrders[orderId];
     if (order) {
       await answerCallbackQuery(queryId, '발권+문자 처리 중...');
-      await sendMessage(`⏳ <b>${order.buyerName}</b> 모바일 발권 + 문자 발송 중...`);
-      await processOrder(order, { withTicket: true });
+      await sendMessage(`⏳ <b>${order.buyerName}</b> 모바일 발권 + 문자 발송 중...${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
+      await enqueueOrder(order, { withTicket: true });
       delete pendingOrders[orderId];
       savePendingOrders(pendingOrders);
     } else {
@@ -3757,8 +3850,8 @@ async function handleCallbackQuery(cq) {
     const order = pendingOrders[orderId];
     if (order) {
       await answerCallbackQuery(queryId, '처리 중...');
-      await sendMessage(`⏳ <b>${order.buyerName}</b> 주문 처리 중... 문자 발송을 시작합니다.`);
-      await processOrder(order);
+      await sendMessage(`⏳ <b>${order.buyerName}</b> 주문 처리 중... 문자 발송을 시작합니다.${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
+      await enqueueOrder(order);
       delete pendingOrders[orderId];
       savePendingOrders(pendingOrders);
     } else {
@@ -3832,8 +3925,8 @@ async function handleIssueCommand(orderText) {
     (parsed.productName ? `📦 ${parsed.productName}` : '')
   );
 
-  // 모바일 티켓 발권 + SMS 발송
-  await processOrder(parsed, { withTicket: true });
+  // 모바일 티켓 발권 + SMS 발송 (큐를 통해 순차 처리)
+  await enqueueOrder(parsed, { withTicket: true });
 }
 
 // ============================================================
