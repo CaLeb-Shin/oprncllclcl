@@ -3070,27 +3070,63 @@ async function getStoreSalesSummary() {
     });
   };
 
-  // 전체 주문 수집 (페이지네이션)
+  // 전체 주문 수집 (페이지네이션 - 다음 버튼 지원)
   const allOrders = [];
   const page1 = await scrapeCurrentPage();
   allOrders.push(...page1);
   console.log(`   📦 페이지 1: ${page1.length}건`);
 
-  for (let nextPage = 2; nextPage <= 10; nextPage++) {
-    const hasNext = await frame.evaluate((pageNum) => {
+  for (let nextPage = 2; nextPage <= 30; nextPage++) {
+    // 1단계: 직접 페이지 번호 클릭 시도
+    let navigated = await frame.evaluate((pageNum) => {
       const links = document.querySelectorAll('a, button');
       for (const link of links) {
         if (link.textContent.trim() === String(pageNum)) {
           link.click();
-          return true;
+          return 'direct';
         }
       }
       return false;
     }, nextPage).catch(() => false);
 
-    if (!hasNext) break;
+    // 2단계: 페이지 번호 못 찾으면 "다음" 버튼으로 페이지 그룹 이동
+    if (!navigated) {
+      navigated = await frame.evaluate(() => {
+        const links = document.querySelectorAll('a, button, span[role="button"]');
+        for (const link of links) {
+          const text = link.textContent.trim();
+          const ariaLabel = link.getAttribute('aria-label') || '';
+          const className = link.className || '';
+          if (text === '다음' || text === '>' || text === '›' || text === '»' ||
+              ariaLabel.includes('다음') || ariaLabel.includes('Next') ||
+              className.includes('next')) {
+            link.click();
+            return 'next-group';
+          }
+        }
+        return false;
+      }).catch(() => false);
+    }
+
+    if (!navigated) break;
     await smartstorePage.waitForTimeout(3000);
     frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+    // "다음" 그룹 이동 후, 해당 페이지 번호 추가 클릭 (안전장치)
+    if (navigated === 'next-group') {
+      await frame.evaluate((pageNum) => {
+        const links = document.querySelectorAll('a, button');
+        for (const link of links) {
+          if (link.textContent.trim() === String(pageNum)) {
+            link.click();
+            return true;
+          }
+        }
+        return false;
+      }, nextPage).catch(() => {});
+      await smartstorePage.waitForTimeout(2000);
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+    }
 
     const pageOrders = await scrapeCurrentPage();
     allOrders.push(...pageOrders);
