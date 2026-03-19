@@ -3088,7 +3088,9 @@ async function getStoreSalesSummary() {
             status: cells[1]?.substring(0, 10),
             c7: cells[7]?.substring(0, 20),
             c8: cells[8]?.substring(0, 20),
-            c9: cells[9]?.substring(0, 10),
+            c9: cells[9]?.substring(0, 15),
+            c10: cells[10]?.substring(0, 15),
+            c11: cells[11]?.substring(0, 15),
           });
         }
       }
@@ -3113,15 +3115,15 @@ async function getStoreSalesSummary() {
     console.log(`   📋 샘플행: ${JSON.stringify(diagInfo.sampleRows)}`);
   }
 
-  // 테이블 파싱 (서버 검증 완료: 헤더행 3셀 + 데이터행 15셀)
-  // 데이터행: cells[0]=날짜, cells[1]=상태, cells[7]=상품명, cells[9]=수량
+  // 테이블 파싱 (16셀: 지역정보 컬럼 추가됨)
+  // 데이터행: cells[0]=날짜, [1]=상태, [7]=상품명, [8]=옵션정보, [9]=지역정보(new), [10]=수량
   const scrapeCurrentPage = async () => {
     return await frame.evaluate(() => {
       const rows = document.querySelectorAll('table tbody tr');
       const orders = [];
       for (const tr of rows) {
         const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-        if (cells.length < 10) continue;
+        if (cells.length < 11) continue;
 
         const date = cells[0] || '';
         if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
@@ -3132,7 +3134,10 @@ async function getStoreSalesSummary() {
         const product = cells[7] || '';
         if (!product) continue;
 
-        const qty = parseInt(cells[9]) || 1;
+        // 수량: 숫자가 있는 셀 탐색 (cells[10] 우선, 못 찾으면 cells[9] fallback)
+        let qty = parseInt(cells[10]);
+        if (isNaN(qty)) qty = parseInt(cells[9]);
+        if (isNaN(qty) || qty <= 0) qty = 1;
 
         const optionInfo = cells[8] || '';
         orders.push({ date: date.substring(0, 10), product, qty, optionInfo });
