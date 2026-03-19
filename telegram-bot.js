@@ -3028,6 +3028,34 @@ async function getStoreSalesSummary() {
   let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
   if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
 
+  // "전체" 주문 상태 탭 선택 (상태 필터에 관계없이 모든 주문 조회)
+  try {
+    const tabResult = await frame.evaluate(() => {
+      // 탭/라디오/링크에서 "전체" 찾기
+      const candidates = document.querySelectorAll('a, button, li, span, label, div[role="tab"], input[type="radio"]');
+      for (const el of candidates) {
+        const text = el.textContent?.trim();
+        if (text === '전체' || text === '전체주문' || text === '전체 주문') {
+          el.click();
+          return text;
+        }
+      }
+      // radio input의 경우 label을 통해 찾기
+      const labels = document.querySelectorAll('label');
+      for (const label of labels) {
+        if (label.textContent?.trim().includes('전체')) {
+          label.click();
+          return label.textContent.trim();
+        }
+      }
+      return null;
+    });
+    console.log(tabResult ? `   ✅ "${tabResult}" 탭 선택` : '   ⚠️ "전체" 탭 못 찾음');
+  } catch (e) {
+    console.log(`   ⚠️ 전체 탭 선택 오류: ${e.message?.substring(0, 50)}`);
+  }
+  await frame.waitForTimeout(1000);
+
   // 3개월 + 검색
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
@@ -3041,6 +3069,49 @@ async function getStoreSalesSummary() {
 
   // 프레임 재획득
   frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+  // 진단: 테이블 상태 확인
+  const diagInfo = await frame.evaluate(() => {
+    const rows = document.querySelectorAll('table tbody tr');
+    const totalRows = rows.length;
+    // 첫 3개 데이터행의 셀 내용 (컬럼 변경 감지용)
+    const sampleRows = [];
+    let dataRowCount = 0;
+    for (const tr of rows) {
+      const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+      if (cells.length >= 10 && cells[0]?.match(/^20\d{2}\.\d{2}\.\d{2}/)) {
+        dataRowCount++;
+        if (sampleRows.length < 3) {
+          sampleRows.push({
+            cellCount: cells.length,
+            date: cells[0]?.substring(0, 10),
+            status: cells[1]?.substring(0, 10),
+            c7: cells[7]?.substring(0, 20),
+            c8: cells[8]?.substring(0, 20),
+            c9: cells[9]?.substring(0, 10),
+          });
+        }
+      }
+    }
+    // 현재 활성 탭/필터 확인
+    const activeTabs = [];
+    const activeEls = document.querySelectorAll('.active, [aria-selected="true"], .on, .selected, [class*="active"]');
+    for (const el of activeEls) {
+      const text = el.textContent?.trim()?.substring(0, 30);
+      if (text) activeTabs.push(text);
+    }
+    // 페이지 내 건수 표시 텍스트 찾기
+    let totalCountText = '';
+    const allText = document.body?.innerText || '';
+    const countMatch = allText.match(/총\s*(\d[\d,]*)건/);
+    if (countMatch) totalCountText = countMatch[0];
+    return { totalRows, dataRowCount, sampleRows, activeTabs: activeTabs.slice(0, 5), totalCountText };
+  }).catch((e) => ({ error: e.message }));
+  console.log(`   📋 진단: 총 행=${diagInfo.totalRows}, 데이터행=${diagInfo.dataRowCount}, 표시건수="${diagInfo.totalCountText}"`);
+  console.log(`   📋 활성탭: ${JSON.stringify(diagInfo.activeTabs)}`);
+  if (diagInfo.sampleRows?.length > 0) {
+    console.log(`   📋 샘플행: ${JSON.stringify(diagInfo.sampleRows)}`);
+  }
 
   // 테이블 파싱 (서버 검증 완료: 헤더행 3셀 + 데이터행 15셀)
   // 데이터행: cells[0]=날짜, cells[1]=상태, cells[7]=상품명, cells[9]=수량
