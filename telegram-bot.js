@@ -2730,8 +2730,25 @@ function assignSeats(unsoldSeats, activeOrders, region) {
 }
 
 // 배정 결과 메시지 생성
-function formatAssignmentResult(assignments, unassigned, perfName) {
+function formatAssignmentResult(assignments, unassigned, perfName, upgradedList = []) {
   let msg = `🎫 <b>좌석 배정 결과</b> (${perfName})\n━━━━━━━━━━━━━━━━\n`;
+
+  // 업그레이드 요약
+  if (upgradedList.length > 0) {
+    const upgSummary = {};
+    for (const u of upgradedList) {
+      const key = `${u.from}→${u.to}`;
+      upgSummary[key] = (upgSummary[key] || 0) + 1;
+    }
+    msg += `🆙 업그레이드: ${Object.entries(upgSummary).map(([k, v]) => `${k} ${v}명`).join(', ')}\n`;
+  }
+
+  // 업그레이드된 구매자 이름 세트 (마커 표시용)
+  const upgradedNames = new Set(upgradedList.map(u => u.name));
+  const upgradedInfo = {};
+  for (const u of upgradedList) {
+    upgradedInfo[u.name] = u.from;
+  }
 
   // 등급별 그룹핑
   const byGrade = {};
@@ -2753,18 +2770,20 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
     msg += `\n<b>[${grade}]</b> 배정 ${items.length}명\n`;
     for (let i = 0; i < items.length; i++) {
       const a = items[i];
-      const name = `${a.buyer.buyerName || '?'}(${a.buyer.lastFour || '----'})`;
+      const buyerName = a.buyer.buyerName || '?';
+      const name = `${buyerName}(${a.buyer.lastFour || '----'})`;
       const qty = a.buyer.qty || 1;
       const orderNum = a.buyer.bookingOrder || '?';
       const floorPrefix = a.floor ? `${a.floor} ` : '';
+      const upgMark = upgradedNames.has(buyerName) ? ` 🆙${upgradedInfo[buyerName]}→${grade}` : '';
       if (a.split) {
         const seatInfo = a.split.map(s => {
           const fp = s.floor ? `${s.floor} ` : '';
           return `${fp}${s.section} ${s.row}행 ${s.seats.join(',')}번`;
         }).join(' / ');
-        msg += `${orderNum}. ${name} ${qty}매 → ${seatInfo}\n`;
+        msg += `${orderNum}. ${name} ${qty}매 → ${seatInfo}${upgMark}\n`;
       } else {
-        msg += `${orderNum}. ${name} ${qty}매 → ${floorPrefix}${a.section} ${a.row}행 ${a.seats.join(',')}번\n`;
+        msg += `${orderNum}. ${name} ${qty}매 → ${floorPrefix}${a.section} ${a.row}행 ${a.seats.join(',')}번${upgMark}\n`;
       }
       totalAssigned++;
       totalSeats += a.seats ? a.seats.length : (a.split ? a.split.reduce((s, p) => s + p.seats.length, 0) : 0);
@@ -2784,6 +2803,49 @@ function formatAssignmentResult(assignments, unassigned, perfName) {
   if (unassigned.length > 0) msg += ` / ⚠️ 미배정: ${unassigned.length}명`;
 
   return msg;
+}
+
+// 좌석 업그레이드 명령 파싱
+// 입력 예: "업그레이드 S→R 5 R→VIP 3"
+// 반환: [{ from: "S석", to: "R석", count: 5 }, ...]
+function parseUpgradeSpec(text) {
+  if (!text) return [];
+  const upgrades = [];
+  // 패턴: (S|R|A|VIP)석? → (S|R|A|VIP)석? 숫자
+  const regex = /(S|R|A|VIP)석?\s*[→>]\s*(S|R|A|VIP)석?\s*(\d+)/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const from = match[1].toUpperCase() + '석';
+    const to = match[2].toUpperCase() + '석';
+    const count = parseInt(match[3]);
+    if (count > 0 && from !== to) {
+      upgrades.push({ from, to, count });
+    }
+  }
+  return upgrades;
+}
+
+// 업그레이드 적용: activeOrders에서 랜덤 선택하여 seatType 변경
+function applyUpgrades(activeOrders, upgrades) {
+  const upgraded = [];
+  for (const spec of upgrades) {
+    // 해당 등급 구매자 필터 (아직 업그레이드 안 된 사람만)
+    const candidates = activeOrders.filter(o => o.seatType === spec.from && !o.upgraded);
+    // 랜덤 셔플 (Fisher-Yates)
+    for (let i = candidates.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+    }
+    const selected = candidates.slice(0, spec.count);
+    for (const order of selected) {
+      order.originalSeatType = order.seatType;
+      order.seatType = spec.to;
+      order.upgraded = true;
+      upgraded.push({ name: order.buyerName, from: spec.from, to: spec.to });
+    }
+    console.log(`   🆙 ${spec.from}→${spec.to}: ${selected.length}/${spec.count}명 업그레이드`);
+  }
+  return upgraded;
 }
 
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
@@ -4115,6 +4177,16 @@ async function handleMessage(msg) {
       // 뿌리오 데이터(최신순) → reverse → 선착순 (먼저 예매한 사람이 좋은 좌석)
       activeOrders.reverse();
 
+      // 좌석 업그레이드 적용
+      const upgrades = seatAssignWaiting.upgrades || [];
+      let upgradedList = [];
+      if (upgrades.length > 0) {
+        upgradedList = applyUpgrades(activeOrders, upgrades);
+        if (upgradedList.length > 0) {
+          await sendMessage(`🆙 업그레이드 ${upgradedList.length}명 적용 완료`);
+        }
+      }
+
       // 지역 추출
       const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
       const region = regionMatch ? regionMatch[1] : '';
@@ -4123,7 +4195,7 @@ async function handleMessage(msg) {
       const { assignments, unassigned } = assignSeats(unsoldSeats, activeOrders, region);
 
       // 결과 메시지
-      const resultMsg = formatAssignmentResult(assignments, unassigned, perf.title);
+      const resultMsg = formatAssignmentResult(assignments, unassigned, perf.title, upgradedList);
 
       // 긴 메시지 분할 전송 (텔레그램 4096자 제한)
       if (resultMsg.length > 4000) {
@@ -4420,8 +4492,8 @@ async function handleMessage(msg) {
     return;
   }
 
-  if (text.match(/^좌석배정\s*(\d+)$/)) {
-    const num = parseInt(text.match(/^좌석배정\s*(\d+)$/)[1]);
+  if (text.match(/^좌석배정\s*(\d+)/)) {
+    const num = parseInt(text.match(/^좌석배정\s*(\d+)/)[1]);
     if (finalSummaryKeys.length === 0) {
       await sendMessage('⚠️ 먼저 "최종결산"을 입력해서 공연 목록을 불러오세요.');
       return;
@@ -4433,12 +4505,15 @@ async function handleMessage(msg) {
     }
     const key = finalSummaryKeys[perfIndex];
     const perf = finalSummaryData[key];
-    seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now() };
-    await sendMessage(
-      `🎫 <b>${perf.title}</b> 좌석배정 준비\n\n` +
-      `📎 미판매 좌석 엑셀 파일(.xlsx)을 보내주세요.\n` +
-      `⏰ 10분 이내에 파일을 보내주세요.`
-    );
+    // 업그레이드 파싱: "좌석배정1 업그레이드 S→R 5 R→VIP 3"
+    const upgrades = parseUpgradeSpec(text);
+    seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades };
+    let readyMsg = `🎫 <b>${perf.title}</b> 좌석배정 준비\n\n`;
+    if (upgrades.length > 0) {
+      readyMsg += `🆙 업그레이드: ${upgrades.map(u => `${u.from}→${u.to} ${u.count}명`).join(', ')}\n\n`;
+    }
+    readyMsg += `📎 미판매 좌석 엑셀 파일(.xlsx)을 보내주세요.\n⏰ 10분 이내에 파일을 보내주세요.`;
+    await sendMessage(readyMsg);
     return;
   }
 
