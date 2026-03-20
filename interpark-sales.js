@@ -150,10 +150,21 @@ async function scrapeSales() {
     // 상품 검색 버튼 클릭 (#btnSearch_lookupGoods)
     await page.click('#btnSearch_lookupGoods');
     console.log('   ✅ 상품 검색 버튼 클릭');
-    
-    await page.waitForTimeout(2000);
+
+    // RealGrid 로딩 대기 (최대 10초)
+    for (let wait = 0; wait < 10; wait++) {
+      await page.waitForTimeout(1000);
+      const count = await page.evaluate(() => {
+        try { return window.LookupGrid_Provider ? window.LookupGrid_Provider.getRowCount() : 0; } catch { return 0; }
+      });
+      if (count > 0) {
+        console.log(`   ✅ RealGrid 로딩 완료 (${wait + 1}초, ${count}행)`);
+        break;
+      }
+      if (wait === 9) console.log('   ⚠️ RealGrid 로딩 타임아웃 (10초)');
+    }
     await page.screenshot({ path: 'debug-after-click.png' });
-    
+
     // 4. 상품 목록 가져오기 (RealGrid에서)
     const products = await page.evaluate(() => {
       const items = [];
