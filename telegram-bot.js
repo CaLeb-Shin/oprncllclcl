@@ -2906,6 +2906,164 @@ function formatAssignmentResult(assignments, unassigned, perfName, upgradedList 
   return msg;
 }
 
+// 좌석 배정 결과 PDF 생성 (A4 세로, 2단 레이아웃, 최대 2페이지)
+function generateAssignmentPdf(assignments, unassigned, perfName, upgradedList = []) {
+  const mm = v => v * 72 / 25.4;
+
+  const fontPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgun.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+  const fontBoldPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgunbd.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+
+  // 업그레이드 정보
+  const upgradedNames = new Set(upgradedList.map(u => u.name));
+  const upgradedInfo = {};
+  for (const u of upgradedList) upgradedInfo[u.name] = u.from;
+
+  // 등급별 그룹핑
+  const byGrade = {};
+  for (const a of assignments) {
+    if (!byGrade[a.grade]) byGrade[a.grade] = [];
+    byGrade[a.grade].push(a);
+  }
+  const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
+  const sortedGrades = [...Object.keys(byGrade)].sort((a, b) => {
+    const ai = gradeOrder.indexOf(a);
+    const bi = gradeOrder.indexOf(b);
+    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+  });
+
+  // 텍스트 라인 준비
+  const lines = []; // { text, bold, color, indent }
+  for (const grade of sortedGrades) {
+    const items = byGrade[grade];
+    lines.push({ text: `[${grade}] 배정 ${items.length}명`, bold: true, color: '#333333', indent: 0 });
+    for (const a of items) {
+      const buyerName = a.buyer.buyerName || '?';
+      const name = `${buyerName}(${a.buyer.lastFour || '----'})`;
+      const qty = a.buyer.qty || 1;
+      const orderNum = a.buyer.bookingOrder || '?';
+      const upgMark = upgradedNames.has(buyerName) ? ` ↑${upgradedInfo[buyerName]}` : '';
+      let seatInfo;
+      if (a.split) {
+        seatInfo = a.split.map(s => {
+          const fp = s.floor ? `${s.floor} ` : '';
+          return `${fp}${s.section} ${s.row}행 ${s.seats.join(',')}번`;
+        }).join(' / ');
+      } else {
+        const fp = a.floor ? `${a.floor} ` : '';
+        seatInfo = `${fp}${a.section} ${a.row}행 ${a.seats.join(',')}번`;
+      }
+      lines.push({ text: `${orderNum}. ${name} ${qty}매 → ${seatInfo}${upgMark}`, bold: false, color: upgMark ? '#1565C0' : '#000000', indent: 2 });
+    }
+    lines.push({ text: '', bold: false, color: '#000000', indent: 0 }); // 빈 줄
+  }
+
+  if (unassigned.length > 0) {
+    lines.push({ text: `⚠ 미배정 ${unassigned.length}명`, bold: true, color: '#D32F2F', indent: 0 });
+    for (const u of unassigned) {
+      const name = `${u.buyer.buyerName || '?'}(${u.buyer.lastFour || '----'})`;
+      lines.push({ text: `${name}: ${u.reason}`, bold: false, color: '#D32F2F', indent: 2 });
+    }
+  }
+
+  // PDF 레이아웃
+  const PAGE_W = 595.28; // A4
+  const PAGE_H = 841.89;
+  const MARGIN_TOP = mm(12);
+  const MARGIN_BOTTOM = mm(10);
+  const MARGIN_LEFT = mm(12);
+  const MARGIN_RIGHT = mm(12);
+  const COL_GAP = mm(8);
+  const COL_W = (PAGE_W - MARGIN_LEFT - MARGIN_RIGHT - COL_GAP) / 2;
+  const FONT_SIZE = 7;
+  const LINE_HEIGHT = FONT_SIZE * 1.45;
+  const HEADER_HEIGHT = mm(16); // 제목 영역
+  const CONTENT_TOP = MARGIN_TOP + HEADER_HEIGHT;
+  const CONTENT_H = PAGE_H - CONTENT_TOP - MARGIN_BOTTOM;
+  const LINES_PER_COL = Math.floor(CONTENT_H / LINE_HEIGHT);
+  const MAX_PAGES = 2;
+  const LINES_PER_PAGE = LINES_PER_COL * 2;
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 0 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    doc.registerFont('pdf', fontPath);
+    doc.registerFont('pdf-bold', fontBoldPath);
+
+    const totalPages = Math.min(MAX_PAGES, Math.ceil(lines.length / LINES_PER_PAGE) || 1);
+
+    // 업그레이드 요약 텍스트
+    let upgSummaryText = '';
+    if (upgradedList.length > 0) {
+      const upgSummary = {};
+      for (const u of upgradedList) {
+        const key = `${u.from}→${u.to}`;
+        upgSummary[key] = (upgSummary[key] || 0) + 1;
+      }
+      upgSummaryText = '업그레이드: ' + Object.entries(upgSummary).map(([k, v]) => `${k} ${v}명`).join(', ');
+    }
+
+    // 총 배정 요약
+    let totalAssigned = assignments.length;
+    let totalSeats = 0;
+    for (const a of assignments) {
+      totalSeats += a.seats ? a.seats.length : (a.split ? a.split.reduce((s, p) => s + p.seats.length, 0) : 0);
+    }
+
+    for (let p = 0; p < totalPages; p++) {
+      if (p > 0) doc.addPage({ size: 'A4', margin: 0 });
+
+      // 헤더
+      doc.font('pdf-bold').fontSize(11).fillColor('#000000');
+      doc.text(`좌석 배정 결과 - ${perfName}`, MARGIN_LEFT, MARGIN_TOP, { width: PAGE_W - MARGIN_LEFT - MARGIN_RIGHT });
+
+      // 부제 (업그레이드 + 요약)
+      let subtitle = `총 배정: ${totalAssigned}명 / ${totalSeats}좌석`;
+      if (unassigned.length > 0) subtitle += ` / 미배정: ${unassigned.length}명`;
+      if (upgSummaryText) subtitle += `  |  ${upgSummaryText}`;
+      doc.font('pdf').fontSize(7.5).fillColor('#555555');
+      doc.text(subtitle, MARGIN_LEFT, MARGIN_TOP + 16);
+
+      // 구분선
+      const lineY = CONTENT_TOP - 4;
+      doc.moveTo(MARGIN_LEFT, lineY).lineTo(PAGE_W - MARGIN_RIGHT, lineY).strokeColor('#CCCCCC').lineWidth(0.5).stroke();
+
+      // 2단 콘텐츠
+      const pageStart = p * LINES_PER_PAGE;
+      for (let i = 0; i < LINES_PER_PAGE; i++) {
+        const lineIdx = pageStart + i;
+        if (lineIdx >= lines.length) break;
+
+        const line = lines[lineIdx];
+        if (!line.text) continue;
+
+        const col = i < LINES_PER_COL ? 0 : 1;
+        const rowInCol = col === 0 ? i : i - LINES_PER_COL;
+        const x = MARGIN_LEFT + col * (COL_W + COL_GAP) + (line.indent || 0);
+        const y = CONTENT_TOP + rowInCol * LINE_HEIGHT;
+
+        doc.font(line.bold ? 'pdf-bold' : 'pdf').fontSize(FONT_SIZE).fillColor(line.color || '#000000');
+        doc.text(line.text, x, y, { width: COL_W - (line.indent || 0), lineBreak: false, ellipsis: true });
+      }
+
+      // 페이지 번호
+      if (totalPages > 1) {
+        doc.font('pdf').fontSize(6).fillColor('#999999');
+        doc.text(`${p + 1} / ${totalPages}`, PAGE_W / 2 - 10, PAGE_H - MARGIN_BOTTOM + 2);
+      }
+    }
+
+    doc.end();
+  });
+}
+
 // 좌석 업그레이드 명령 파싱
 // 입력 예: "업그레이드 S→R 5 R→VIP 3"
 // 반환: [{ from: "S석", to: "R석", count: 5 }, ...]
@@ -4313,6 +4471,18 @@ async function handleMessage(msg) {
         if (chunk) await sendMessage(chunk);
       } else {
         await sendMessage(resultMsg);
+      }
+
+      // 좌석 배정 결과 PDF 전송
+      if (assignments.length > 0) {
+        try {
+          const pdfBuffer = await generateAssignmentPdf(assignments, unassigned, perf.title, upgradedList);
+          const regionName = region || '공연';
+          const filename = `좌석배정_${regionName}_${new Date().toISOString().slice(0, 10)}.pdf`;
+          await sendDocument(pdfBuffer, filename, `📄 좌석 배정 결과 (${assignments.length}명 배정)`);
+        } catch (pdfErr) {
+          console.log('   ⚠️ PDF 생성 오류:', pdfErr.message);
+        }
       }
 
       // Firebase에 좌석 배정 결과 푸시
