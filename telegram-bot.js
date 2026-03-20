@@ -4551,7 +4551,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n좌석 배정: <b>좌석배정1</b>\n좌석현황 엑셀: <b>좌석현황1</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n좌석 배정: <b>좌석배정1</b>\n좌석 업그레이드: <b>좌석배정1 업그레이드 S→R 5 R→VIP 3</b>\n좌석현황 엑셀: <b>좌석현황1</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
