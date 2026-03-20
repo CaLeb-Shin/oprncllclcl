@@ -252,8 +252,16 @@ async function scrapeSales() {
         // 상품 검색 팝업에서 선택
         console.log(`      🎯 상품 코드: ${product.productCode}`);
         await page.click('#btnSearch_lookupGoods');
-        await page.waitForTimeout(2000);
-        
+
+        // RealGrid 로딩 대기
+        for (let wait = 0; wait < 10; wait++) {
+          await page.waitForTimeout(1000);
+          const count = await page.evaluate(() => {
+            try { return window.LookupGrid_Provider ? window.LookupGrid_Provider.getRowCount() : 0; } catch { return 0; }
+          });
+          if (count > 0) break;
+        }
+
         // 그리드에서 상품 찾기
         const rowInfo = await page.evaluate((productCode) => {
           if (!window.LookupGrid_Provider) return { error: 'Provider not found' };
