@@ -2015,7 +2015,7 @@ async function generateUpgradeLabelPdf(count) {
   const MARGIN_LEFT = 5;
   const MARGIN_TOP = 8.5;
 
-  const FONT_SIZE = 8;
+  const FONT_SIZE = 6.5;
   const totalSlots = COLS * ROWS;
 
   const fontPath = process.platform === 'win32'
