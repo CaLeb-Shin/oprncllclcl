@@ -1990,6 +1990,88 @@ async function generateLabelPdf(perfIndex) {
   });
 }
 
+// 업그레이드 라벨 시트 PDF 생성 (글로리텍 8189: 동일 규격)
+// 고정 텍스트 라벨을 지정 매수만큼 출력
+async function generateUpgradeLabelPdf(count) {
+  if (!count || count <= 0) throw new Error('매수를 입력해주세요');
+
+  const labels = [];
+  for (let i = 0; i < count; i++) {
+    labels.push({
+      line1: '좌석업그레이드 당첨!',
+      line2: '행복한 시간되세요;)',
+    });
+  }
+
+  const mm = v => v * 72 / 25.4;
+
+  const COLS = 7;
+  const ROWS = 27;
+  const LABEL_W = 25.4;
+  const LABEL_H = 10;
+  const H_GAP = 4;
+  const H_PITCH = LABEL_W + H_GAP;
+  const V_PITCH = 10.2;
+  const MARGIN_LEFT = 5;
+  const MARGIN_TOP = 8.5;
+
+  const FONT_SIZE = 8;
+  const totalSlots = COLS * ROWS;
+
+  const fontPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgun.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+  const fontBoldPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgunbd.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 0 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve({ pdfBuffer: Buffer.concat(chunks), count }));
+    doc.on('error', reject);
+
+    doc.registerFont('label', fontPath);
+    doc.registerFont('label-bold', fontBoldPath);
+
+    const pageCount = Math.ceil(labels.length / totalSlots) || 1;
+
+    for (let p = 0; p < pageCount; p++) {
+      if (p > 0) doc.addPage({ size: 'A4', margin: 0 });
+
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const idx = p * totalSlots + row * COLS + col;
+          if (idx >= labels.length) break;
+
+          const label = labels[idx];
+          const cellX = MARGIN_LEFT + col * H_PITCH;
+          const cellY = MARGIN_TOP + row * V_PITCH;
+          const centerX = cellX + LABEL_W / 2;
+          const centerY = cellY + LABEL_H / 2;
+
+          // line1 (bold) — 셀 중앙 위쪽
+          doc.font('label-bold').fontSize(FONT_SIZE);
+          const w1 = doc.widthOfString(label.line1);
+          doc.text(label.line1, mm(centerX) - w1 / 2, mm(centerY) - FONT_SIZE * 1.1, {
+            lineBreak: false,
+          });
+
+          // line2 — 셀 중앙 아래쪽
+          doc.font('label').fontSize(FONT_SIZE);
+          const w2 = doc.widthOfString(label.line2);
+          doc.text(label.line2, mm(centerX) - w2 / 2, mm(centerY) + FONT_SIZE * 0.15, {
+            lineBreak: false,
+          });
+        }
+      }
+    }
+
+    doc.end();
+  });
+}
+
 // ============================================================
 // 네이버 vs 뿌리오 주문 비교
 // ============================================================
@@ -4430,6 +4512,20 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 업그레이드 라벨: "업그레이드라벨 20", "업라벨 30"
+  if (text.match(/^업(?:그레이드)?라벨\s*(\d+)$/)) {
+    const count = parseInt(text.match(/^업(?:그레이드)?라벨\s*(\d+)$/)[1]);
+    try {
+      await sendMessage(`🏷 업그레이드 라벨 ${count}매 생성 중...`);
+      const { pdfBuffer } = await generateUpgradeLabelPdf(count);
+      const filename = `업그레이드라벨_${count}매.pdf`;
+      await sendDocument(pdfBuffer, filename, `🆙 업그레이드 라벨 (${count}매)`);
+    } catch (err) {
+      await sendMessage(`❌ 라벨 생성 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 좌석배정: "좌석배정1", "좌석배정 2"
   // 좌석현황 엑셀 다운로드: "좌석현황1" → TADMIN에서 해당 공연 잔여석/판매석/보류석 엑셀 다운로드
   if (text.match(/^좌석현황\s*(\d+)$/)) {
@@ -4551,7 +4647,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n좌석 배정: <b>좌석배정1</b>\n좌석 업그레이드: <b>좌석배정1 업그레이드 S→R 5 R→VIP 3</b>\n좌석현황 엑셀: <b>좌석현황1</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n업그레이드 라벨: <b>업라벨 20</b>\n좌석 배정: <b>좌석배정1</b>\n좌석 업그레이드: <b>좌석배정1 업그레이드 S→R 5 R→VIP 3</b>\n좌석현황 엑셀: <b>좌석현황1</b>`;
         await sendMessage(msg);
       }
     } catch (err) {
