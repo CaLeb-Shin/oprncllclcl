@@ -2611,11 +2611,11 @@ function parseUnsoldSeats(buffer) {
     // 패턴1: "BL5구역 1열" → section="BL5구역", rowNum=1
     // 패턴2: "A열 5행" → section="A열", rowNum=5
     // 패턴3: "C열 3" → section="C열", rowNum=3
-    const srMatch = sectionRowRaw.match(/^(.+?(?:구역|열))\s*(\d+)(?:열|행)?$/);
+    // 패턴4: "A열" → section="A열", rowNum=1 (창원 등 행번호 없는 경우)
+    const srMatch = sectionRowRaw.match(/^(.+?(?:구역|열))(?:\s*(\d+)(?:열|행)?)?$/);
     if (!srMatch) continue;
     const section = srMatch[1];
-    const rowNum = parseInt(srMatch[2]);
-    if (!rowNum || isNaN(rowNum)) continue;
+    const rowNum = srMatch[2] ? parseInt(srMatch[2]) : 1;
 
     // 좌석번호 파싱
     const seatsRaw = String(row[COL_SEATS] || '').trim();
