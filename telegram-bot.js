@@ -1894,7 +1894,7 @@ async function getFinalSummaryDetail(perfIndex) {
 
 // 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
 // pdfkit으로 mm 단위 정확한 좌표 배치 (Playwright HTML→PDF 오차 제거)
-async function generateLabelPdf(perfIndex) {
+async function generateLabelPdf(perfIndex, upgradedNames = null) {
   const result = await getActiveOrders(perfIndex);
   if (!result) throw new Error('잘못된 공연 번호');
   const { activeOrders, perf } = result;
@@ -1915,6 +1915,7 @@ async function generateLabelPdf(perfIndex) {
   const labels = activeOrders.map(o => ({
     line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
     line2: `${o.seatType || ''} ${o.qty}매`,
+    isUpgraded: upgradedNames ? upgradedNames.has(o.buyerName) : false,
   }));
 
   // mm → pt 변환 (1mm = 72/25.4 pt)
@@ -1963,6 +1964,7 @@ async function generateLabelPdf(perfIndex) {
           if (idx >= labels.length) break;
 
           const label = labels[idx];
+          const ul = !!label.isUpgraded;
           // 셀 중앙 좌표 (mm)
           const cellX = MARGIN_LEFT + col * H_PITCH;
           const cellY = MARGIN_TOP + row * V_PITCH;
@@ -1973,14 +1975,14 @@ async function generateLabelPdf(perfIndex) {
           doc.font('label-bold').fontSize(FONT_SIZE);
           const w1 = doc.widthOfString(label.line1);
           doc.text(label.line1, mm(centerX) - w1 / 2, mm(centerY) - FONT_SIZE * 1.1, {
-            lineBreak: false,
+            lineBreak: false, underline: ul,
           });
 
           // line2 — 셀 중앙 아래쪽
           doc.font('label').fontSize(FONT_SIZE);
           const w2 = doc.widthOfString(label.line2);
           doc.text(label.line2, mm(centerX) - w2 / 2, mm(centerY) + FONT_SIZE * 0.15, {
-            lineBreak: false,
+            lineBreak: false, underline: ul,
           });
         }
       }
@@ -2555,6 +2557,7 @@ const VENUE_SECTION_PRIORITY = {
 
 // 좌석배정 대기 플래그
 let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
+let lastAssignmentUpgrades = null; // { perfIndex, upgradedNames: Set } - 라벨 생성 시 참조
 
 // 엑셀 파싱: 미판매 좌석 추출
 // 실제 엑셀 구조: [0]No [1]이용일 [2]회차 [3]좌석등급 [4]층 [5]열(구역+행) [6]좌석수 [7]좌석번호
@@ -3234,6 +3237,11 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades) {
   if (assignments.length > 0) {
     await pushSeatsToFirebase(assignments, perf, region);
   }
+
+  // 업그레이드 정보 캐싱 (라벨 생성 시 밑줄 표시용)
+  lastAssignmentUpgrades = upgradedList.length > 0
+    ? { perfIndex, upgradedNames: new Set(upgradedList.map(u => u.name)) }
+    : null;
 }
 
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
@@ -4734,11 +4742,16 @@ async function handleMessage(msg) {
       return;
     }
     try {
-      await sendMessage('🏷 라벨 시트 생성 중...');
-      const { pdfBuffer, orderCount, perf } = await generateLabelPdf(num - 1);
+      const perfIdx = num - 1;
+      // 직전 좌석배정의 업그레이드 정보가 같은 공연이면 적용
+      const upgNames = (lastAssignmentUpgrades && lastAssignmentUpgrades.perfIndex === perfIdx)
+        ? lastAssignmentUpgrades.upgradedNames : null;
+      const upgLabel = upgNames ? ` (업그레이드 ${upgNames.size}명 밑줄)` : '';
+      await sendMessage(`🏷 라벨 시트 생성 중...${upgLabel}`);
+      const { pdfBuffer, orderCount, perf } = await generateLabelPdf(perfIdx, upgNames);
       const region = (perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/) || ['', '공연'])[1];
       const filename = `라벨_${region}_${orderCount}건.pdf`;
-      await sendDocument(pdfBuffer, filename, `🏷 ${perf.title} 라벨 (${orderCount}건)`);
+      await sendDocument(pdfBuffer, filename, `🏷 ${perf.title} 라벨 (${orderCount}건)${upgLabel}`);
     } catch (err) {
       await sendMessage(`❌ 라벨 생성 오류: ${err.message}`);
     }
