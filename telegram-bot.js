@@ -2689,8 +2689,11 @@ function assignSeats(unsoldSeats, activeOrders, region) {
       if (fa !== fb) return fa - fb;
       const pa = getPriority(a);
       const pb = getPriority(b);
-      // 같은 구역 우선순위면 앞열 우선
-      if (pa === pb) return a.row - b.row;
+      // 같은 구역 우선순위면 앞열 우선, 같은 열이면 잔여좌석 많은 쪽 우선 (균등 분배)
+      if (pa === pb) {
+        if (a.row !== b.row) return a.row - b.row;
+        return b.seats.length - a.seats.length; // 잔여좌석 많은 쪽 우선
+      }
       // 다른 구역: 열 차이가 ROW_ADVANTAGE 이상이면 앞열 우선
       const rowDiff = Math.abs(a.row - b.row);
       if (rowDiff >= ROW_ADVANTAGE) return a.row - b.row;
@@ -2736,6 +2739,22 @@ function assignSeats(unsoldSeats, activeOrders, region) {
     for (const buyer of sortedBuyers) {
       const qty = buyer.qty || 1;
       let assigned = false;
+
+      // 매 구매자마다 재정렬 (잔여좌석 기반 균등 분배)
+      availableRows.sort((a, b) => {
+        const fa = getFloorNum(a);
+        const fb = getFloorNum(b);
+        if (fa !== fb) return fa - fb;
+        const pa = getPriority(a);
+        const pb = getPriority(b);
+        if (pa === pb) {
+          if (a.row !== b.row) return a.row - b.row;
+          return b.seats.length - a.seats.length;
+        }
+        const rowDiff = Math.abs(a.row - b.row);
+        if (rowDiff >= ROW_ADVANTAGE) return a.row - b.row;
+        return pa - pb;
+      });
 
       for (const rowData of availableRows) {
         if (rowData.seats.length < qty) continue;
