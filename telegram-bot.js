@@ -1736,9 +1736,9 @@ async function getNaverCancelledOrders() {
         if (cells.length < 15) continue;
         const status = cells[1] || '';
         if (!status.includes('취소') && !status.includes('반품')) continue;
-        const buyerName = cells[10] || '';
+        const buyerName = cells[11] || '';
         const product = cells[7] || '';
-        const qty = parseInt(cells[9]) || 1;
+        const qty = parseInt(cells[10]) || 1;
         // 좌석 추출: 상품명 ", S석" 또는 옵션정보 ": S석"
         const optInfo = cells[8] || '';
         const seatM = product.match(/,\s*(\S+석)\s*$/) || optInfo.match(/:\s*(\S+석)\s*$/);
@@ -2075,8 +2075,8 @@ async function compareNaverVsPpurio(perfIndex) {
           const status = cells[1] || '';
           const product = cells[7] || '';
           const optionInfo = cells[8] || '';
-          const qty = parseInt(cells[9]) || 1;
-          const buyerName = cells[10] || '';
+          const qty = parseInt(cells[10]) || 1;
+          const buyerName = cells[11] || '';
           if (!product || !buyerName) continue;
           const order = { product, optionInfo, qty, buyerName };
           if (status.includes('취소') || status.includes('반품')) {
@@ -4747,8 +4747,8 @@ async function handleMessage(msg) {
             if (status.includes('취소') || status.includes('반품')) continue;
             const product = cells[7] || '';
             const optionInfo = cells[8] || '';
-            const qty = parseInt(cells[9]) || 1;
-            const buyerName = cells[10] || '';
+            const qty = parseInt(cells[10]) || 1;
+            const buyerName = cells[11] || '';
             if (!product || !buyerName) continue;
             // 전화번호: 모든 셀에서 010 패턴 찾기
             const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
@@ -4901,8 +4901,8 @@ async function handleMessage(msg) {
             if (status.includes('취소') || status.includes('반품')) continue;
             const product = cells[7] || '';
             const optionInfo = cells[8] || '';
-            const qty = parseInt(cells[9]) || 1;
-            const buyerName = cells[10] || '';
+            const qty = parseInt(cells[10]) || 1;
+            const buyerName = cells[11] || '';
             if (!product || !buyerName) continue;
             // 전화번호: 모든 셀에서 010 패턴 찾기
             const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
