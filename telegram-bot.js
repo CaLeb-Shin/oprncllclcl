@@ -3107,6 +3107,135 @@ function applyUpgrades(activeOrders, upgrades) {
   return upgraded;
 }
 
+// TADMIN에서 잔여석(미판매) 엑셀 자동 다운로드
+function downloadUnsoldFromTadmin(tadminCode, chatId) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('node', ['seat-download.js', tadminCode, '0'], {
+      cwd: CONFIG.baseDir,
+      windowsHide: true,
+      env: { ...process.env, TELEGRAM_CHAT_ID: chatId },
+    });
+    child.stdout.on('data', d => process.stdout.write(d));
+    child.stderr.on('data', d => process.stderr.write(d));
+    child.on('close', (code) => {
+      if (code !== 0) { reject(new Error(`seat-download 실패 (code=${code})`)); return; }
+      const downloadDir = path.join(CONFIG.baseDir, 'downloads');
+      if (!fs.existsSync(downloadDir)) { reject(new Error('downloads 폴더 없음')); return; }
+      const files = fs.readdirSync(downloadDir)
+        .filter(f => f.startsWith('잔여석_') && f.match(/\.xls$/i))
+        .map(f => ({ name: f, mtime: fs.statSync(path.join(downloadDir, f)).mtime }))
+        .sort((a, b) => b.mtime - a.mtime);
+      if (files.length === 0) { reject(new Error('잔여석 파일 없음')); return; }
+      resolve(fs.readFileSync(path.join(downloadDir, files[0].name)));
+    });
+    child.on('error', reject);
+  });
+}
+
+// PERFORMANCES에서 tadminCode 찾기 (좌석현황과 동일 로직)
+function findTadminCode(perfIndex) {
+  if (perfIndex < 0 || perfIndex >= finalSummaryKeys.length) return null;
+  const key = finalSummaryKeys[perfIndex];
+  const perf = finalSummaryData[key];
+  const title = perf?.title || key;
+  let perfConfig = PERFORMANCES[key];
+  if (!perfConfig || !perfConfig.tadminCode) {
+    const regions = ['울산', '대구', '창원', '광주', '대전', '부산', '고양', '인천', '부천', '구미'];
+    const matchedRegion = regions.find(r => title.includes(r) || key.includes(r));
+    if (matchedRegion) {
+      const candidates = Object.entries(PERFORMANCES).filter(([k, v]) =>
+        k.includes(matchedRegion) && v.tadminCode && isPerfFuture(k)
+      );
+      if (candidates.length > 0) perfConfig = candidates[0][1];
+    }
+  }
+  return perfConfig?.tadminCode || null;
+}
+
+// 좌석 배정 실행 (공통 로직: 자동 다운로드 / 수동 업로드 모두 사용)
+async function executeSeatAssignment(fileBuffer, perfIndex, upgrades) {
+  // 디버그: 엑셀 첫 5행 출력
+  const debugWb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const debugSheet = debugWb.Sheets[debugWb.SheetNames[0]];
+  const debugRows = XLSX.utils.sheet_to_json(debugSheet, { header: 1 });
+  let debugMsg = '🔍 <b>엑셀 디버그 (첫 5행)</b>\n';
+  for (let i = 0; i < Math.min(5, debugRows.length); i++) {
+    const row = (debugRows[i] || []).map((c, idx) => `[${idx}]${String(c || '').substring(0, 15)}`);
+    debugMsg += `행${i}: ${row.join(' | ')}\n`;
+  }
+  await sendMessage(debugMsg);
+
+  const unsoldSeats = parseUnsoldSeats(fileBuffer);
+
+  // 미판매 좌석 요약
+  const gradeCount = {};
+  for (const [grade, rows] of Object.entries(unsoldSeats)) {
+    gradeCount[grade] = rows.reduce((sum, r) => sum + r.seats.length, 0);
+  }
+  const unsoldSummary = Object.entries(gradeCount).map(([g, c]) => `${g} ${c}석`).join(', ');
+  await sendMessage(`📋 미판매 좌석: ${unsoldSummary}\n\n🎯 좌석 배정 중...`);
+
+  // activeOrders 가져오기
+  const result = await getActiveOrders(perfIndex);
+  if (!result) throw new Error('공연 데이터를 가져올 수 없습니다');
+  const { activeOrders, perf } = result;
+
+  activeOrders.reverse();
+
+  // 업그레이드 적용
+  let upgradedList = [];
+  if (upgrades.length > 0) {
+    upgradedList = applyUpgrades(activeOrders, upgrades);
+    if (upgradedList.length > 0) {
+      await sendMessage(`🆙 업그레이드 ${upgradedList.length}명 적용 완료`);
+    }
+  }
+
+  // 지역 추출
+  const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
+  const region = regionMatch ? regionMatch[1] : '';
+
+  // 좌석 배정
+  const { assignments, unassigned } = assignSeats(unsoldSeats, activeOrders, region);
+
+  // 결과 메시지
+  const resultMsg = formatAssignmentResult(assignments, unassigned, perf.title, upgradedList);
+
+  // 긴 메시지 분할 전송
+  if (resultMsg.length > 4000) {
+    const lines = resultMsg.split('\n');
+    let chunk = '';
+    for (const line of lines) {
+      if ((chunk + '\n' + line).length > 3900) {
+        await sendMessage(chunk);
+        chunk = line;
+      } else {
+        chunk += (chunk ? '\n' : '') + line;
+      }
+    }
+    if (chunk) await sendMessage(chunk);
+  } else {
+    await sendMessage(resultMsg);
+  }
+
+  // PDF 전송
+  if (assignments.length > 0) {
+    try {
+      const pdfBuffer = await generateAssignmentPdf(assignments, unassigned, perf.title, upgradedList);
+      const regionName = region || '공연';
+      const filename = `좌석배정_${regionName}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      await sendDocument(pdfBuffer, filename, `📄 좌석 배정 결과 (${assignments.length}명 배정)`);
+    } catch (pdfErr) {
+      console.log('   ⚠️ PDF 생성 오류:', pdfErr.message);
+    }
+  }
+
+  // Firebase 푸시
+  if (assignments.length > 0) {
+    await pushSeatsToFirebase(assignments, perf, region);
+  }
+}
+
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
 let storeLinksCache = {};  // { '대구': 'https://...', '창원': 'https://...' }
 let storeLinksCacheTime = 0;
@@ -4388,7 +4517,7 @@ async function handleMessage(msg) {
     return;
   }
 
-  // 좌석배정 엑셀 파일 수신 처리
+  // 좌석배정 엑셀 파일 수신 처리 (수동 업로드 폴백)
   if (msg.document && isPersonalChat && seatAssignWaiting) {
     const doc = msg.document;
     const fileName = doc.file_name || '';
@@ -4396,7 +4525,6 @@ async function handleMessage(msg) {
       await sendMessage('⚠️ 엑셀 파일(.xlsx)을 보내주세요.');
       return;
     }
-    // 타임아웃 체크 (10분)
     if (Date.now() - seatAssignWaiting.timestamp > 10 * 60 * 1000) {
       seatAssignWaiting = null;
       await sendMessage('⏰ 좌석배정 대기 시간이 초과되었습니다. "좌석배정N"을 다시 입력해주세요.');
@@ -4405,91 +4533,7 @@ async function handleMessage(msg) {
     try {
       await sendMessage('📊 엑셀 파싱 중...');
       const fileBuffer = await downloadTelegramFile(doc.file_id);
-
-      // 디버그: 엑셀 첫 5행 출력
-      const debugWb = XLSX.read(fileBuffer, { type: 'buffer' });
-      const debugSheet = debugWb.Sheets[debugWb.SheetNames[0]];
-      const debugRows = XLSX.utils.sheet_to_json(debugSheet, { header: 1 });
-      let debugMsg = '🔍 <b>엑셀 디버그 (첫 5행)</b>\n';
-      for (let i = 0; i < Math.min(5, debugRows.length); i++) {
-        const row = (debugRows[i] || []).map((c, idx) => `[${idx}]${String(c || '').substring(0, 15)}`);
-        debugMsg += `행${i}: ${row.join(' | ')}\n`;
-      }
-      await sendMessage(debugMsg);
-
-      const unsoldSeats = parseUnsoldSeats(fileBuffer);
-
-      // 미판매 좌석 요약
-      const gradeCount = {};
-      for (const [grade, rows] of Object.entries(unsoldSeats)) {
-        gradeCount[grade] = rows.reduce((sum, r) => sum + r.seats.length, 0);
-      }
-      const unsoldSummary = Object.entries(gradeCount).map(([g, c]) => `${g} ${c}석`).join(', ');
-      await sendMessage(`📋 미판매 좌석: ${unsoldSummary}\n\n🎯 좌석 배정 중...`);
-
-      // 최종결산 데이터에서 activeOrders 가져오기
-      const perfIndex = seatAssignWaiting.perfIndex;
-      const result = await getActiveOrders(perfIndex);
-      if (!result) throw new Error('공연 데이터를 가져올 수 없습니다');
-      const { activeOrders, perf } = result;
-
-      // 뿌리오 데이터(최신순) → reverse → 선착순 (먼저 예매한 사람이 좋은 좌석)
-      activeOrders.reverse();
-
-      // 좌석 업그레이드 적용
-      const upgrades = seatAssignWaiting.upgrades || [];
-      let upgradedList = [];
-      if (upgrades.length > 0) {
-        upgradedList = applyUpgrades(activeOrders, upgrades);
-        if (upgradedList.length > 0) {
-          await sendMessage(`🆙 업그레이드 ${upgradedList.length}명 적용 완료`);
-        }
-      }
-
-      // 지역 추출
-      const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
-      const region = regionMatch ? regionMatch[1] : '';
-
-      // 좌석 배정 실행
-      const { assignments, unassigned } = assignSeats(unsoldSeats, activeOrders, region);
-
-      // 결과 메시지
-      const resultMsg = formatAssignmentResult(assignments, unassigned, perf.title, upgradedList);
-
-      // 긴 메시지 분할 전송 (텔레그램 4096자 제한)
-      if (resultMsg.length > 4000) {
-        const lines = resultMsg.split('\n');
-        let chunk = '';
-        for (const line of lines) {
-          if ((chunk + '\n' + line).length > 3900) {
-            await sendMessage(chunk);
-            chunk = line;
-          } else {
-            chunk += (chunk ? '\n' : '') + line;
-          }
-        }
-        if (chunk) await sendMessage(chunk);
-      } else {
-        await sendMessage(resultMsg);
-      }
-
-      // 좌석 배정 결과 PDF 전송
-      if (assignments.length > 0) {
-        try {
-          const pdfBuffer = await generateAssignmentPdf(assignments, unassigned, perf.title, upgradedList);
-          const regionName = region || '공연';
-          const filename = `좌석배정_${regionName}_${new Date().toISOString().slice(0, 10)}.pdf`;
-          await sendDocument(pdfBuffer, filename, `📄 좌석 배정 결과 (${assignments.length}명 배정)`);
-        } catch (pdfErr) {
-          console.log('   ⚠️ PDF 생성 오류:', pdfErr.message);
-        }
-      }
-
-      // Firebase에 좌석 배정 결과 푸시
-      if (assignments.length > 0) {
-        await pushSeatsToFirebase(assignments, perf, region);
-      }
-
+      await executeSeatAssignment(fileBuffer, seatAssignWaiting.perfIndex, seatAssignWaiting.upgrades || []);
       seatAssignWaiting = null;
     } catch (err) {
       await sendMessage(`❌ 좌석배정 오류: ${err.message}`);
@@ -4790,15 +4834,36 @@ async function handleMessage(msg) {
     }
     const key = finalSummaryKeys[perfIndex];
     const perf = finalSummaryData[key];
-    // 업그레이드 파싱: "좌석배정1 업그레이드 S→R 5 R→VIP 3"
     const upgrades = parseUpgradeSpec(text);
-    seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades };
-    let readyMsg = `🎫 <b>${perf.title}</b> 좌석배정 준비\n\n`;
-    if (upgrades.length > 0) {
-      readyMsg += `🆙 업그레이드: ${upgrades.map(u => `${u.from}→${u.to} ${u.count}명`).join(', ')}\n\n`;
+
+    // TADMIN 자동 다운로드 시도
+    const tadminCode = findTadminCode(perfIndex);
+    if (tadminCode) {
+      let statusMsg = `🎫 <b>${perf.title}</b> 좌석배정\n\n`;
+      if (upgrades.length > 0) {
+        statusMsg += `🆙 업그레이드: ${upgrades.map(u => `${u.from}→${u.to} ${u.count}명`).join(', ')}\n`;
+      }
+      statusMsg += `📥 TADMIN에서 미판매 좌석 자동 다운로드 중...`;
+      await sendMessage(statusMsg);
+      try {
+        const fileBuffer = await downloadUnsoldFromTadmin(tadminCode, chatId);
+        await executeSeatAssignment(fileBuffer, perfIndex, upgrades);
+      } catch (err) {
+        console.log('   ⚠️ 자동 다운로드 실패:', err.message);
+        // 실패 시 수동 업로드 폴백
+        seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades };
+        await sendMessage(`⚠️ 자동 다운로드 실패: ${err.message}\n\n📎 미판매 좌석 엑셀 파일(.xlsx)을 수동으로 보내주세요.\n⏰ 10분 이내에 파일을 보내주세요.`);
+      }
+    } else {
+      // tadminCode 없으면 수동 업로드
+      seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades };
+      let readyMsg = `🎫 <b>${perf.title}</b> 좌석배정 준비\n\n`;
+      if (upgrades.length > 0) {
+        readyMsg += `🆙 업그레이드: ${upgrades.map(u => `${u.from}→${u.to} ${u.count}명`).join(', ')}\n\n`;
+      }
+      readyMsg += `📎 미판매 좌석 엑셀 파일(.xlsx)을 보내주세요.\n⏰ 10분 이내에 파일을 보내주세요.`;
+      await sendMessage(readyMsg);
     }
-    readyMsg += `📎 미판매 좌석 엑셀 파일(.xlsx)을 보내주세요.\n⏰ 10분 이내에 파일을 보내주세요.`;
-    await sendMessage(readyMsg);
     return;
   }
 

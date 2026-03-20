@@ -84,7 +84,7 @@ async function sendTelegram(message) {
 }
 
 // 메인: 미판매좌석 엑셀 다운로드
-async function downloadSeatExcel(targetGoodsCode) {
+async function downloadSeatExcel(targetGoodsCode, statusFilter) {
   const browser = await chromium.launch(getBrowserLaunchOptions());
   const downloadDir = path.join(__dirname, 'downloads');
   if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
@@ -289,6 +289,7 @@ async function downloadSeatExcel(targetGoodsCode) {
     const downloadedFiles = [];
 
     for (const status of statuses) {
+      if (statusFilter && status.value !== statusFilter) continue;
       console.log(`5️⃣ 상태: ${status.name} 선택...`);
       const selects = await page.$$('select');
       for (const sel of selects) {
@@ -345,4 +346,5 @@ async function downloadSeatExcel(targetGoodsCode) {
 
 // 실행
 const targetCode = process.argv[2] || null; // 상품코드 지정 가능 (없으면 가장 가까운 공연)
-downloadSeatExcel(targetCode);
+const statusFilter = process.argv[3] || null; // '0'=잔여석만, '1'=판매석만, '2'=보류석만
+downloadSeatExcel(targetCode, statusFilter);
