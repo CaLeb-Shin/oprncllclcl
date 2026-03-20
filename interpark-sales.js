@@ -104,8 +104,8 @@ async function scrapeSales() {
     await page.goto(CONFIG.loginUrl);
     await page.fill('input[placeholder="아이디"]', CONFIG.username);
     await page.fill('input[placeholder="비밀번호"]', CONFIG.password);
-    await page.click('button:has-text("로그인")');
-    await page.waitForTimeout(3000);
+    await page.click('button:has-text("로그인")', { noWaitAfter: true });
+    await page.waitForTimeout(5000);
     console.log('   ✅ 로그인 성공!');
     
     // 2단계 인증 팝업 처리 (나타나면 "진행하지 않음" 선택)
