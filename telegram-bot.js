@@ -1718,6 +1718,29 @@ async function getNaverCancelledOrders() {
   let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
   if (!frame) return [];
 
+  // "전체" 주문 상태 탭 선택 (취소/반품 포함 모든 주문 조회)
+  try {
+    await frame.evaluate(() => {
+      const candidates = document.querySelectorAll('a, button, li, span, label, div[role="tab"], input[type="radio"]');
+      for (const el of candidates) {
+        const text = el.textContent?.trim();
+        if (text === '전체' || text === '전체주문' || text === '전체 주문') {
+          el.click();
+          return text;
+        }
+      }
+      const labels = document.querySelectorAll('label');
+      for (const label of labels) {
+        if (label.textContent?.trim().includes('전체')) {
+          label.click();
+          return label.textContent.trim();
+        }
+      }
+      return null;
+    });
+  } catch {}
+  await frame.waitForTimeout(1000);
+
   try { await frame.click('text=3개월', { timeout: 3000 }); } catch {}
   await frame.waitForTimeout(500);
   await frame.evaluate(() => {
