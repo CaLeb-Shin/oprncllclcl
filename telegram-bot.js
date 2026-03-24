@@ -1933,11 +1933,16 @@ async function generateLabelPdf(perfIndex, upgInfo = null) {
   // 업그레이드된 사람은 업그레이드 후 등급으로 정렬 (좋은 자리 순서)
   const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
   activeOrders.sort((a, b) => {
-    const aGrade = upgradeMap[a.buyerName] ? upgradeMap[a.buyerName].to : a.seatType;
-    const bGrade = upgradeMap[b.buyerName] ? upgradeMap[b.buyerName].to : b.seatType;
+    const aUpg = !!upgradeMap[a.buyerName];
+    const bUpg = !!upgradeMap[b.buyerName];
+    const aGrade = aUpg ? upgradeMap[a.buyerName].to : a.seatType;
+    const bGrade = bUpg ? upgradeMap[b.buyerName].to : b.seatType;
     const ai = gradeOrder.indexOf(aGrade);
     const bi = gradeOrder.indexOf(bGrade);
-    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    if (ai !== bi) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    // 같은 등급 내: 업그레이드된 사람은 맨 뒤
+    if (aUpg !== bUpg) return aUpg ? 1 : -1;
+    return 0; // 동일 조건이면 선착순 유지
   });
 
   // 라벨 데이터 준비 (원래 등급 표시 + 업그레이드 밑줄)
