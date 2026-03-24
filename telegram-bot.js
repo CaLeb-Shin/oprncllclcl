@@ -2578,6 +2578,12 @@ const VENUE_SECTION_PRIORITY = {
   },
 };
 
+// 공연장별 열당 물리적 좌석 수 (사행/지그재그 배치 보정)
+// 열 전체가 하나의 엔트리로 들어오는 공연장에서 물리적 줄 경계를 넘는 "가짜 연석" 방지
+const VENUE_SEATS_PER_LINE = {
+  '창원': 10,  // 성산아트홀 대극장 - 열당 10석씩 사행 배치
+};
+
 // 좌석배정 대기 플래그
 let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
 let lastAssignmentUpgrades = null; // { perfIndex, upgradedNames: Set } - 라벨 생성 시 참조
@@ -2671,6 +2677,7 @@ function parseUnsoldSeats(buffer) {
 // 좌석 배정 알고리즘
 function assignSeats(unsoldSeats, activeOrders, region) {
   const priority = VENUE_SECTION_PRIORITY[region] || {};
+  const seatsPerLine = VENUE_SEATS_PER_LINE[region] || 0; // 0 = 사행 체크 안 함
   const assignments = [];
   const unassigned = [];
 
@@ -2734,6 +2741,7 @@ function assignSeats(unsoldSeats, activeOrders, region) {
     };
 
     // 연속좌석 그룹 찾기 (같은 행에서 qty만큼 연속)
+    // seatsPerLine > 0이면 물리적 줄(사행 배치) 경계를 넘지 않도록 체크
     const findConsecutive = (seats, qty) => {
       if (seats.length < qty) return null;
       const center = getCenter(seats);
@@ -2747,6 +2755,13 @@ function assignSeats(unsoldSeats, activeOrders, region) {
           if (seats[i + j] !== seats[i] + j) { consecutive = false; break; }
         }
         if (!consecutive) continue;
+
+        // 사행 배치 물리적 줄 경계 체크 (예: 10석/줄이면 10↔11은 다른 줄)
+        if (seatsPerLine > 0) {
+          const firstLine = Math.ceil(seats[i] / seatsPerLine);
+          const lastLine = Math.ceil(seats[i + qty - 1] / seatsPerLine);
+          if (firstLine !== lastLine) continue;
+        }
 
         const group = seats.slice(i, i + qty);
         const groupCenter = (group[0] + group[group.length - 1]) / 2;
