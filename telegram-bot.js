@@ -2580,8 +2580,14 @@ const VENUE_SECTION_PRIORITY = {
 
 // 공연장별 열당 물리적 좌석 수 (사행/지그재그 배치 보정)
 // 열 전체가 하나의 엔트리로 들어오는 공연장에서 물리적 줄 경계를 넘는 "가짜 연석" 방지
+// 형식: 숫자(공연장 전체) 또는 { default, '층+열': N } (열별 지정)
+// ※ 좌석배치도 보고 확인 필요한 공연장만 등록. 엑셀에 행 번호가 있는 공연장은 불필요.
 const VENUE_SEATS_PER_LINE = {
-  '창원': 10,  // 성산아트홀 대극장 - 열당 10석씩 사행 배치
+  '창원': 10,  // 성산아트홀 대극장 - 전 열 10석/줄
+  '대전': {    // 대전예술의전당
+    default: 10,
+    '1층D열': 9, '1층H열': 9,   // 가장자리 열
+  },
 };
 
 // 좌석배정 대기 플래그
@@ -2674,10 +2680,104 @@ function parseUnsoldSeats(buffer) {
   return result;
 }
 
+// ── 좌석배치도 파싱 & 저장 ──────────────────────────────────
+// 그리드형 엑셀(좌석배치도)을 읽어 각 열의 물리적 줄 경계(lineEnds)를 추출
+// 예: B열 10석/줄 → lineEnds = [10, 20, 30, ...]
+const SEAT_CONFIG_PATH = path.join(__dirname, 'venue-seat-configs.json');
+
+function loadVenueSeatConfigs() {
+  try { return JSON.parse(fs.readFileSync(SEAT_CONFIG_PATH, 'utf8')); } catch { return {}; }
+}
+function saveVenueSeatConfigs(configs) {
+  fs.writeFileSync(SEAT_CONFIG_PATH, JSON.stringify(configs, null, 2), 'utf8');
+}
+
+// 좌석배치도 엑셀 파싱 → { '1층B열': [10,20,30,...], '1층D열': [9,18,27,...] }
+function parseSeatLayout(buffer) {
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const config = {};
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+    let currentKey = null;
+    let currentFloor = '';
+    let lineEnds = [];
+
+    // 시트 이름이 열 이름인 경우 (예: "1층 B열")
+    const sheetMatch = sheetName.match(/((?:\d+층\s*)?[A-Za-z]+[열구역])/);
+    if (sheetMatch) {
+      currentKey = sheetMatch[1].replace(/\s/g, '');
+    }
+
+    for (const row of rows) {
+      if (!row || row.length === 0) continue;
+
+      const cells = row.map(c => c != null ? c : '');
+      const strJoined = cells.map(c => String(c).trim()).join(' ');
+
+      // 층 감지
+      const floorM = strJoined.match(/(\d+)\s*층/);
+      if (floorM) currentFloor = `${floorM[1]}층`;
+
+      // 숫자 셀 수집
+      const nums = cells
+        .map(c => typeof c === 'number' ? c : parseInt(String(c).trim()))
+        .filter(n => !isNaN(n) && n > 0);
+
+      // 열/구역 헤더 감지 (숫자가 2개 미만인 행)
+      const sectionM = strJoined.match(/([A-Za-z]+(?:열|구역))/);
+      if (sectionM && nums.length < 3) {
+        // 이전 섹션 저장
+        if (currentKey && lineEnds.length > 0) {
+          config[currentKey] = lineEnds.sort((a, b) => a - b);
+        }
+        currentKey = `${currentFloor}${sectionM[1]}`;
+        lineEnds = [];
+        continue;
+      }
+
+      // 데이터 행: 좌석번호가 있는 줄 → 해당 줄의 max가 줄 끝
+      if (nums.length >= 2 && currentKey) {
+        lineEnds.push(Math.max(...nums));
+      }
+    }
+
+    // 마지막 섹션 저장
+    if (currentKey && lineEnds.length > 0) {
+      config[currentKey] = lineEnds.sort((a, b) => a - b);
+    }
+  }
+
+  return config;
+}
+
+// lineEnds 배열에서 좌석의 물리적 줄 인덱스 반환
+function getPhysicalLine(seat, lineEnds) {
+  for (let i = 0; i < lineEnds.length; i++) {
+    if (seat <= lineEnds[i]) return i;
+  }
+  return lineEnds.length;
+}
+
 // 좌석 배정 알고리즘
 function assignSeats(unsoldSeats, activeOrders, region) {
   const priority = VENUE_SECTION_PRIORITY[region] || {};
-  const seatsPerLine = VENUE_SEATS_PER_LINE[region] || 0; // 0 = 사행 체크 안 함
+  // 1순위: JSON 파일(배치도 파싱 결과), 2순위: 하드코딩 config
+  const jsonCfg = loadVenueSeatConfigs()[region] || {};
+  const splCfg = VENUE_SEATS_PER_LINE[region];
+  // 열+층 조합으로 lineEnds 또는 seatsPerLine 조회
+  const getLineConfig = (floor, section) => {
+    const key = `${floor}${section}`;
+    // JSON에 lineEnds 배열이 있으면 우선 사용
+    if (jsonCfg[key]) return { lineEnds: jsonCfg[key] };
+    if (jsonCfg[section]) return { lineEnds: jsonCfg[section] };
+    // fallback: 하드코딩 seatsPerLine
+    if (!splCfg) return { spl: 0 };
+    if (typeof splCfg === 'number') return { spl: splCfg };
+    return { spl: splCfg[key] || splCfg[section] || splCfg.default || 0 };
+  };
   const assignments = [];
   const unassigned = [];
 
@@ -2741,8 +2841,8 @@ function assignSeats(unsoldSeats, activeOrders, region) {
     };
 
     // 연속좌석 그룹 찾기 (같은 행에서 qty만큼 연속)
-    // seatsPerLine > 0이면 물리적 줄(사행 배치) 경계를 넘지 않도록 체크
-    const findConsecutive = (seats, qty) => {
+    // lineCfg: { lineEnds: [...] } 또는 { spl: N } — 물리적 줄 경계 체크
+    const findConsecutive = (seats, qty, lineCfg) => {
       if (seats.length < qty) return null;
       const center = getCenter(seats);
       let bestGroup = null;
@@ -2756,10 +2856,14 @@ function assignSeats(unsoldSeats, activeOrders, region) {
         }
         if (!consecutive) continue;
 
-        // 사행 배치 물리적 줄 경계 체크 (예: 10석/줄이면 10↔11은 다른 줄)
-        if (seatsPerLine > 0) {
-          const firstLine = Math.ceil(seats[i] / seatsPerLine);
-          const lastLine = Math.ceil(seats[i + qty - 1] / seatsPerLine);
+        // 사행 배치 물리적 줄 경계 체크
+        if (lineCfg.lineEnds && lineCfg.lineEnds.length > 0) {
+          const fl = getPhysicalLine(seats[i], lineCfg.lineEnds);
+          const ll = getPhysicalLine(seats[i + qty - 1], lineCfg.lineEnds);
+          if (fl !== ll) continue;
+        } else if (lineCfg.spl > 0) {
+          const firstLine = Math.ceil(seats[i] / lineCfg.spl);
+          const lastLine = Math.ceil(seats[i + qty - 1] / lineCfg.spl);
           if (firstLine !== lastLine) continue;
         }
 
@@ -2802,7 +2906,7 @@ function assignSeats(unsoldSeats, activeOrders, region) {
 
         if (qty >= 2) {
           // 연속좌석 탐색
-          const group = findConsecutive(rowData.seats, qty);
+          const group = findConsecutive(rowData.seats, qty, getLineConfig(rowData.floor, rowData.section));
           if (group) {
             assignments.push({
               buyer,
@@ -4560,6 +4664,40 @@ async function handleMessage(msg) {
       return;
     }
     await handleIssueCommand(orderText);
+    return;
+  }
+
+  // 좌석배치도 엑셀 수신 → 줄 경계 파싱 & 저장
+  const caption = (msg.caption || '').trim();
+  if (msg.document && isPersonalChat && caption.match(/^배치도\s*(.+)/i)) {
+    const regionMatch = caption.match(/^배치도\s*(.+)/i);
+    const region = regionMatch[1].trim();
+    const doc = msg.document;
+    const fileName = doc.file_name || '';
+    if (!fileName.match(/\.(xlsx?)$/i)) {
+      await sendMessage('⚠️ 엑셀 파일(.xlsx)을 보내주세요.');
+      return;
+    }
+    try {
+      await sendMessage(`📐 <b>${region}</b> 좌석배치도 파싱 중...`);
+      const fileBuffer = await downloadTelegramFile(doc.file_id);
+      const layout = parseSeatLayout(fileBuffer);
+      if (Object.keys(layout).length === 0) {
+        await sendMessage('⚠️ 좌석 데이터를 찾을 수 없습니다. 그리드형 엑셀인지 확인해주세요.');
+        return;
+      }
+      // JSON 저장
+      const configs = loadVenueSeatConfigs();
+      configs[region] = layout;
+      saveVenueSeatConfigs(configs);
+      // 결과 보고
+      const lines = Object.entries(layout).map(([key, ends]) =>
+        `  ${key}: ${ends.length}줄 (${ends[ends.length - 1]}석, ${ends.length > 0 ? ends[0] : '?'}석/첫줄)`
+      );
+      await sendMessage(`✅ <b>${region}</b> 좌석배치도 저장 완료!\n\n${lines.join('\n')}\n\n이후 좌석배정 시 자동 적용됩니다.`);
+    } catch (err) {
+      await sendMessage(`❌ 배치도 파싱 오류: ${err.message}`);
+    }
     return;
   }
 
