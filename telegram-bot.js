@@ -1917,28 +1917,34 @@ async function getFinalSummaryDetail(perfIndex) {
 
 // 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
 // pdfkit으로 mm 단위 정확한 좌표 배치 (Playwright HTML→PDF 오차 제거)
-async function generateLabelPdf(perfIndex, upgradedNames = null) {
+async function generateLabelPdf(perfIndex, upgInfo = null) {
   const result = await getActiveOrders(perfIndex);
   if (!result) throw new Error('잘못된 공연 번호');
   const { activeOrders, perf } = result;
   if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
 
+  const upgradeMap = upgInfo ? (upgInfo.upgradeMap || {}) : {};
+  const upgradedNames = upgInfo ? (upgInfo.upgradedNames || new Set()) : new Set();
+
   // 뿌리오 데이터(최신순) → reverse → 선착순
   activeOrders.reverse();
 
   // 등급별 정렬: VIP석 → R석 → S석 → A석 (각 등급 내 선착순 유지)
+  // 업그레이드된 사람은 업그레이드 후 등급으로 정렬 (좋은 자리 순서)
   const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
   activeOrders.sort((a, b) => {
-    const ai = gradeOrder.indexOf(a.seatType);
-    const bi = gradeOrder.indexOf(b.seatType);
+    const aGrade = upgradeMap[a.buyerName] ? upgradeMap[a.buyerName].to : a.seatType;
+    const bGrade = upgradeMap[b.buyerName] ? upgradeMap[b.buyerName].to : b.seatType;
+    const ai = gradeOrder.indexOf(aGrade);
+    const bi = gradeOrder.indexOf(bGrade);
     return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
   });
 
-  // 라벨 데이터 준비
+  // 라벨 데이터 준비 (원래 등급 표시 + 업그레이드 밑줄)
   const labels = activeOrders.map(o => ({
     line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
     line2: `${o.seatType || ''} ${o.qty || 1}매`,
-    isUpgraded: upgradedNames ? upgradedNames.has(o.buyerName) : false,
+    isUpgraded: upgradedNames.has(o.buyerName),
   }));
 
   // mm → pt 변환 (1mm = 72/25.4 pt)
@@ -3423,10 +3429,18 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades) {
     await pushSeatsToFirebase(assignments, perf, region);
   }
 
-  // 업그레이드 정보 캐싱 (라벨 생성 시 밑줄 표시용)
-  lastAssignmentUpgrades = upgradedList.length > 0
-    ? { perfIndex, upgradedNames: new Set(upgradedList.map(u => u.name)) }
-    : null;
+  // 업그레이드 정보 캐싱 (라벨 생성 시 밑줄 + 정렬용)
+  if (upgradedList.length > 0) {
+    const upgradeMap = {};
+    for (const u of upgradedList) upgradeMap[u.name] = { from: u.from, to: u.to };
+    lastAssignmentUpgrades = {
+      perfIndex,
+      upgradedNames: new Set(upgradedList.map(u => u.name)),
+      upgradeMap,  // { 이름: { from: 'S석', to: 'VIP석' } }
+    };
+  } else {
+    lastAssignmentUpgrades = null;
+  }
 }
 
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
@@ -4963,11 +4977,11 @@ async function handleMessage(msg) {
     try {
       const perfIdx = num - 1;
       // 직전 좌석배정의 업그레이드 정보가 같은 공연이면 적용
-      const upgNames = (lastAssignmentUpgrades && lastAssignmentUpgrades.perfIndex === perfIdx)
-        ? lastAssignmentUpgrades.upgradedNames : null;
-      const upgLabel = upgNames ? ` (업그레이드 ${upgNames.size}명 밑줄)` : '';
+      const upgInfo = (lastAssignmentUpgrades && lastAssignmentUpgrades.perfIndex === perfIdx)
+        ? lastAssignmentUpgrades : null;
+      const upgLabel = upgInfo ? ` (업그레이드 ${upgInfo.upgradedNames.size}명 밑줄)` : '';
       await sendMessage(`🏷 라벨 시트 생성 중...${upgLabel}`);
-      const { pdfBuffer, orderCount, perf } = await generateLabelPdf(perfIdx, upgNames);
+      const { pdfBuffer, orderCount, perf } = await generateLabelPdf(perfIdx, upgInfo);
       const region = (perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/) || ['', '공연'])[1];
       const filename = `라벨_${region}_${orderCount}건.pdf`;
       await sendDocument(pdfBuffer, filename, `🏷 ${perf.title} 라벨 (${orderCount}건)${upgLabel}`);
