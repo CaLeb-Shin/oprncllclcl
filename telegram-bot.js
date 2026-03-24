@@ -2839,6 +2839,10 @@ function assignSeats(unsoldSeats, activeOrders, region) {
     if (!buyersByGrade[grade]) buyersByGrade[grade] = [];
     buyersByGrade[grade].push(order);
   }
+  // 각 등급 내 업그레이드된 사람은 맨 뒤로 (원래 구매자 우선 배정)
+  for (const buyers of Object.values(buyersByGrade)) {
+    buyers.sort((a, b) => (a.upgraded ? 1 : 0) - (b.upgraded ? 1 : 0));
+  }
 
   for (const [grade, buyers] of Object.entries(buyersByGrade)) {
     // 해당 등급의 미판매 좌석
