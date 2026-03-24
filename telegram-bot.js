@@ -1987,29 +1987,30 @@ async function generateLabelPdf(perfIndex, upgradedNames = null) {
           if (idx >= labels.length) break;
 
           const label = labels[idx];
-          const ul = !!label.isUpgraded;
-          // 셀 중앙 좌표 (mm)
-          const cellX = MARGIN_LEFT + col * H_PITCH;
-          const cellY = MARGIN_TOP + row * V_PITCH;
-          const centerX = cellX + LABEL_W / 2;
-          const centerY = cellY + LABEL_H / 2;
+          try {
+            const ul = !!label.isUpgraded;
+            const cellX = MARGIN_LEFT + col * H_PITCH;
+            const cellY = MARGIN_TOP + row * V_PITCH;
+            const centerX = cellX + LABEL_W / 2;
+            const centerY = cellY + LABEL_H / 2;
 
-          // line1 (bold) — 셀 중앙 위쪽
-          doc.font('label-bold').fontSize(FONT_SIZE);
-          const w1 = doc.widthOfString(label.line1) || 0;
-          const x1 = mm(centerX) - w1 / 2;
-          const y1 = mm(centerY) - FONT_SIZE * 1.1;
-          if (isFinite(x1) && isFinite(y1)) {
-            doc.text(label.line1, x1, y1, { lineBreak: false, underline: ul });
-          }
+            // line1 (bold) — 셀 중앙 위쪽
+            doc.font('label-bold').fontSize(FONT_SIZE);
+            const t1 = String(label.line1 || '');
+            const w1 = doc.widthOfString(t1) || 0;
+            doc.text(t1, mm(centerX) - w1 / 2, mm(centerY) - FONT_SIZE * 1.1, {
+              lineBreak: false, underline: ul,
+            });
 
-          // line2 — 셀 중앙 아래쪽
-          doc.font('label').fontSize(FONT_SIZE);
-          const w2 = doc.widthOfString(label.line2) || 0;
-          const x2 = mm(centerX) - w2 / 2;
-          const y2 = mm(centerY) + FONT_SIZE * 0.15;
-          if (isFinite(x2) && isFinite(y2)) {
-            doc.text(label.line2, x2, y2, { lineBreak: false, underline: ul });
+            // line2 — 셀 중앙 아래쪽
+            doc.font('label').fontSize(FONT_SIZE);
+            const t2 = String(label.line2 || '');
+            const w2 = doc.widthOfString(t2) || 0;
+            doc.text(t2, mm(centerX) - w2 / 2, mm(centerY) + FONT_SIZE * 0.15, {
+              lineBreak: false, underline: ul,
+            });
+          } catch (labelErr) {
+            console.log(`⚠️ 라벨 렌더링 오류 (idx=${idx}, "${label.line1}"): ${labelErr.message}`);
           }
         }
       }
