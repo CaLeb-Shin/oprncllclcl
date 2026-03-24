@@ -3093,10 +3093,18 @@ function generateAssignmentPdf(assignments, unassigned, perfName, upgradedList =
       const upgMark = upgradedNames.has(buyerName) ? ` ↑${upgradedInfo[buyerName]}` : '';
       let seatInfo;
       if (a.split) {
-        seatInfo = a.split.map(s => {
-          const fp = s.floor ? `${s.floor} ` : '';
-          return `${fp}${s.section} ${s.row}행 ${s.seats.join(',')}번`;
-        }).join(' / ');
+        // 같은 층이면 층 한번만 표시하여 텍스트 압축
+        const floors = [...new Set(a.split.map(s => s.floor || ''))];
+        if (floors.length === 1 && floors[0]) {
+          seatInfo = `${floors[0]} ` + a.split.map(s =>
+            `${s.section} ${s.row}행 ${s.seats.join(',')}번`
+          ).join(' / ');
+        } else {
+          seatInfo = a.split.map(s => {
+            const fp = s.floor ? `${s.floor} ` : '';
+            return `${fp}${s.section} ${s.row}행 ${s.seats.join(',')}번`;
+          }).join(' / ');
+        }
       } else {
         const fp = a.floor ? `${a.floor} ` : '';
         seatInfo = `${fp}${a.section} ${a.row}행 ${a.seats.join(',')}번`;
@@ -3195,7 +3203,7 @@ function generateAssignmentPdf(assignments, unassigned, perfName, upgradedList =
         const y = CONTENT_TOP + rowInCol * LINE_HEIGHT;
 
         doc.font(line.bold ? 'pdf-bold' : 'pdf').fontSize(FONT_SIZE).fillColor(line.color || '#000000');
-        doc.text(line.text, x, y, { width: COL_W - (line.indent || 0), lineBreak: false, ellipsis: true });
+        doc.text(line.text, x, y, { width: COL_W - (line.indent || 0), height: LINE_HEIGHT, lineBreak: true, ellipsis: true });
       }
 
       // 페이지 번호
