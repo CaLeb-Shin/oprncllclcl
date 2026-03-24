@@ -1937,7 +1937,7 @@ async function generateLabelPdf(perfIndex, upgradedNames = null) {
   // 라벨 데이터 준비
   const labels = activeOrders.map(o => ({
     line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
-    line2: `${o.seatType || ''} ${o.qty}매`,
+    line2: `${o.seatType || ''} ${o.qty || 1}매`,
     isUpgraded: upgradedNames ? upgradedNames.has(o.buyerName) : false,
   }));
 
@@ -1996,17 +1996,21 @@ async function generateLabelPdf(perfIndex, upgradedNames = null) {
 
           // line1 (bold) — 셀 중앙 위쪽
           doc.font('label-bold').fontSize(FONT_SIZE);
-          const w1 = doc.widthOfString(label.line1);
-          doc.text(label.line1, mm(centerX) - w1 / 2, mm(centerY) - FONT_SIZE * 1.1, {
-            lineBreak: false, underline: ul,
-          });
+          const w1 = doc.widthOfString(label.line1) || 0;
+          const x1 = mm(centerX) - w1 / 2;
+          const y1 = mm(centerY) - FONT_SIZE * 1.1;
+          if (isFinite(x1) && isFinite(y1)) {
+            doc.text(label.line1, x1, y1, { lineBreak: false, underline: ul });
+          }
 
           // line2 — 셀 중앙 아래쪽
           doc.font('label').fontSize(FONT_SIZE);
-          const w2 = doc.widthOfString(label.line2);
-          doc.text(label.line2, mm(centerX) - w2 / 2, mm(centerY) + FONT_SIZE * 0.15, {
-            lineBreak: false, underline: ul,
-          });
+          const w2 = doc.widthOfString(label.line2) || 0;
+          const x2 = mm(centerX) - w2 / 2;
+          const y2 = mm(centerY) + FONT_SIZE * 0.15;
+          if (isFinite(x2) && isFinite(y2)) {
+            doc.text(label.line2, x2, y2, { lineBreak: false, underline: ul });
+          }
         }
       }
     }
@@ -2078,17 +2082,21 @@ async function generateUpgradeLabelPdf(count) {
 
           // line1 (bold) — 셀 중앙 위쪽
           doc.font('label-bold').fontSize(FONT_SIZE);
-          const w1 = doc.widthOfString(label.line1);
-          doc.text(label.line1, mm(centerX) - w1 / 2, mm(centerY) - FONT_SIZE * 1.1, {
-            lineBreak: false,
-          });
+          const w1 = doc.widthOfString(label.line1) || 0;
+          const x1 = mm(centerX) - w1 / 2;
+          const y1 = mm(centerY) - FONT_SIZE * 1.1;
+          if (isFinite(x1) && isFinite(y1)) {
+            doc.text(label.line1, x1, y1, { lineBreak: false });
+          }
 
           // line2 — 셀 중앙 아래쪽
           doc.font('label').fontSize(FONT_SIZE);
-          const w2 = doc.widthOfString(label.line2);
-          doc.text(label.line2, mm(centerX) - w2 / 2, mm(centerY) + FONT_SIZE * 0.15, {
-            lineBreak: false,
-          });
+          const w2 = doc.widthOfString(label.line2) || 0;
+          const x2 = mm(centerX) - w2 / 2;
+          const y2 = mm(centerY) + FONT_SIZE * 0.15;
+          if (isFinite(x2) && isFinite(y2)) {
+            doc.text(label.line2, x2, y2, { lineBreak: false });
+          }
         }
       }
     }
