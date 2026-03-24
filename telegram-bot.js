@@ -2618,11 +2618,13 @@ function parseUnsoldSeats(buffer) {
   const floorIdx = headerRow.findIndex(c => c === '층' || c.includes('층'));
   const sectionRowIdx = headerRow.findIndex(c => c === '열' || c.includes('열'));
   const seatsIdx = headerRow.findIndex(c => c.includes('좌석번호'));
+  const seatCountIdx = headerRow.findIndex(c => c === '좌석수' || c.includes('좌석수'));
 
   // fallback: 실측 기반
   const COL_GRADE = gradeIdx >= 0 ? gradeIdx : 3;
   const COL_FLOOR = floorIdx >= 0 ? floorIdx : 4;
   const COL_SECTION_ROW = sectionRowIdx >= 0 ? sectionRowIdx : 5;
+  const COL_SEAT_COUNT = seatCountIdx >= 0 ? seatCountIdx : 6;
   const COL_SEATS = seatsIdx >= 0 ? seatsIdx : 7;
 
   const result = {};
@@ -2668,12 +2670,16 @@ function parseUnsoldSeats(buffer) {
     const floorMatch = lastFloor.match(/(\d+)층/);
     const floor = floorMatch ? `${floorMatch[1]}층` : lastFloor;
 
+    // 좌석수 (해당 열/행의 전체 좌석 수)
+    const totalSeats = parseInt(row[COL_SEAT_COUNT]) || 0;
+
     if (!result[lastGrade]) result[lastGrade] = [];
     result[lastGrade].push({
       section,
       floor,
       row: rowNum,
       seats: seatNums.sort((a, b) => a - b),
+      totalSeats,
     });
   }
 
@@ -2753,6 +2759,17 @@ function parseSeatLayout(buffer) {
   return config;
 }
 
+// 좌석수(totalSeats)에서 줄당 좌석수 자동 추정
+// 10석/줄이 가장 흔하므로 10 우선, 그 다음 9,11,8,12,13,14 순서로 시도
+function autoDetectSpl(totalSeats) {
+  if (!totalSeats || totalSeats <= 14) return 0; // 소규모 → 체크 불필요
+  if (totalSeats % 10 === 0) return 10;
+  for (const n of [9, 11, 8, 12, 13, 14]) {
+    if (totalSeats % n === 0) return n;
+  }
+  return 10; // 딱 안나눠져도 10 기본값 (마지막 줄만 짧음)
+}
+
 // lineEnds 배열에서 좌석의 물리적 줄 인덱스 반환
 function getPhysicalLine(seat, lineEnds) {
   for (let i = 0; i < lineEnds.length; i++) {
@@ -2768,15 +2785,19 @@ function assignSeats(unsoldSeats, activeOrders, region) {
   const jsonCfg = loadVenueSeatConfigs()[region] || {};
   const splCfg = VENUE_SEATS_PER_LINE[region];
   // 열+층 조합으로 lineEnds 또는 seatsPerLine 조회
-  const getLineConfig = (floor, section) => {
+  // 우선순위: 1)배치도JSON → 2)하드코딩 → 3)좌석수 자동감지
+  const getLineConfig = (floor, section, totalSeats) => {
     const key = `${floor}${section}`;
-    // JSON에 lineEnds 배열이 있으면 우선 사용
+    // 1순위: JSON(배치도 파싱 결과)
     if (jsonCfg[key]) return { lineEnds: jsonCfg[key] };
     if (jsonCfg[section]) return { lineEnds: jsonCfg[section] };
-    // fallback: 하드코딩 seatsPerLine
-    if (!splCfg) return { spl: 0 };
-    if (typeof splCfg === 'number') return { spl: splCfg };
-    return { spl: splCfg[key] || splCfg[section] || splCfg.default || 0 };
+    // 2순위: 하드코딩 seatsPerLine
+    if (splCfg) {
+      const v = typeof splCfg === 'number' ? splCfg : (splCfg[key] || splCfg[section] || splCfg.default);
+      if (v) return { spl: v };
+    }
+    // 3순위: 좌석수에서 자동 감지
+    return { spl: autoDetectSpl(totalSeats) };
   };
   const assignments = [];
   const unassigned = [];
@@ -2906,7 +2927,7 @@ function assignSeats(unsoldSeats, activeOrders, region) {
 
         if (qty >= 2) {
           // 연속좌석 탐색
-          const group = findConsecutive(rowData.seats, qty, getLineConfig(rowData.floor, rowData.section));
+          const group = findConsecutive(rowData.seats, qty, getLineConfig(rowData.floor, rowData.section, rowData.totalSeats));
           if (group) {
             assignments.push({
               buyer,
