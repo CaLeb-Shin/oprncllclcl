@@ -1185,8 +1185,10 @@ async function getNewOrders() {
           const orderId = headerOrderIds[i] || '';
           if (!orderId) continue;
 
-          // 상품명: [지역] ... 석 패턴이 있는 셀
-          const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/)) || '';
+          // 상품명: [지역] ... 석 패턴 우선, fallback으로 [지역]+ 긴 텍스트 (줄바꿈 대응 s플래그)
+          const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/s))
+                           || cells.find((c) => c && /^\[.+\]/.test(c) && c.length > 8 && /멜론|MelON|콘서트|공연|오케스트라|디즈니|지브리|뮤지컬/.test(c))
+                           || '';
           // 구매자: 셀[9]
           const buyerName = cells[9] || '';
           
