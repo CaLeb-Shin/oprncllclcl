@@ -4642,12 +4642,16 @@ async function handleCallbackQuery(cq) {
     }
   } else if (data.startsWith('reject_')) {
     const orderId = data.replace('reject_', '');
-    await answerCallbackQuery(queryId, '나중에 처리');
+    await answerCallbackQuery(queryId, '보류 처리 완료');
 
-    // processed에 추가하지 않음 → 다음 체크 때 다시 새 주문으로 감지
+    // processed에 추가 → 다시 알림 안 뜸
+    const processed = readJson(CONFIG.processedOrdersFile);
+    processed.push(orderId);
+    writeJson(CONFIG.processedOrdersFile, processed);
+
     delete pendingOrders[orderId];
     savePendingOrders(pendingOrders);
-    await sendMessage(`⏸ 주문 ${orderId} 보류 (다음 체크 때 다시 알림)`);
+    await sendMessage(`⏸ 주문 ${orderId} 보류 완료`);
   }
 }
 
