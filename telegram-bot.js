@@ -3289,6 +3289,93 @@ function parseUpgradeSpec(text) {
   return upgrades;
 }
 
+// 제외 좌석 파싱
+// 입력 예: "제외 1층D열54-100/2층A구역1-30"
+// 반환: [{ floor, section, row, seatFrom, seatTo }]
+function parseExclusionSpec(text) {
+  if (!text || !text.includes('제외')) return [];
+  const exclusions = [];
+  // "제외" 이후, "업그레이드" 이전 텍스트 추출
+  let afterExclude = text.substring(text.indexOf('제외') + 2);
+  const upgIdx = afterExclude.indexOf('업그레이드');
+  if (upgIdx >= 0) afterExclude = afterExclude.substring(0, upgIdx);
+  // /로 분리
+  const parts = afterExclude.split(/[/／]/).map(p => p.trim()).filter(Boolean);
+  for (const part of parts) {
+    const floorMatch = part.match(/(\d+)\s*층/);
+    const floor = floorMatch ? `${floorMatch[1]}층` : null;
+    // 열 or 구역 (예: D열, BL5구역, A구역)
+    const sectionMatch = part.match(/([A-Za-z가-힣]+\d*)\s*(열|구역)/);
+    const section = sectionMatch ? `${sectionMatch[1]}${sectionMatch[2]}` : null;
+    // 행 (예: 3행)
+    const rowMatch = part.match(/(\d+)\s*행/);
+    const row = rowMatch ? parseInt(rowMatch[1]) : null;
+    // 좌석 범위 (예: 54-100, 54~100, 54번-100번, 54번~100번)
+    const rangeMatch = part.match(/(\d+)\s*번?\s*[-~]\s*(\d+)/);
+    const seatFrom = rangeMatch ? parseInt(rangeMatch[1]) : null;
+    const seatTo = rangeMatch ? parseInt(rangeMatch[2]) : null;
+    if (floor || section || row) {
+      exclusions.push({ floor, section, row, seatFrom, seatTo });
+    }
+  }
+  return exclusions;
+}
+
+// 제외 좌석 적용: unsoldSeats에서 제외 규칙에 해당하는 좌석 제거
+function applyExclusions(unsoldSeats, exclusions) {
+  if (!exclusions || exclusions.length === 0) return { seats: unsoldSeats, excluded: 0 };
+  let totalExcluded = 0;
+  const result = {};
+  for (const [grade, rows] of Object.entries(unsoldSeats)) {
+    const filteredRows = [];
+    for (const rowData of rows) {
+      let seats = [...rowData.seats];
+      const before = seats.length;
+      for (const exc of exclusions) {
+        if (exc.floor && rowData.floor !== exc.floor) continue;
+        if (exc.section && !rowData.section.includes(exc.section.replace(/구역|열/, '')) &&
+            rowData.section !== exc.section) continue;
+        if (exc.row != null && rowData.row !== exc.row) continue;
+        if (exc.seatFrom != null && exc.seatTo != null) {
+          seats = seats.filter(s => s < exc.seatFrom || s > exc.seatTo);
+        } else {
+          seats = [];
+        }
+      }
+      totalExcluded += before - seats.length;
+      if (seats.length > 0) filteredRows.push({ ...rowData, seats });
+    }
+    if (filteredRows.length > 0) result[grade] = filteredRows;
+  }
+  return { seats: result, excluded: totalExcluded };
+}
+
+// 미판매좌석 + 보류석 합산
+function mergeUnsoldSeats(seats1, seats2) {
+  if (!seats2) return seats1;
+  const merged = {};
+  // seats1 복사
+  for (const [grade, rows] of Object.entries(seats1)) {
+    merged[grade] = rows.map(r => ({ ...r, seats: [...r.seats] }));
+  }
+  // seats2 합산
+  for (const [grade, rows] of Object.entries(seats2)) {
+    if (!merged[grade]) { merged[grade] = rows.map(r => ({ ...r, seats: [...r.seats] })); continue; }
+    for (const row2 of rows) {
+      const existing = merged[grade].find(r =>
+        r.floor === row2.floor && r.section === row2.section && r.row === row2.row
+      );
+      if (existing) {
+        const combined = new Set([...existing.seats, ...row2.seats]);
+        existing.seats = [...combined].sort((a, b) => a - b);
+      } else {
+        merged[grade].push({ ...row2, seats: [...row2.seats] });
+      }
+    }
+  }
+  return merged;
+}
+
 // 업그레이드 적용: activeOrders에서 랜덤 선택하여 seatType 변경
 function applyUpgrades(activeOrders, upgrades) {
   const upgraded = [];
@@ -3312,10 +3399,10 @@ function applyUpgrades(activeOrders, upgrades) {
   return upgraded;
 }
 
-// TADMIN에서 잔여석(미판매) 엑셀 자동 다운로드
+// TADMIN에서 잔여석+보류석 엑셀 자동 다운로드
 function downloadUnsoldFromTadmin(tadminCode, chatId) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', ['seat-download.js', tadminCode, '0'], {
+    const child = spawn('node', ['seat-download.js', tadminCode, '0,2'], {
       cwd: CONFIG.baseDir,
       windowsHide: true,
       env: { ...process.env, TELEGRAM_CHAT_ID: chatId },
@@ -3326,12 +3413,17 @@ function downloadUnsoldFromTadmin(tadminCode, chatId) {
       if (code !== 0) { reject(new Error(`seat-download 실패 (code=${code})`)); return; }
       const downloadDir = path.join(CONFIG.baseDir, 'downloads');
       if (!fs.existsSync(downloadDir)) { reject(new Error('downloads 폴더 없음')); return; }
-      const files = fs.readdirSync(downloadDir)
-        .filter(f => f.startsWith('잔여석_') && f.match(/\.xls$/i))
-        .map(f => ({ name: f, mtime: fs.statSync(path.join(downloadDir, f)).mtime }))
-        .sort((a, b) => b.mtime - a.mtime);
-      if (files.length === 0) { reject(new Error('잔여석 파일 없음')); return; }
-      resolve(fs.readFileSync(path.join(downloadDir, files[0].name)));
+      const findLatest = (prefix) => {
+        const files = fs.readdirSync(downloadDir)
+          .filter(f => f.startsWith(prefix) && f.match(/\.xls$/i))
+          .map(f => ({ name: f, mtime: fs.statSync(path.join(downloadDir, f)).mtime }))
+          .sort((a, b) => b.mtime - a.mtime);
+        return files.length > 0 ? fs.readFileSync(path.join(downloadDir, files[0].name)) : null;
+      };
+      const unsoldBuffer = findLatest('잔여석_');
+      if (!unsoldBuffer) { reject(new Error('잔여석 파일 없음')); return; }
+      const heldBuffer = findLatest('보류석_');
+      resolve({ unsoldBuffer, heldBuffer });
     });
     child.on('error', reject);
   });
@@ -3358,7 +3450,7 @@ function findTadminCode(perfIndex) {
 }
 
 // 좌석 배정 실행 (공통 로직: 자동 다운로드 / 수동 업로드 모두 사용)
-async function executeSeatAssignment(fileBuffer, perfIndex, upgrades) {
+async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions = [], heldBuffer = null) {
   // 디버그: 엑셀 첫 5행 출력
   const debugWb = XLSX.read(fileBuffer, { type: 'buffer' });
   const debugSheet = debugWb.Sheets[debugWb.SheetNames[0]];
@@ -3370,15 +3462,42 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades) {
   }
   await sendMessage(debugMsg);
 
-  const unsoldSeats = parseUnsoldSeats(fileBuffer);
+  let unsoldSeats = parseUnsoldSeats(fileBuffer);
 
-  // 미판매 좌석 요약
+  // 보류석 합산
+  if (heldBuffer) {
+    const heldSeats = parseUnsoldSeats(heldBuffer);
+    const heldCount = {};
+    for (const [grade, rows] of Object.entries(heldSeats)) {
+      heldCount[grade] = rows.reduce((sum, r) => sum + r.seats.length, 0);
+    }
+    const heldSummary = Object.entries(heldCount).map(([g, c]) => `${g} ${c}석`).join(', ');
+    unsoldSeats = mergeUnsoldSeats(unsoldSeats, heldSeats);
+    await sendMessage(`📌 보류석 합산: ${heldSummary}`);
+  }
+
+  // 제외 좌석 적용
+  if (exclusions.length > 0) {
+    const { seats: filteredSeats, excluded } = applyExclusions(unsoldSeats, exclusions);
+    unsoldSeats = filteredSeats;
+    const excDesc = exclusions.map(e => {
+      let desc = '';
+      if (e.floor) desc += e.floor;
+      if (e.section) desc += e.section;
+      if (e.row != null) desc += `${e.row}행`;
+      if (e.seatFrom != null) desc += ` ${e.seatFrom}-${e.seatTo}번`;
+      return desc;
+    }).join(', ');
+    await sendMessage(`🚫 제외: ${excDesc} (${excluded}석 제외)`);
+  }
+
+  // 미판매 좌석 요약 (합산+제외 적용 후)
   const gradeCount = {};
   for (const [grade, rows] of Object.entries(unsoldSeats)) {
     gradeCount[grade] = rows.reduce((sum, r) => sum + r.seats.length, 0);
   }
   const unsoldSummary = Object.entries(gradeCount).map(([g, c]) => `${g} ${c}석`).join(', ');
-  await sendMessage(`📋 미판매 좌석: ${unsoldSummary}\n\n🎯 좌석 배정 중...`);
+  await sendMessage(`📋 배정 가능 좌석: ${unsoldSummary}\n\n🎯 좌석 배정 중...`);
 
   // activeOrders 가져오기
   const result = await getActiveOrders(perfIndex);
@@ -3397,7 +3516,7 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades) {
   }
 
   // 지역 추출
-  const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
+  const regionMatch = perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산|부천)/);
   const region = regionMatch ? regionMatch[1] : '';
 
   // 좌석 배정
@@ -4789,7 +4908,7 @@ async function handleMessage(msg) {
     try {
       await sendMessage('📊 엑셀 파싱 중...');
       const fileBuffer = await downloadTelegramFile(doc.file_id);
-      await executeSeatAssignment(fileBuffer, seatAssignWaiting.perfIndex, seatAssignWaiting.upgrades || []);
+      await executeSeatAssignment(fileBuffer, seatAssignWaiting.perfIndex, seatAssignWaiting.upgrades || [], seatAssignWaiting.exclusions || []);
       seatAssignWaiting = null;
     } catch (err) {
       await sendMessage(`❌ 좌석배정 오류: ${err.message}`);
@@ -5096,29 +5215,46 @@ async function handleMessage(msg) {
     const key = finalSummaryKeys[perfIndex];
     const perf = finalSummaryData[key];
     const upgrades = parseUpgradeSpec(text);
+    const exclusions = parseExclusionSpec(text);
 
     // TADMIN 자동 다운로드 시도
     const tadminCode = findTadminCode(perfIndex);
     if (tadminCode) {
       let statusMsg = `🎫 <b>${perf.title}</b> 좌석배정\n\n`;
+      if (exclusions.length > 0) {
+        const excDesc = exclusions.map(e => {
+          let d = ''; if (e.floor) d += e.floor; if (e.section) d += e.section;
+          if (e.row != null) d += `${e.row}행`; if (e.seatFrom != null) d += ` ${e.seatFrom}-${e.seatTo}번`;
+          return d;
+        }).join(', ');
+        statusMsg += `🚫 제외: ${excDesc}\n`;
+      }
       if (upgrades.length > 0) {
         statusMsg += `🆙 업그레이드: ${upgrades.map(u => `${u.from}→${u.to} ${u.count}명`).join(', ')}\n`;
       }
-      statusMsg += `📥 TADMIN에서 미판매 좌석 자동 다운로드 중...`;
+      statusMsg += `📥 TADMIN에서 잔여석+보류석 자동 다운로드 중...`;
       await sendMessage(statusMsg);
       try {
-        const fileBuffer = await downloadUnsoldFromTadmin(tadminCode, chatId);
-        await executeSeatAssignment(fileBuffer, perfIndex, upgrades);
+        const { unsoldBuffer, heldBuffer } = await downloadUnsoldFromTadmin(tadminCode, chatId);
+        await executeSeatAssignment(unsoldBuffer, perfIndex, upgrades, exclusions, heldBuffer);
       } catch (err) {
         console.log('   ⚠️ 자동 다운로드 실패:', err.message);
         // 실패 시 수동 업로드 폴백
-        seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades };
+        seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades, exclusions };
         await sendMessage(`⚠️ 자동 다운로드 실패: ${err.message}\n\n📎 미판매 좌석 엑셀 파일(.xlsx)을 수동으로 보내주세요.\n⏰ 10분 이내에 파일을 보내주세요.`);
       }
     } else {
       // tadminCode 없으면 수동 업로드
-      seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades };
+      seatAssignWaiting = { perfIndex, chatId, timestamp: Date.now(), upgrades, exclusions };
       let readyMsg = `🎫 <b>${perf.title}</b> 좌석배정 준비\n\n`;
+      if (exclusions.length > 0) {
+        const excDesc = exclusions.map(e => {
+          let d = ''; if (e.floor) d += e.floor; if (e.section) d += e.section;
+          if (e.row != null) d += `${e.row}행`; if (e.seatFrom != null) d += ` ${e.seatFrom}-${e.seatTo}번`;
+          return d;
+        }).join(', ');
+        readyMsg += `🚫 제외: ${excDesc}\n`;
+      }
       if (upgrades.length > 0) {
         readyMsg += `🆙 업그레이드: ${upgrades.map(u => `${u.from}→${u.to} ${u.count}명`).join(', ')}\n\n`;
       }
@@ -5162,7 +5298,7 @@ async function handleMessage(msg) {
           if (perf.date) msg += `\n   📅 ${perf.date}`;
           msg += `\n   📊 ${orderCount}건 ${totalQty}매\n\n`;
         });
-        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n업그레이드 라벨: <b>업라벨 20</b>\n좌석 배정: <b>좌석배정1</b>\n좌석 업그레이드: <b>좌석배정1 업그레이드 S→R 5 R→VIP 3</b>\n좌석현황 엑셀: <b>좌석현황1</b>`;
+        msg += `결산할 공연 번호를 입력하세요.\n예: <b>결산1</b> 또는 <b>결산 2</b>\n\n네이버↔뿌리오 대조: <b>주문비교1</b>\n라벨 시트 출력: <b>라벨1</b>\n업그레이드 라벨: <b>업라벨 20</b>\n좌석현황 엑셀: <b>좌석현황1</b>\n\n🎫 <b>좌석배정</b> (잔여석+보류석 자동 합산)\n<b>좌석배정1</b>\n<b>좌석배정1 업그레이드 S→R 5 R→VIP 3</b>\n<b>좌석배정1 제외 1층D열54-100/2층A구역1-30</b>\n<b>좌석배정1 제외 D열54-100 업그레이드 S→R 5</b>`;
         await sendMessage(msg);
       }
     } catch (err) {

@@ -289,7 +289,7 @@ async function downloadSeatExcel(targetGoodsCode, statusFilter) {
     const downloadedFiles = [];
 
     for (const status of statuses) {
-      if (statusFilter && status.value !== statusFilter) continue;
+      if (statusFilter && !statusFilter.split(',').includes(status.value)) continue;
       console.log(`5️⃣ 상태: ${status.name} 선택...`);
       const selects = await page.$$('select');
       for (const sel of selects) {
@@ -346,5 +346,5 @@ async function downloadSeatExcel(targetGoodsCode, statusFilter) {
 
 // 실행
 const targetCode = process.argv[2] || null; // 상품코드 지정 가능 (없으면 가장 가까운 공연)
-const statusFilter = process.argv[3] || null; // '0'=잔여석만, '1'=판매석만, '2'=보류석만
+const statusFilter = process.argv[3] || null; // '0'=잔여석만, '1'=판매석만, '2'=보류석만, '0,2'=잔여석+보류석
 downloadSeatExcel(targetCode, statusFilter);
