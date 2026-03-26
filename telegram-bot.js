@@ -4181,18 +4181,19 @@ async function verifySmsSent(buyerName, phone) {
   try {
     // 발송결과 페이지로 이동
     await ppurioPage.goto('https://www.ppurio.com/result/message');
-    await ppurioPage.waitForTimeout(3000);
+    await ppurioPage.waitForTimeout(6000);
 
     const loggedIn = await isPpurioLoggedIn(ppurioPage);
     if (!loggedIn) return null; // 검증 불가
 
     // 최근 발송결과에서 이름 또는 전화번호 매칭 확인
-    const found = await ppurioPage.evaluate(({ name, tel }) => {
+    // 괄호 앞 이름만으로도 매칭 (예: "김규리(김성진)" → "김규리"도 검색)
+    const found = await ppurioPage.evaluate(({ name, baseName, tel }) => {
       const text = document.body.innerText;
-      const hasName = text.includes(name);
+      const hasName = text.includes(name) || text.includes(baseName);
       const hasTel = tel ? text.includes(tel.replace(/-/g, '').slice(-4)) : false;
       return hasName || hasTel;
-    }, { name: buyerName, tel: phone || '' });
+    }, { name: buyerName, baseName: buyerName.replace(/\(.*\)/, '').trim(), tel: phone || '' });
 
     console.log(`   🔍 발송 검증: ${buyerName} → ${found ? '확인됨 ✅' : '미확인 ❌'}`);
     return found;
