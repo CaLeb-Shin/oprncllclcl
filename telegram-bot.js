@@ -2133,7 +2133,7 @@ async function generateThankYouLabelPdf(count) {
   for (let i = 0; i < count; i++) {
     labels.push({
       line1: '함께해주셔서',
-      line2: '감사드립니다 ♥',
+      line2: '감사드립니다 🍈♥',
     });
   }
 
@@ -2194,8 +2194,8 @@ async function generateThankYouLabelPdf(count) {
             doc.text(label.line1, x1, y1, { lineBreak: false });
           }
 
-          // line2 — 셀 중앙 아래쪽
-          doc.font('label').fontSize(FONT_SIZE);
+          // line2 (bold) — 셀 중앙 아래쪽
+          doc.font('label-bold').fontSize(FONT_SIZE);
           const w2 = doc.widthOfString(label.line2) || 0;
           const x2 = mm(centerX) - w2 / 2;
           const y2 = mm(centerY) + FONT_SIZE * 0.15;
