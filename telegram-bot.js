@@ -2132,7 +2132,7 @@ async function generateThankYouLabelPdf(count) {
   const labels = [];
   for (let i = 0; i < count; i++) {
     labels.push({
-      line1: '멜론 심포니와 함께해주셔서',
+      line1: '함께해주셔서',
       line2: '감사드립니다 ♥',
     });
   }
