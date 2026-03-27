@@ -2133,7 +2133,7 @@ async function generateThankYouLabelPdf(count) {
   for (let i = 0; i < count; i++) {
     labels.push({
       line1: '♥ 함께해주셔서',
-      line2: '감사드립니다 🍈',
+      line2: '감사드립니다 ♬',
     });
   }
 
@@ -2158,10 +2158,6 @@ async function generateThankYouLabelPdf(count) {
   const fontBoldPath = process.platform === 'win32'
     ? 'C:/Windows/Fonts/malgunbd.ttf'
     : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
-  const emojiFontPath = process.platform === 'win32'
-    ? 'C:/Windows/Fonts/seguiemj.ttf'
-    : '/System/Library/Fonts/Apple Color Emoji.ttc';
-
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 0 });
     const chunks = [];
@@ -2171,7 +2167,6 @@ async function generateThankYouLabelPdf(count) {
 
     doc.registerFont('label', fontPath);
     doc.registerFont('label-bold', fontBoldPath);
-    doc.registerFont('emoji', emojiFontPath);
 
     const pageCount = Math.ceil(labels.length / totalSlots) || 1;
 
@@ -2183,6 +2178,7 @@ async function generateThankYouLabelPdf(count) {
           const idx = p * totalSlots + row * COLS + col;
           if (idx >= labels.length) break;
 
+          const label = labels[idx];
           const cellX = MARGIN_LEFT + col * H_PITCH;
           const cellY = MARGIN_TOP + row * V_PITCH;
           const centerX = cellX + LABEL_W / 2;
@@ -2190,28 +2186,20 @@ async function generateThankYouLabelPdf(count) {
 
           // line1 (bold) — 셀 중앙 위쪽
           doc.font('label-bold').fontSize(FONT_SIZE);
-          const w1 = doc.widthOfString('♥ 함께해주셔서') || 0;
+          const w1 = doc.widthOfString(label.line1) || 0;
           const x1 = mm(centerX) - w1 / 2;
           const y1 = mm(centerY) - FONT_SIZE * 1.1;
           if (isFinite(x1) && isFinite(y1)) {
-            doc.text('♥ 함께해주셔서', x1, y1, { lineBreak: false });
+            doc.text(label.line1, x1, y1, { lineBreak: false });
           }
 
-          // line2 (bold + emoji) — 셀 중앙 아래쪽
-          const textPart = '감사드립니다 ';
-          const emojiPart = '🍈';
+          // line2 (bold) — 셀 중앙 아래쪽
           doc.font('label-bold').fontSize(FONT_SIZE);
-          const wText = doc.widthOfString(textPart) || 0;
-          doc.font('emoji').fontSize(FONT_SIZE);
-          const wEmoji = doc.widthOfString(emojiPart) || 0;
-          const totalW = wText + wEmoji;
-          const startX = mm(centerX) - totalW / 2;
+          const w2 = doc.widthOfString(label.line2) || 0;
+          const x2 = mm(centerX) - w2 / 2;
           const y2 = mm(centerY) + FONT_SIZE * 0.15;
-          if (isFinite(startX) && isFinite(y2)) {
-            doc.font('label-bold').fontSize(FONT_SIZE);
-            doc.text(textPart, startX, y2, { lineBreak: false });
-            doc.font('emoji').fontSize(FONT_SIZE);
-            doc.text(emojiPart, startX + wText, y2, { lineBreak: false });
+          if (isFinite(x2) && isFinite(y2)) {
+            doc.text(label.line2, x2, y2, { lineBreak: false });
           }
         }
       }
