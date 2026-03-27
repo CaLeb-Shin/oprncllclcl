@@ -2133,7 +2133,7 @@ async function generateThankYouLabelPdf(count) {
   for (let i = 0; i < count; i++) {
     labels.push({
       line1: '함께해주셔서',
-      line2: '감사드립니다 🍈♥',
+      line2: '♥ 감사드립니다 🍈',
     });
   }
 
