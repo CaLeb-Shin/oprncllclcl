@@ -1935,8 +1935,8 @@ async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = nul
   const upgradeMap = upgInfo ? (upgInfo.upgradeMap || {}) : {};
   const upgradedNames = upgInfo ? (upgInfo.upgradedNames || new Set()) : new Set();
 
-  // 뿌리오 데이터(최신순) → reverse → 선착순
-  activeOrders.reverse();
+  // 뿌리오 데이터(최신순) → reverse → 선착순 (preloaded는 이미 선착순)
+  if (!preloadedOrders) activeOrders.reverse();
 
   // 등급별 정렬: VIP석 → R석 → S석 → A석 (각 등급 내 선착순 유지)
   // 업그레이드된 사람은 업그레이드 후 등급으로 정렬 (좋은 자리 순서)
