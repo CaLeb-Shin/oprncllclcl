@@ -3083,19 +3083,41 @@ function assignSeats(unsoldSeats, activeOrders, region) {
         }
       }
 
-      // 연속 실패 시 분산 배정
+      // 연속 실패 시 분산 배정 (가능한 한 연석 유지)
       if (!assigned && qty >= 2) {
         let remaining = qty;
         const splitSeats = [];
         for (const rowData of availableRows) {
           if (remaining <= 0) break;
-          const take = Math.min(remaining, rowData.seats.length);
-          if (take === 0) continue;
-          const center = getCenter(rowData.seats);
-          rowData.seats.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
-          const taken = rowData.seats.splice(0, take);
-          splitSeats.push({ floor: rowData.floor, section: rowData.section, row: rowData.row, seats: taken.sort((a, b) => a - b) });
-          remaining -= take;
+          if (rowData.seats.length === 0) continue;
+
+          const lineCfg = getLineConfig(rowData.floor, rowData.section, rowData.totalSeats);
+          const tryQty = Math.min(remaining, rowData.seats.length);
+
+          // 가능한 최대 연속좌석 먼저 시도
+          let consecutiveGroup = null;
+          for (let q = tryQty; q >= 2; q--) {
+            const group = findConsecutive(rowData.seats, q, lineCfg);
+            if (group) {
+              consecutiveGroup = group;
+              break;
+            }
+          }
+
+          if (consecutiveGroup) {
+            splitSeats.push({ floor: rowData.floor, section: rowData.section, row: rowData.row, seats: consecutiveGroup.sort((a, b) => a - b) });
+            rowData.seats = rowData.seats.filter(s => !consecutiveGroup.includes(s));
+            remaining -= consecutiveGroup.length;
+          } else {
+            // 연속 못 찾으면 가운데부터 1석씩
+            const take = Math.min(remaining, rowData.seats.length);
+            if (take === 0) continue;
+            const center = getCenter(rowData.seats);
+            rowData.seats.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+            const taken = rowData.seats.splice(0, take);
+            splitSeats.push({ floor: rowData.floor, section: rowData.section, row: rowData.row, seats: taken.sort((a, b) => a - b) });
+            remaining -= take;
+          }
         }
         if (splitSeats.length > 0) {
           assignments.push({
