@@ -3340,7 +3340,7 @@ function generateAssignmentPdf(assignments, unassigned, perfName, upgradedList =
         const y = CONTENT_TOP + rowInCol * LINE_HEIGHT;
 
         doc.font(line.bold ? 'pdf-bold' : 'pdf').fontSize(FONT_SIZE).fillColor(line.color || '#000000');
-        doc.text(line.text, x, y, { width: COL_W - (line.indent || 0), height: LINE_HEIGHT, lineBreak: true, ellipsis: true });
+        doc.text(line.text, x, y, { lineBreak: false });
       }
 
       // 페이지 번호
