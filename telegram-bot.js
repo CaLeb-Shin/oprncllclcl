@@ -2124,6 +2124,92 @@ async function generateUpgradeLabelPdf(count) {
   });
 }
 
+// 감사 라벨 시트 PDF 생성 (글로리텍 8189: 동일 규격)
+// 고정 텍스트 라벨을 지정 매수만큼 출력
+async function generateThankYouLabelPdf(count) {
+  if (!count || count <= 0) throw new Error('매수를 입력해주세요');
+
+  const labels = [];
+  for (let i = 0; i < count; i++) {
+    labels.push({
+      line1: '멜론 심포니와 함께해주셔서',
+      line2: '감사드립니다 ♥',
+    });
+  }
+
+  const mm = v => v * 72 / 25.4;
+
+  const COLS = 7;
+  const ROWS = 27;
+  const LABEL_W = 25.4;
+  const LABEL_H = 10;
+  const H_GAP = 4;
+  const H_PITCH = LABEL_W + H_GAP;
+  const V_PITCH = 10.2;
+  const MARGIN_LEFT = 5;
+  const MARGIN_TOP = 8.5;
+
+  const FONT_SIZE = 6.5;
+  const totalSlots = COLS * ROWS;
+
+  const fontPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgun.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+  const fontBoldPath = process.platform === 'win32'
+    ? 'C:/Windows/Fonts/malgunbd.ttf'
+    : '/System/Library/Fonts/AppleSDGothicNeo.ttc';
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 0 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve({ pdfBuffer: Buffer.concat(chunks), count }));
+    doc.on('error', reject);
+
+    doc.registerFont('label', fontPath);
+    doc.registerFont('label-bold', fontBoldPath);
+
+    const pageCount = Math.ceil(labels.length / totalSlots) || 1;
+
+    for (let p = 0; p < pageCount; p++) {
+      if (p > 0) doc.addPage({ size: 'A4', margin: 0 });
+
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const idx = p * totalSlots + row * COLS + col;
+          if (idx >= labels.length) break;
+
+          const label = labels[idx];
+          const cellX = MARGIN_LEFT + col * H_PITCH;
+          const cellY = MARGIN_TOP + row * V_PITCH;
+          const centerX = cellX + LABEL_W / 2;
+          const centerY = cellY + LABEL_H / 2;
+
+          // line1 (bold) — 셀 중앙 위쪽
+          doc.font('label-bold').fontSize(FONT_SIZE);
+          const w1 = doc.widthOfString(label.line1) || 0;
+          const x1 = mm(centerX) - w1 / 2;
+          const y1 = mm(centerY) - FONT_SIZE * 1.1;
+          if (isFinite(x1) && isFinite(y1)) {
+            doc.text(label.line1, x1, y1, { lineBreak: false });
+          }
+
+          // line2 — 셀 중앙 아래쪽
+          doc.font('label').fontSize(FONT_SIZE);
+          const w2 = doc.widthOfString(label.line2) || 0;
+          const x2 = mm(centerX) - w2 / 2;
+          const y2 = mm(centerY) + FONT_SIZE * 0.15;
+          if (isFinite(x2) && isFinite(y2)) {
+            doc.text(label.line2, x2, y2, { lineBreak: false });
+          }
+        }
+      }
+    }
+
+    doc.end();
+  });
+}
+
 // ============================================================
 // 네이버 vs 뿌리오 주문 비교
 // ============================================================
@@ -5028,6 +5114,20 @@ async function handleMessage(msg) {
       } else {
         await sendMessage(`❌ 결산 조회 오류: ${err.message}`);
       }
+    }
+    return;
+  }
+
+  // 감사 라벨: "감사라벨 20"
+  if (text.match(/^감사라벨\s*(\d+)$/)) {
+    const count = parseInt(text.match(/^감사라벨\s*(\d+)$/)[1]);
+    try {
+      await sendMessage(`🏷 감사 라벨 ${count}매 생성 중...`);
+      const { pdfBuffer } = await generateThankYouLabelPdf(count);
+      const filename = `감사라벨_${count}매.pdf`;
+      await sendDocument(pdfBuffer, filename, `♥ 감사 라벨 (${count}매)`);
+    } catch (err) {
+      await sendMessage(`❌ 라벨 생성 오류: ${err.message}`);
     }
     return;
   }
