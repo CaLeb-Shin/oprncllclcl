@@ -1919,10 +1919,17 @@ async function getFinalSummaryDetail(perfIndex) {
 
 // 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
 // pdfkit으로 mm 단위 정확한 좌표 배치 (Playwright HTML→PDF 오차 제거)
-async function generateLabelPdf(perfIndex, upgInfo = null) {
-  const result = await getActiveOrders(perfIndex);
-  if (!result) throw new Error('잘못된 공연 번호');
-  const { activeOrders, perf } = result;
+async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = null) {
+  let activeOrders, perf;
+  if (preloadedOrders) {
+    activeOrders = preloadedOrders.activeOrders;
+    perf = preloadedOrders.perf;
+  } else {
+    const result = await getActiveOrders(perfIndex);
+    if (!result) throw new Error('잘못된 공연 번호');
+    activeOrders = result.activeOrders;
+    perf = result.perf;
+  }
   if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
 
   const upgradeMap = upgInfo ? (upgInfo.upgradeMap || {}) : {};
@@ -3636,6 +3643,22 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions
       await sendDocument(pdfBuffer, filename, `📄 좌석 배정 결과 (${assignments.length}명 배정)`);
     } catch (pdfErr) {
       console.log('   ⚠️ PDF 생성 오류:', pdfErr.message);
+    }
+  }
+
+  // 라벨 PDF 자동 생성 (좌석배정과 동일한 activeOrders 사용)
+  if (assignments.length > 0) {
+    try {
+      const upgInfo = upgradedList.length > 0 ? {
+        upgradeMap: (() => { const m = {}; for (const u of upgradedList) m[u.name] = { from: u.from, to: u.to }; return m; })(),
+        upgradedNames: new Set(upgradedList.map(u => u.name)),
+      } : null;
+      const upgLabel = upgInfo ? ` (업그레이드 ${upgInfo.upgradedNames.size}명 밑줄)` : '';
+      const { pdfBuffer: labelPdf, orderCount } = await generateLabelPdf(perfIndex, upgInfo, { activeOrders: [...activeOrders], perf });
+      const labelFilename = `라벨_${region || '공연'}_${orderCount}건.pdf`;
+      await sendDocument(labelPdf, labelFilename, `🏷 ${perf.title} 라벨 (${orderCount}건)${upgLabel}`);
+    } catch (labelErr) {
+      console.log('   ⚠️ 라벨 생성 오류:', labelErr.message);
     }
   }
 
