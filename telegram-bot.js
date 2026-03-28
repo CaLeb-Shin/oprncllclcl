@@ -2005,6 +2005,11 @@ async function processSurveyExcel(fileBuffer) {
     || cols.find(c => c.includes('옵션'));
   const qtyCol = cols.find(c => c === '수량')
     || cols.find(c => c.includes('수량'));
+  const phoneCol = cols.find(c => c.includes('구매자') && c.includes('연락처'))
+    || cols.find(c => c.includes('수취인') && c.includes('연락처'))
+    || cols.find(c => c === '연락처')
+    || cols.find(c => c.includes('휴대폰'))
+    || cols.find(c => c.includes('전화'));
 
   if (!buyerCol) {
     await sendMessage(`❌ 구매자명 컬럼을 찾을 수 없습니다.\n컬럼: ${cols.join(', ')}`);
@@ -2012,7 +2017,7 @@ async function processSurveyExcel(fileBuffer) {
     return;
   }
 
-  console.log(`   📋 설문 엑셀 매핑: 클레임=[${claimCol}], 구매자=[${buyerCol}], 상품=[${productCol}], 옵션=[${optionCol}], 수량=[${qtyCol}]`);
+  console.log(`   📋 설문 엑셀 매핑: 클레임=[${claimCol}], 구매자=[${buyerCol}], 상품=[${productCol}], 옵션=[${optionCol}], 수량=[${qtyCol}], 연락처=[${phoneCol}]`);
 
   // 정상 주문자 추출 (클레임상태가 비어있는 건만)
   const cancelStatuses = ['반품완료', '직권취소완료', '취소완료'];
@@ -2036,11 +2041,19 @@ async function processSurveyExcel(fileBuffer) {
     const optInfo = optionCol ? String(row[optionCol] || '').trim() : '';
     const qty = qtyCol ? (parseInt(row[qtyCol]) || 1) : 1;
 
+    // 전화번호 (엑셀에서 직접 추출)
+    let phone = '';
+    if (phoneCol) {
+      const rawPhone = String(row[phoneCol] || '').trim();
+      const phoneMatch = rawPhone.match(/(01[0-9]-?\d{3,4}-?\d{4})/);
+      if (phoneMatch) phone = phoneMatch[1];
+    }
+
     // 좌석 추출
     const seatM = product.match(/,\s*(\S+석)\s*$/) || optInfo.match(/좌석정보\s*:\s*(\S+석)/) || optInfo.match(/:\s*(\S+석)\s*$/);
     const seatType = seatM ? seatM[1] : '';
 
-    validBuyers.push({ buyerName, seatType, qty, product });
+    validBuyers.push({ buyerName, seatType, qty, product, phone });
   }
 
   // 이름 중복 제거 (같은 이름 여러 주문 → 합산)
@@ -2050,13 +2063,27 @@ async function processSurveyExcel(fileBuffer) {
       buyerMap[b.buyerName] = { ...b };
     } else {
       buyerMap[b.buyerName].qty += b.qty;
+      // 전화번호가 없으면 다른 행에서 가져오기
+      if (!buyerMap[b.buyerName].phone && b.phone) {
+        buyerMap[b.buyerName].phone = b.phone;
+      }
     }
   }
   const uniqueBuyers = Object.values(buyerMap);
 
-  // 전화번호 매칭 (sms-log → pendingOrders → Firebase)
+  // 전화번호 매칭 (0순위: 엑셀 → 1: sms-log → 2: pendingOrders → 3: Firebase → 4: 네이버 스크래핑)
   const phoneMap = {}; // buyerName → phone
   const stripParen = (name) => name.replace(/\(.*?\)/g, '').trim();
+
+  // 0) 엑셀에서 직접 추출한 전화번호 (가장 정확)
+  let excelPhoneCount = 0;
+  for (const b of uniqueBuyers) {
+    if (b.phone) {
+      phoneMap[b.buyerName] = b.phone;
+      phoneMap[stripParen(b.buyerName)] = b.phone;
+      excelPhoneCount++;
+    }
+  }
 
   // 1) sms-log.json
   const smsLog = readJson(CONFIG.smsLogFile, []);
@@ -2095,7 +2122,7 @@ async function processSurveyExcel(fileBuffer) {
   }
 
   const phoneCountBefore = Object.keys(phoneMap).length;
-  console.log(`   📋 설문 전화번호 소스: sms-log ${smsLog.length}건, Firebase 후 ${phoneCountBefore}개 확보`);
+  console.log(`   📋 설문 전화번호 소스: 엑셀 ${excelPhoneCount}건, sms-log ${smsLog.length}건, Firebase 후 ${phoneCountBefore}개 확보`);
 
   // 4) 네이버 주문 페이지 직접 스크래핑 (위 소스에서 못 찾은 전화번호 보완)
   // 두 페이지 모두 확인: /manage/order (전체 주문) + /sale/delivery (발주관리, 전화번호 확실)
