@@ -5864,9 +5864,22 @@ async function handleCallbackQuery(cq) {
     const perfInfo = perfKey ? PERFORMANCES[perfKey] : null;
     const total = selected.length;
     const label = perfInfo ? `${perfInfo.name} (${perfInfo.date})` : '엑셀 명단';
+
+    // 뿌리오 세션 사전 체크
+    if (!ppurioPage) {
+      await sendMessage('⚠️ 뿌리오 세션 없음 → 자동 재로그인 시도...');
+      const ok = await ppurioAutoRelogin();
+      if (!ok) {
+        await sendMessage('❌ 뿌리오 로그인 실패. <b>봇재시작</b> 후 다시 시도해주세요.');
+        return;
+      }
+      await sendMessage('✅ 뿌리오 재로그인 성공!');
+    }
+
     await sendMessage(`⏳ 설문 문자 발송 시작 (${total}명)...\n📋 ${label}`);
 
     let success = 0, fail = 0;
+    const failReasons = [];
     for (let i = 0; i < selected.length; i++) {
       const r = selected[i];
       try {
@@ -5884,10 +5897,18 @@ async function handleCallbackQuery(cq) {
           writeJson(CONFIG.surveyLogFile, surveyLog);
         } else {
           fail++;
+          failReasons.push(`${r.buyerName}: 발송 확인 실패`);
         }
       } catch (err) {
         console.error(`설문 발송 오류 (${r.buyerName}):`, err.message);
         fail++;
+        failReasons.push(`${r.buyerName}: ${err.message}`);
+        // 연속 실패 시 뿌리오 세션 문제 → 중단
+        if (fail >= 3 && success === 0) {
+          await sendMessage(`❌ 연속 ${fail}건 실패 → 뿌리오 세션 문제로 중단\n원인: ${err.message}\n\n<b>봇재시작</b> 후 다시 시도해주세요.`);
+          surveyState = null;
+          return;
+        }
       }
       // 진행 상황 (5명마다 또는 마지막)
       if ((i + 1) % 5 === 0 || i === selected.length - 1) {
@@ -5895,11 +5916,11 @@ async function handleCallbackQuery(cq) {
       }
     }
 
-    await sendMessage(
-      `✅ <b>설문 발송 완료!</b>\n\n` +
-      `📋 ${label}\n` +
-      `📊 총 ${total}명 중 성공 ${success}건, 실패 ${fail}건`
-    );
+    let resultMsg = `✅ <b>설문 발송 완료!</b>\n\n📋 ${label}\n📊 총 ${total}명 중 성공 ${success}건, 실패 ${fail}건`;
+    if (failReasons.length > 0) {
+      resultMsg += `\n\n❌ <b>실패 상세:</b>\n${failReasons.slice(0, 10).map(r => `  • ${r}`).join('\n')}`;
+    }
+    await sendMessage(resultMsg);
     surveyState = null;
 
   } else if (data === 'survey_cancel') {
