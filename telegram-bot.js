@@ -6218,7 +6218,7 @@ async function handleMessage(msg) {
         const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
         msg += `${idx + 1}. ${r.buyerName} (${maskedPhone}) ${r.seatType || ''} ${r.qty}매\n`;
       });
-      msg += `\n⚠️ 위 명단을 확인 후 발송 버튼을 눌러주세요.`;
+      msg += `\n⚠️ 위 명단을 확인 후 발송 버튼을 눌러주세요.\n💡 특정 번호만 발송: <b>설문보내기 1,3,5</b> 또는 <b>설문보내기 1-5,7</b>`;
 
       const replyMarkup = {
         inline_keyboard: [[
@@ -6231,6 +6231,79 @@ async function handleMessage(msg) {
     } catch (err) {
       await sendMessage(`❌ 설문 추첨 오류: ${err.message}`);
     }
+    return;
+  }
+
+  // ── 설문보내기: 특정 번호만 선택 발송 ──
+  if (text.startsWith('설문보내기') && text.match(/설문보내기\s+(.+)/)) {
+    const numStr = text.match(/설문보내기\s+(.+)/)[1];
+    if (!surveyState || !surveyState.selected || surveyState.selected.length === 0) {
+      await sendMessage('⚠️ 먼저 "설문 N M"으로 추첨한 후 사용하세요.');
+      return;
+    }
+
+    // 번호 파싱: "1,3,5" "1-5,7" "1 3 5" 등
+    const indices = new Set();
+    for (const part of numStr.split(/[,\s]+/)) {
+      const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+      if (rangeMatch) {
+        const from = parseInt(rangeMatch[1]);
+        const to = parseInt(rangeMatch[2]);
+        for (let i = from; i <= to; i++) indices.add(i);
+      } else if (part.match(/^\d+$/)) {
+        indices.add(parseInt(part));
+      }
+    }
+
+    const sorted = [...indices].sort((a, b) => a - b);
+    const invalid = sorted.filter(n => n < 1 || n > surveyState.selected.length);
+    if (invalid.length > 0) {
+      await sendMessage(`❌ 잘못된 번호: ${invalid.join(', ')} (1~${surveyState.selected.length} 사이)`);
+      return;
+    }
+    if (sorted.length === 0) {
+      await sendMessage('❌ 발송할 번호를 입력해주세요.\n예: 설문보내기 1,3,5');
+      return;
+    }
+
+    const targets = sorted.map(n => surveyState.selected[n - 1]);
+    const { perfKey } = surveyState;
+    const perfInfo = PERFORMANCES[perfKey];
+
+    let confirmMsg = `⏳ 설문 문자 발송 시작 (${targets.length}명)...\n📋 ${perfInfo?.name || perfKey}\n\n`;
+    targets.forEach((r, idx) => {
+      confirmMsg += `${sorted[idx]}. ${r.buyerName}\n`;
+    });
+    await sendMessage(confirmMsg);
+
+    let success = 0, fail = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const r = targets[i];
+      try {
+        const ok = await sendSurveySMS(r.phone);
+        if (ok) {
+          success++;
+          const surveyLog = readJson(CONFIG.surveyLogFile, []);
+          surveyLog.push({
+            phone: r.phone,
+            buyerName: r.buyerName,
+            perfKey,
+            sentAt: new Date().toISOString(),
+          });
+          writeJson(CONFIG.surveyLogFile, surveyLog);
+        } else {
+          fail++;
+        }
+      } catch (e) {
+        fail++;
+        console.log(`   ❌ 설문 발송 실패 (${r.buyerName}): ${e.message}`);
+      }
+      if (targets.length > 3 && (i + 1) % 5 === 0) {
+        await sendMessage(`📤 진행: ${i + 1}/${targets.length} (성공 ${success}, 실패 ${fail})`);
+      }
+    }
+
+    await sendMessage(`✅ <b>설문 발송 완료</b>\n\n📊 성공 ${success}명 / 실패 ${fail}명 (총 ${targets.length}명)`);
     return;
   }
 
