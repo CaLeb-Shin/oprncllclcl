@@ -4234,9 +4234,17 @@ function parseProductInfo(productStr, optionInfo) {
     : optionSeatMatch ? optionSeatMatch[1]
     : '미분류';
 
-  // 공연 종류 판별
+  // 공연 종류 판별: PERFORMANCES에 등록된 키 우선 매칭
   const isDisney = productStr.includes('디즈니');
-  const type = isDisney ? '디즈니' : '지브리';
+  const isGhibli = productStr.includes('지브리') || productStr.includes('뮤지컬');
+  let type = isDisney ? '디즈니' : '지브리';
+
+  // 디즈니+지브리 통합 상품인데, 해당 지역에 디즈니 공연이 없고 지브리만 있으면 지브리로
+  if (isDisney && isGhibli) {
+    if (!PERFORMANCES[`${region}_디즈니`] && PERFORMANCES[`${region}_지브리`]) {
+      type = '지브리';
+    }
+  }
 
   const perfKey = `${region}_${type}`;
   const perfInfo = PERFORMANCES[perfKey];
