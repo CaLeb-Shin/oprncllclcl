@@ -1970,8 +1970,8 @@ function getSurveyPerfList() {
   for (const entry of smsLog) {
     const parsed = parseProductInfo(entry.productName || '', '');
     if (!parsed.perfKey || !PERFORMANCES[parsed.perfKey]) continue;
-    // 아직 안 끝난 공연은 제외
-    if (isPerfFuture(parsed.perfKey)) continue;
+    // 아직 안 끝난 공연은 제외 (오늘 공연은 포함 = 공연 후 설문 가능)
+    if (isPerfFuture(parsed.perfKey) && !isPerfToday(parsed.perfKey)) continue;
 
     if (!perfMap[parsed.perfKey]) {
       perfMap[parsed.perfKey] = {
@@ -2836,6 +2836,7 @@ const VENUE_SEATS_PER_LINE = {
 // 좌석배정 대기 플래그
 let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
 let lastAssignmentUpgrades = null; // { perfIndex, upgradedNames: Set } - 라벨 생성 시 참조
+let lastAssignmentContext = null;  // 직전 좌석배정 컨텍스트 (엑셀 취소 비교용)
 
 // 엑셀 파싱: 미판매 좌석 추출
 // 실제 엑셀 구조: [0]No [1]이용일 [2]회차 [3]좌석등급 [4]층 [5]열(구역+행) [6]좌석수 [7]좌석번호
@@ -3825,6 +3826,224 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions
   } else {
     lastAssignmentUpgrades = null;
   }
+
+  // 좌석배정 컨텍스트 저장 (엑셀 취소 비교용)
+  lastAssignmentContext = {
+    perfIndex,
+    perf,
+    activeOrders: [...activeOrders],
+    unsoldSeats,
+    upgrades,
+    exclusions,
+    upgradedList,
+    region,
+    timestamp: Date.now(),
+  };
+}
+
+// 스마트스토어 주문 엑셀로 취소 비교 → 재배정
+async function processOrderExcelAndReassign(fileBuffer) {
+  if (!lastAssignmentContext) {
+    await sendMessage('⚠️ 먼저 "좌석배정"을 실행한 후 엑셀을 보내주세요.');
+    return;
+  }
+
+  // 10분 이내 좌석배정만 유효
+  if (Date.now() - lastAssignmentContext.timestamp > 30 * 60 * 1000) {
+    await sendMessage('⚠️ 직전 좌석배정이 30분 이상 지났습니다. "좌석배정"을 다시 실행해주세요.');
+    lastAssignmentContext = null;
+    return;
+  }
+
+  await sendMessage('📊 주문 엑셀 분석 중...');
+
+  // 엑셀 파싱 (비밀번호: 0525)
+  let wb;
+  try {
+    wb = XLSX.read(fileBuffer, { type: 'buffer', password: '0525' });
+  } catch (e1) {
+    try {
+      wb = XLSX.read(fileBuffer, { type: 'buffer' });
+    } catch (e2) {
+      await sendMessage(`❌ 엑셀 파일을 열 수 없습니다: ${e2.message}`);
+      return;
+    }
+  }
+
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  if (rows.length === 0) {
+    await sendMessage('⚠️ 엑셀에 데이터가 없습니다.');
+    return;
+  }
+
+  // 컬럼명 자동 매핑
+  const cols = Object.keys(rows[0]);
+  const claimCol = cols.find(c => c.includes('클레임') && c.includes('상태'))
+    || cols.find(c => c.includes('클레임'));
+  const buyerCol = cols.find(c => c.includes('구매자') && c.includes('명'))
+    || cols.find(c => c.includes('구매자'))
+    || cols.find(c => c.includes('주문자'));
+  const productCol = cols.find(c => c === '상품명')
+    || cols.find(c => c.includes('상품') && c.includes('명'));
+  const optionCol = cols.find(c => c.includes('옵션'))
+    || cols.find(c => c.includes('선택'));
+  const qtyCol = cols.find(c => c === '수량')
+    || cols.find(c => c.includes('수량'));
+
+  console.log(`   📋 엑셀 컬럼: ${cols.join(', ')}`);
+  console.log(`   📋 매핑: 클레임=[${claimCol}], 구매자=[${buyerCol}], 상품=[${productCol}]`);
+
+  if (!claimCol || !buyerCol) {
+    await sendMessage(`❌ 엑셀에서 필요한 컬럼을 찾을 수 없습니다.\n\n컬럼 목록: ${cols.join(', ')}\n\n"클레임상태"와 "구매자명" 컬럼이 필요합니다.`);
+    return;
+  }
+
+  // 취소 상태 추출
+  const cancelStatuses = ['반품완료', '직권취소완료', '취소완료'];
+  const cancelledBuyers = []; // { buyerName, seatType, qty, claimStatus }
+
+  const { perf, region } = lastAssignmentContext;
+  const perfRegion = (perf.title.match(/(대구|창원|광주|대전|부산|고양|인천|울산|부천)/) || [])[1] || '';
+
+  for (const row of rows) {
+    const claimStatus = String(row[claimCol] || '').trim();
+    if (!cancelStatuses.some(s => claimStatus.includes(s))) continue;
+
+    const buyerName = String(row[buyerCol] || '').trim();
+    if (!buyerName) continue;
+
+    // 해당 공연 지역 주문만 필터
+    const product = productCol ? String(row[productCol] || '').trim() : '';
+    if (perfRegion && product) {
+      const parsed = parseProductInfo(product, '');
+      if (parsed.region !== perfRegion && parsed.region !== '기타') continue;
+    }
+
+    const optInfo = optionCol ? String(row[optionCol] || '').trim() : '';
+    const qty = qtyCol ? (parseInt(row[qtyCol]) || 1) : 1;
+    const seatM = product.match(/,\s*(\S+석)\s*$/) || optInfo.match(/:\s*(\S+석)\s*$/);
+    const seatType = seatM ? seatM[1] : '';
+
+    cancelledBuyers.push({ buyerName, seatType, qty, claimStatus });
+  }
+
+  if (cancelledBuyers.length === 0) {
+    await sendMessage('✅ 취소/반품 주문이 없습니다. 기존 좌석배정 그대로 유효합니다!');
+    return;
+  }
+
+  // 취소 카운터 (이름+좌석 정확매칭 + 이름만 fallback)
+  const cancelExact = {};
+  const cancelNameOnly = {};
+  for (const c of cancelledBuyers) {
+    if (c.seatType) {
+      const k = `${c.buyerName}_${c.seatType}`;
+      cancelExact[k] = (cancelExact[k] || 0) + 1;
+    } else {
+      cancelNameOnly[c.buyerName] = (cancelNameOnly[c.buyerName] || 0) + 1;
+    }
+  }
+
+  // 기존 activeOrders에서 취소자 제외
+  const prevOrders = lastAssignmentContext.activeOrders;
+  const filteredOrders = [];
+  const removedOrders = [];
+
+  for (const o of prevOrders) {
+    const exactKey = `${o.buyerName}_${o.seatType || ''}`;
+    if (cancelExact[exactKey] && cancelExact[exactKey] > 0) {
+      cancelExact[exactKey]--;
+      removedOrders.push(o);
+    } else if (cancelNameOnly[o.buyerName] && cancelNameOnly[o.buyerName] > 0) {
+      cancelNameOnly[o.buyerName]--;
+      removedOrders.push(o);
+    } else {
+      filteredOrders.push(o);
+    }
+  }
+
+  if (removedOrders.length === 0) {
+    await sendMessage('✅ 기존 배정 명단에 취소자가 없습니다. 좌석배정 그대로 유효합니다!');
+    return;
+  }
+
+  // 제외 결과 메시지
+  const removedQty = removedOrders.reduce((s, o) => s + o.qty, 0);
+  let removeMsg = `🚫 <b>취소/반품 ${removedOrders.length}건 (${removedQty}매) 제외</b>\n\n`;
+  for (const o of removedOrders) {
+    removeMsg += `  ❌ ${o.buyerName} — ${o.seatType || '미분류'} ${o.qty}매\n`;
+  }
+  removeMsg += `\n📊 ${prevOrders.length}건 → ${filteredOrders.length}건\n\n🎯 좌석 재배정 중...`;
+  await sendMessage(removeMsg);
+
+  // 재배정
+  const { unsoldSeats, upgrades } = lastAssignmentContext;
+
+  // 업그레이드 재적용
+  let upgradedList = [];
+  if (upgrades.length > 0) {
+    upgradedList = applyUpgrades(filteredOrders, upgrades);
+  }
+
+  const { assignments, unassigned } = assignSeats(unsoldSeats, filteredOrders, region);
+
+  // 결과 메시지
+  const resultMsg = formatAssignmentResult(assignments, unassigned, perf.title, upgradedList);
+  if (resultMsg.length > 4000) {
+    const lines = resultMsg.split('\n');
+    let chunk = '';
+    for (const line of lines) {
+      if ((chunk + '\n' + line).length > 3900) {
+        await sendMessage(chunk);
+        chunk = line;
+      } else {
+        chunk += (chunk ? '\n' : '') + line;
+      }
+    }
+    if (chunk) await sendMessage(chunk);
+  } else {
+    await sendMessage(resultMsg);
+  }
+
+  // 좌석배정 PDF
+  if (assignments.length > 0) {
+    try {
+      const pdfBuffer = await generateAssignmentPdf(assignments, unassigned, perf.title, upgradedList);
+      const filename = `좌석배정_${region || '공연'}_취소제외_${new Date().toISOString().slice(0, 10)}.pdf`;
+      await sendDocument(pdfBuffer, filename, `📄 좌석 재배정 결과 (${assignments.length}명, 취소 ${removedOrders.length}건 제외)`);
+    } catch (pdfErr) {
+      console.log('   ⚠️ PDF 생성 오류:', pdfErr.message);
+    }
+  }
+
+  // 라벨 PDF
+  if (assignments.length > 0) {
+    try {
+      const upgInfo = upgradedList.length > 0 ? {
+        upgradeMap: (() => { const m = {}; for (const u of upgradedList) m[u.name] = { from: u.from, to: u.to }; return m; })(),
+        upgradedNames: new Set(upgradedList.map(u => u.name)),
+      } : null;
+      const upgLabel = upgInfo ? ` (업그레이드 ${upgInfo.upgradedNames.size}명 밑줄)` : '';
+      const { pdfBuffer: labelPdf, orderCount } = await generateLabelPdf(
+        lastAssignmentContext.perfIndex, upgInfo, { activeOrders: [...filteredOrders], perf }
+      );
+      const labelFilename = `라벨_${region || '공연'}_${orderCount}건_취소제외.pdf`;
+      await sendDocument(labelPdf, labelFilename, `🏷 ${perf.title} 라벨 (${orderCount}건, 취소 제외)${upgLabel}`);
+    } catch (labelErr) {
+      console.log('   ⚠️ 라벨 생성 오류:', labelErr.message);
+    }
+  }
+
+  // Firebase 재푸시
+  if (assignments.length > 0) {
+    await pushSeatsToFirebase(assignments, perf, region);
+  }
+
+  // 컨텍스트 업데이트
+  lastAssignmentContext.activeOrders = filteredOrders;
+  lastAssignmentContext.timestamp = Date.now();
 }
 
 // 관리자 패널에서 상품 링크 자동 수집 (지역별 가장 비싼 상품)
@@ -4045,6 +4264,17 @@ function isPerfFuture(perfKey) {
   const perfDate = new Date(now.getFullYear(), parseInt(match[1]) - 1, parseInt(match[2]));
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   return perfDate >= today;
+}
+
+function isPerfToday(perfKey) {
+  const perf = PERFORMANCES[perfKey];
+  if (!perf || !perf.date) return false;
+  const match = perf.date.match(/^(\d+)\/(\d+)/);
+  if (!match) return false;
+  const now = new Date();
+  const perfDate = new Date(now.getFullYear(), parseInt(match[1]) - 1, parseInt(match[2]));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return perfDate.getTime() === today.getTime();
 }
 
 async function getStoreSalesSummary() {
@@ -5528,6 +5758,33 @@ async function handleMessage(msg) {
       seatAssignWaiting = null;
     }
     return;
+  }
+
+  // 스마트스토어 주문 엑셀 수신 → 취소 비교 후 재배정
+  if (msg.document && isPersonalChat && lastAssignmentContext) {
+    const doc = msg.document;
+    const fileName = doc.file_name || '';
+    if (fileName.match(/\.(xlsx?)$/i) && !seatAssignWaiting) {
+      // 좌석배정 직후 엑셀 파일 → 주문 엑셀로 판단
+      try {
+        const fileBuffer = await downloadTelegramFile(doc.file_id);
+        // 주문 엑셀인지 확인 (클레임상태 컬럼 존재 여부)
+        let wb;
+        try {
+          wb = XLSX.read(fileBuffer, { type: 'buffer', password: '0525' });
+        } catch { wb = XLSX.read(fileBuffer, { type: 'buffer' }); }
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const testRows = XLSX.utils.sheet_to_json(sheet, { defval: '', range: 0 });
+        const testCols = testRows.length > 0 ? Object.keys(testRows[0]) : [];
+        const hasClaimCol = testCols.some(c => c.includes('클레임') || (c.includes('취소') && c.includes('상태')));
+        if (hasClaimCol) {
+          await processOrderExcelAndReassign(fileBuffer);
+          return;
+        }
+      } catch (e) {
+        console.log('   ℹ️ 주문 엑셀 판별 실패 (무시):', e.message);
+      }
+    }
   }
 
   // 그룹에서 @봇이름 제거 처리
