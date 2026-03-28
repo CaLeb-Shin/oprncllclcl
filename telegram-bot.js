@@ -1964,7 +1964,26 @@ async function getSurveyRecipients(targetPerfKey) {
 
 // 설문발송: 주문 엑셀 기반 명단 파싱 + sms-log 전화번호 매칭
 async function processSurveyExcel(fileBuffer) {
-  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  // 암호화된 엑셀 감지 (EncryptedPackage 시그니처)
+  const hex = fileBuffer.slice(0, 8).toString('hex');
+  if (hex.startsWith('d0cf11e0')) {
+    // OLE2 컨테이너 = 암호화된 xlsx일 가능성
+    const bufStr = fileBuffer.toString('utf8', 0, Math.min(fileBuffer.length, 4096));
+    if (bufStr.includes('EncryptedPackage') || bufStr.includes('Encrypted')) {
+      await sendMessage('⚠️ 비밀번호가 걸린 엑셀입니다.\n비밀번호를 해제한 후 다시 보내주세요.');
+      surveyState = { waitingExcel: true, timestamp: Date.now() };
+      return;
+    }
+  }
+
+  let wb;
+  try {
+    wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  } catch (e) {
+    await sendMessage(`⚠️ 엑셀 파일을 읽을 수 없습니다.\n비밀번호가 걸려있다면 해제 후 다시 보내주세요.\n(${e.message})`);
+    surveyState = { waitingExcel: true, timestamp: Date.now() };
+    return;
+  }
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
 
@@ -6424,7 +6443,7 @@ async function handleMessage(msg) {
   // ── 설문발송: 엑셀 대기 모드 ──
   if (text === '설문발송') {
     surveyState = { waitingExcel: true, timestamp: Date.now() };
-    await sendMessage('📋 <b>설문 발송</b>\n\n📎 스마트스토어 주문조회 엑셀 파일(.xlsx)을 보내주세요.\n(비번 0525, 클레임상태 필터 완료된 최종 명단)\n\n⏰ 10분 이내에 파일을 보내주세요.');
+    await sendMessage('📋 <b>설문 발송</b>\n\n📎 스마트스토어 주문조회 엑셀 파일(.xlsx)을 보내주세요.\n(⚠️ 비밀번호 해제 후 전송, 클레임상태 필터 완료된 최종 명단)\n\n⏰ 10분 이내에 파일을 보내주세요.');
     return;
   }
 
