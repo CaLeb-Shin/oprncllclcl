@@ -787,6 +787,17 @@ async function smartstoreAutoRelogin() {
     smartstorePage = null;
     if (smartstoreCtx) await smartstoreCtx.close().catch(() => {});
     smartstoreCtx = null;
+
+    // 브라우저 프로세스가 죽은 경우 → browser 정리하여 ensureBrowser가 재생성하도록
+    if (err.message.includes('Target') || err.message.includes('closed') || err.message.includes('browser has been closed')) {
+      console.log('   🔄 브라우저 프로세스 죽음 감지 → 브라우저 정리');
+      if (browser) await browser.close().catch(() => {});
+      browser = null;
+      if (ppurioPage) await ppurioPage.close().catch(() => {});
+      ppurioPage = null;
+      if (ppurioCtx) await ppurioCtx.close().catch(() => {});
+      ppurioCtx = null;
+    }
     return false;
   }
 }
