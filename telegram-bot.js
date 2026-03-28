@@ -1283,148 +1283,122 @@ async function getNewOrders() {
 // 스마트스토어: 취소/반품 주문 확인
 // ============================================================
 async function checkCancelledOrders() {
-  console.log('   🔍 취소/반품 주문 확인...');
+  console.log('   🔍 취소/반품 주문 확인 (주문통합검색)...');
   try {
-    // 취소/반품 관련 페이지들을 순회
-    const cancelUrls = [
-      CONFIG.smartstore.cancelUrl,  // 취소관리
-      'https://sell.smartstore.naver.com/#/naverpay/sale/return', // 반품관리
-    ];
+    // 주문통합검색 페이지로 이동 (취소완료/반품완료가 영구 표시됨)
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order', { timeout: 15000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(5000);
 
-    let allCancels = [];
+    // 팝업 닫기
+    try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
+    await smartstorePage.waitForTimeout(500);
 
-    for (const url of cancelUrls) {
-      try {
-        await smartstorePage.goto(url, { timeout: 15000, waitUntil: 'domcontentloaded' });
-        await smartstorePage.waitForTimeout(3000);
-
-        // 팝업 닫기
-        try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
-        await smartstorePage.waitForTimeout(500);
-
-        // iframe 찾기 (여러 패턴 시도)
-        const frame = smartstorePage.frames().find((f) => {
-          const fUrl = f.url();
-          return (fUrl.includes('/cancel') || fUrl.includes('/return') || fUrl.includes('/sale/')) 
-            && !fUrl.includes('#') && fUrl.includes('/o/');
-        });
-
-        const targetFrame = frame || smartstorePage;
-        
-        // 디버그: 프레임 URL 로깅
-        const allFrameUrls = smartstorePage.frames().map(f => f.url());
-        console.log(`   📋 프레임들: ${allFrameUrls.filter(u => u !== 'about:blank').join(' | ')}`);
-
-        // 페이지 전체 텍스트에서 취소/반품 건 감지
-        const pageText = await targetFrame.evaluate(() => document.body?.innerText || '').catch(() => '');
-        
-        // "처리 건이 없습니다" 류의 메시지가 있으면 스킵
-        if (pageText.includes('없습니다') && !pageText.match(/\d{16,}/)) {
-          console.log(`   ✅ ${url.includes('return') ? '반품' : '취소'}: 요청 건 없음`);
-          continue;
-        }
-
-        // 취소/반품 요청 건 추출 (주문번호, 구매자, 상품명, 연락처)
-        const cancels = await targetFrame.evaluate(() => {
-          const items = [];
-          const allText = document.body?.innerText || '';
-          
-          // 방법 1: 테이블 기반 추출
-          const rows = document.querySelectorAll('table tbody tr');
-          const headerOrderIds = [];
-          const dataRows = [];
-
-          for (const tr of rows) {
-            const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
-            if (cells.length === 0) continue;
-
-            // 모든 셀에서 주문번호 찾기
-            for (const c of cells) {
-              const m = c && c.match(/(\d{16,})/);
-              if (m) { headerOrderIds.push(m[1]); break; }
-            }
-
-            // 데이터행
-            if (cells.length >= 10) {
-              dataRows.push(cells);
-            }
-          }
-
-          // 매칭
-          for (let i = 0; i < dataRows.length; i++) {
-            const cells = dataRows[i];
-            // 이 행에서 주문번호 직접 찾기
-            let orderId = '';
-            for (const c of cells) {
-              const m = c && c.match(/(\d{16,})/);
-              if (m) { orderId = m[1]; break; }
-            }
-            if (!orderId && headerOrderIds[i]) orderId = headerOrderIds[i];
-            if (!orderId) continue;
-
-            // 상품명 (대괄호로 시작하거나 긴 텍스트)
-            const productName = cells.find((c) => c && (c.match(/^\[.+\]/) || (c.length > 20 && (c.includes('멜론') || c.includes('MelON') || c.includes('콘서트') || c.includes('공연'))))) || '';
-            // 구매자 (2~4글자 한글)
-            const buyerName = cells.find((c) => c && /^[가-힣]{2,4}$/.test(c)) || '';
-            // 연락처
-            const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
-            // 취소/반품 사유
-            const reason = cells.find((c) => c && c.length > 3 && (c.includes('취소') || c.includes('반품') || c.includes('환불') || c.includes('단순변심') || c.includes('오배송'))) || '';
-
-            items.push({ orderId, productName, buyerName, phone, reason });
-          }
-
-          // 방법 2: 테이블 없이 텍스트에서 주문번호 추출 (fallback)
-          if (items.length === 0) {
-            const orderIds = allText.match(/\d{16,}/g) || [];
-            const uniqueIds = [...new Set(orderIds)];
-            for (const oid of uniqueIds) {
-              // 주문번호 주변 텍스트에서 정보 추출
-              const idx = allText.indexOf(oid);
-              const nearby = allText.substring(Math.max(0, idx - 200), idx + 200);
-              const nameMatch = nearby.match(/([가-힣]{2,4})\s/);
-              const phoneMatch = nearby.match(/(01[0-9]-?\d{3,4}-?\d{4})/);
-              items.push({
-                orderId: oid,
-                productName: '',
-                buyerName: nameMatch ? nameMatch[1] : '',
-                phone: phoneMatch ? phoneMatch[1] : '',
-                reason: nearby.includes('반품') ? '반품' : nearby.includes('취소') ? '취소' : '',
-              });
-            }
-          }
-
-          return items;
-        });
-
-        allCancels.push(...cancels);
-      } catch (urlErr) {
-        console.log(`   ⚠️ ${url} 확인 오류:`, urlErr.message.substring(0, 80));
-      }
+    let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+    if (!frame) {
+      console.log('   ⚠️ 주문 프레임을 찾을 수 없습니다.');
+      return;
     }
+
+    // "전체" 주문 상태 탭 선택 (취소/반품 포함 모든 주문 조회)
+    try {
+      await frame.evaluate(() => {
+        const candidates = document.querySelectorAll('a, button, li, span, label, div[role="tab"], input[type="radio"]');
+        for (const el of candidates) {
+          const text = el.textContent?.trim();
+          if (text === '전체' || text === '전체주문' || text === '전체 주문') {
+            el.click();
+            return text;
+          }
+        }
+        const labels = document.querySelectorAll('label');
+        for (const label of labels) {
+          if (label.textContent?.trim().includes('전체')) {
+            label.click();
+            return label.textContent.trim();
+          }
+        }
+        return null;
+      });
+    } catch {}
+    await frame.waitForTimeout(1000);
+
+    // 1개월 검색 (알림용으로 충분, 속도 우선)
+    try { await frame.click('text=1개월', { timeout: 3000 }); } catch {}
+    await frame.waitForTimeout(500);
+    await frame.evaluate(() => {
+      const btns = document.querySelectorAll('button, a, input[type="button"]');
+      for (const btn of btns) { if (btn.textContent.trim() === '검색') { btn.click(); return; } }
+    });
+    await smartstorePage.waitForTimeout(5000);
+
+    // 프레임 재획득
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+
+    // 테이블에서 취소/반품/환불 주문 추출
+    const cancels = await frame.evaluate(() => {
+      const rows = document.querySelectorAll('table tbody tr');
+      const items = [];
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+        if (cells.length < 11) continue;
+        // cells[0]=날짜, cells[1]=상태
+        const date = cells[0] || '';
+        if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
+
+        const status = cells[1] || '';
+        if (!status.includes('취소') && !status.includes('반품') && !status.includes('환불')) continue;
+
+        // 주문번호(상품주문번호) 추출: 셀에서 16자리+ 숫자 찾기
+        let orderId = '';
+        for (const c of cells) {
+          const m = c && c.match(/(\d{16,})/);
+          if (m) { orderId = m[1]; break; }
+        }
+        if (!orderId) continue;
+
+        const buyerName = cells[11] || '';
+        const product = cells[7] || '';
+        const qty = parseInt(cells[10]) || 1;
+        const optInfo = cells[8] || '';
+        const seatM = product.match(/,\s*(\S+석)\s*$/) || optInfo.match(/:\s*(\S+석)\s*$/);
+        const seatType = seatM ? seatM[1] : '';
+
+        if (buyerName) items.push({ orderId, buyerName, productName: product, qty, seatType, status });
+      }
+      return items;
+    });
 
     // 중복 제거
     const seen = new Set();
-    const cancels = allCancels.filter(c => {
+    const uniqueCancels = cancels.filter(c => {
       if (seen.has(c.orderId)) return false;
       seen.add(c.orderId);
       return true;
     });
 
-    console.log(`   📋 취소/반품 감지: ${cancels.length}건`);
+    console.log(`   📋 취소/반품/환불 감지: ${uniqueCancels.length}건`);
 
     const processed = readJson(CONFIG.processedCancelsFile);
-    const newCancels = cancels.filter((c) => !processed.includes(c.orderId));
+
+    // 첫 실행 감지: processed가 비어있으면 기존 취소 ID만 저장하고 알림 안 보냄
+    if (processed.length === 0 && uniqueCancels.length > 0) {
+      console.log(`   📥 첫 실행 — 기존 취소 ${uniqueCancels.length}건 등록 (알림 생략)`);
+      const ids = uniqueCancels.map(c => c.orderId);
+      writeJson(CONFIG.processedCancelsFile, ids);
+      return;
+    }
+
+    const newCancels = uniqueCancels.filter((c) => !processed.includes(c.orderId));
 
     for (const cancel of newCancels) {
       // 상세 알림
-      let msg = `⚠️ <b>취소/반품 요청!</b>\n\n`;
+      let msg = `⚠️ <b>취소/반품 감지!</b>\n\n`;
       msg += `📦 주문번호: ${cancel.orderId}\n`;
       if (cancel.buyerName) msg += `👤 구매자: ${cancel.buyerName}\n`;
       if (cancel.productName) msg += `🎫 상품: ${cancel.productName}\n`;
-      if (cancel.phone) msg += `📱 연락처: ${cancel.phone}\n`;
-      if (cancel.reason) msg += `📝 사유: ${cancel.reason}\n`;
-      msg += `\n스마트스토어에서 승인/거절해주세요.`;
+      if (cancel.seatType) msg += `💺 좌석: ${cancel.seatType}\n`;
+      msg += `📊 상태: ${cancel.status}\n`;
+      msg += `🔢 수량: ${cancel.qty}매`;
       await sendMessage(msg);
 
       // 멜론티켓 자동 취소 처리
@@ -1449,9 +1423,9 @@ async function checkCancelledOrders() {
       cancelledOrders.push({
         orderId: cancel.orderId,
         buyerName: cancel.buyerName,
-        phone: cancel.phone,
+        phone: '',
         productName: cancel.productName,
-        lastFour: cancel.phone ? cancel.phone.slice(-4) : '',
+        lastFour: '',
         cancelledAt: new Date().toISOString(),
       });
       writeJson(CONFIG.cancelledOrdersFile, cancelledOrders);
@@ -1460,9 +1434,9 @@ async function checkCancelledOrders() {
     }
     if (newCancels.length > 0) {
       writeJson(CONFIG.processedCancelsFile, processed);
-      console.log(`   ⚠️ 새 취소/반품 요청: ${newCancels.length}개`);
+      console.log(`   ⚠️ 새 취소/반품: ${newCancels.length}건 알림 발송`);
     } else {
-      console.log('   ✅ 새 취소/반품 요청 없음');
+      console.log('   ✅ 새 취소/반품 없음');
     }
 
     // 주문 페이지로 복귀 (다른 기능에 영향 안 주도록)
@@ -1773,7 +1747,7 @@ async function getNaverCancelledOrders() {
         const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
         if (cells.length < 15) continue;
         const status = cells[1] || '';
-        if (!status.includes('취소') && !status.includes('반품')) continue;
+        if (!status.includes('취소') && !status.includes('반품') && !status.includes('환불')) continue;
         const buyerName = cells[11] || '';
         const product = cells[7] || '';
         const qty = parseInt(cells[10]) || 1;
@@ -4711,10 +4685,12 @@ async function getStoreSalesSummary() {
 
   // 테이블 파싱 (16셀: 지역정보 컬럼 추가됨)
   // 데이터행: cells[0]=날짜, [1]=상태, [7]=상품명, [8]=옵션정보, [9]=지역정보(new), [10]=수량
+  let totalCancelledCount = 0;
   const scrapeCurrentPage = async () => {
     return await frame.evaluate(() => {
       const rows = document.querySelectorAll('table tbody tr');
       const orders = [];
+      let cancelCount = 0;
       for (const tr of rows) {
         const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
         if (cells.length < 11) continue;
@@ -4723,7 +4699,10 @@ async function getStoreSalesSummary() {
         if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
 
         const status = cells[1] || '';
-        if (status.includes('취소') || status.includes('반품')) continue;
+        if (status.includes('취소') || status.includes('반품') || status.includes('환불')) {
+          cancelCount++;
+          continue;
+        }
 
         const product = cells[7] || '';
         if (!product) continue;
@@ -4736,15 +4715,16 @@ async function getStoreSalesSummary() {
         const optionInfo = cells[8] || '';
         orders.push({ date: date.substring(0, 10), product, qty, optionInfo });
       }
-      return orders;
+      return { orders, cancelCount };
     });
   };
 
   // 전체 주문 수집 (페이지네이션 - 다음 버튼 지원)
   const allOrders = [];
-  const page1 = await scrapeCurrentPage();
-  allOrders.push(...page1);
-  console.log(`   📦 페이지 1: ${page1.length}건`);
+  const page1Result = await scrapeCurrentPage();
+  allOrders.push(...page1Result.orders);
+  totalCancelledCount += page1Result.cancelCount || 0;
+  console.log(`   📦 페이지 1: ${page1Result.orders.length}건`);
 
   for (let nextPage = 2; nextPage <= 30; nextPage++) {
     // 1단계: 직접 페이지 번호 클릭 시도
@@ -4798,13 +4778,14 @@ async function getStoreSalesSummary() {
       frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
     }
 
-    const pageOrders = await scrapeCurrentPage();
-    allOrders.push(...pageOrders);
-    console.log(`   📦 페이지 ${nextPage}: ${pageOrders.length}건`);
-    if (pageOrders.length === 0) break;
+    const pageResult = await scrapeCurrentPage();
+    allOrders.push(...pageResult.orders);
+    totalCancelledCount += pageResult.cancelCount || 0;
+    console.log(`   📦 페이지 ${nextPage}: ${pageResult.orders.length}건`);
+    if (pageResult.orders.length === 0) break;
   }
 
-  console.log(`   📦 전체: ${allOrders.length}건 (취소 제외)`);
+  console.log(`   📦 전체: ${allOrders.length}건 (취소/반품/환불 ${totalCancelledCount}건 제외)`);
 
   // --- 집계 (오늘 이후 공연만) ---
   const today = new Date();
