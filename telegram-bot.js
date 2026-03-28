@@ -1989,14 +1989,28 @@ async function processSurveyExcel(fileBuffer) {
 
   let wb;
   try {
-    wb = XLSX.read(fileBuffer, { type: 'buffer' });
+    wb = XLSX.read(fileBuffer, { type: 'buffer', cellStyles: true });
   } catch (e) {
     await sendMessage(`⚠️ 엑셀 파일을 읽을 수 없습니다.\n비밀번호가 걸려있다면 해제 후 다시 보내주세요.\n(${e.message})`);
     surveyState = { waitingExcel: true, timestamp: Date.now() };
     return;
   }
   const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+  const allRows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  // 엑셀 필터(숨김 행) 감지 → 보이는 행만 추출
+  const rowInfo = sheet['!rows'] || [];
+  let rows;
+  let filterApplied = false;
+  if (rowInfo.some(r => r && r.hidden)) {
+    filterApplied = true;
+    rows = allRows.filter((_, idx) => {
+      const ri = rowInfo[idx + 1]; // +1: 헤더가 row 0
+      return !ri || !ri.hidden;
+    });
+  } else {
+    rows = allRows;
+  }
 
   if (rows.length === 0) {
     await sendMessage('⚠️ 엑셀에 데이터가 없습니다.');
@@ -2099,7 +2113,8 @@ async function processSurveyExcel(fileBuffer) {
 
   // 결과 메시지
   let msg = `📋 <b>설문 발송 대상</b>\n\n`;
-  msg += `📊 엑셀 전체: ${rows.length}건\n`;
+  if (filterApplied) msg += `🔍 엑셀 필터 감지: ${allRows.length}건 중 <b>${rows.length}건</b>만 표시됨\n`;
+  msg += `📊 엑셀 대상: ${rows.length}건\n`;
   if (cancelledCount.total > 0) msg += `❌ 취소/반품: ${cancelledCount.total}건 제외\n`;
   msg += `👤 정상 주문자: ${uniqueBuyers.length}명 (중복 제거)\n`;
   msg += `📱 전화번호 매칭: ${matched.length}명\n`;
