@@ -3841,7 +3841,49 @@ function findTadminCode(perfIndex) {
 }
 
 // 좌석 배정 실행 (공통 로직: 자동 다운로드 / 수동 업로드 모두 사용)
-async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions = [], heldBuffer = null) {
+// 주문 엑셀에서 정상 주문자 이름 Set 추출
+function parseOrderExcelNames(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  if (rows.length === 0) return null;
+
+  const cols = Object.keys(rows[0]);
+  const claimCol = cols.find(c => c.includes('클레임') && c.includes('상태'))
+    || cols.find(c => c.includes('클레임'));
+  const buyerCol = cols.find(c => c.includes('구매자') && c.includes('명'))
+    || cols.find(c => c.includes('구매자'))
+    || cols.find(c => c.includes('주문자'));
+
+  if (!buyerCol) {
+    console.log(`   ⚠️ 주문 엑셀: 구매자명 컬럼 없음 (${cols.join(', ')})`);
+    return null;
+  }
+
+  const cancelStatuses = ['반품완료', '직권취소완료', '취소완료'];
+  const validNames = new Set();
+  let cancelCount = 0;
+
+  for (const row of rows) {
+    const buyerName = String(row[buyerCol] || '').trim();
+    if (!buyerName) continue;
+
+    if (claimCol) {
+      const claimStatus = String(row[claimCol] || '').trim();
+      if (cancelStatuses.some(s => claimStatus.includes(s))) {
+        cancelCount++;
+        continue;
+      }
+    }
+    validNames.add(buyerName);
+  }
+
+  console.log(`   📋 주문 엑셀: 정상 ${validNames.size}명, 취소 ${cancelCount}건`);
+  return validNames;
+}
+
+async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions = [], heldBuffer = null, orderExcelNames = null) {
   // 디버그: 엑셀 첫 5행 출력
   const debugWb = XLSX.read(fileBuffer, { type: 'buffer' });
   const debugSheet = debugWb.Sheets[debugWb.SheetNames[0]];
@@ -3893,9 +3935,28 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions
   // activeOrders 가져오기
   const result = await getActiveOrders(perfIndex);
   if (!result) throw new Error('공연 데이터를 가져올 수 없습니다');
-  const { activeOrders, perf } = result;
+  let { activeOrders, perf } = result;
 
   activeOrders.reverse();
+
+  // 주문 엑셀 명단으로 필터링 (엑셀에 없는 사람 제외)
+  if (orderExcelNames && orderExcelNames.size > 0) {
+    const before = activeOrders.length;
+    const removed = activeOrders.filter(o => !orderExcelNames.has(o.buyerName));
+    activeOrders = activeOrders.filter(o => orderExcelNames.has(o.buyerName));
+    const removedQty = removed.reduce((s, o) => s + o.qty, 0);
+
+    if (removed.length > 0) {
+      let filterMsg = `🚫 <b>엑셀 명단 비교: ${removed.length}건 (${removedQty}매) 제외</b>\n\n`;
+      for (const o of removed) {
+        filterMsg += `  ❌ ${o.buyerName} — ${o.seatType || '미분류'} ${o.qty}매\n`;
+      }
+      filterMsg += `\n📊 ${before}건 → ${activeOrders.length}건`;
+      await sendMessage(filterMsg);
+    } else {
+      await sendMessage(`✅ 엑셀 명단 비교: 제외 대상 없음 (${activeOrders.length}건 전원 일치)`);
+    }
+  }
 
   // 업그레이드 적용
   let upgradedList = [];
@@ -5896,7 +5957,7 @@ async function handleMessage(msg) {
     return;
   }
 
-  // 좌석배정 엑셀 파일 수신 처리 (수동 업로드 폴백)
+  // 좌석배정 엑셀 파일 수신 처리
   if (msg.document && isPersonalChat && seatAssignWaiting) {
     const doc = msg.document;
     const fileName = doc.file_name || '';
@@ -5910,9 +5971,33 @@ async function handleMessage(msg) {
       return;
     }
     try {
-      await sendMessage('📊 엑셀 파싱 중...');
       const fileBuffer = await downloadTelegramFile(doc.file_id);
-      await executeSeatAssignment(fileBuffer, seatAssignWaiting.perfIndex, seatAssignWaiting.upgrades || [], seatAssignWaiting.exclusions || []);
+
+      if (seatAssignWaiting.waitingOrderExcel) {
+        // 주문 엑셀 수신 → 명단 필터링 후 좌석배정
+        await sendMessage('📊 주문 엑셀 분석 + 좌석배정 중...');
+        const orderExcelNames = parseOrderExcelNames(fileBuffer);
+        await executeSeatAssignment(
+          seatAssignWaiting.unsoldBuffer,
+          seatAssignWaiting.perfIndex,
+          seatAssignWaiting.upgrades || [],
+          seatAssignWaiting.exclusions || [],
+          seatAssignWaiting.heldBuffer,
+          orderExcelNames,
+        );
+      } else {
+        // 미판매 좌석 엑셀 수신 (수동 업로드 폴백)
+        await sendMessage('📊 엑셀 파싱 중...');
+        // 미판매 엑셀이면 주문 엑셀도 요청
+        seatAssignWaiting = {
+          ...seatAssignWaiting,
+          unsoldBuffer: fileBuffer,
+          waitingOrderExcel: true,
+          timestamp: Date.now(),
+        };
+        await sendMessage(`✅ 미판매 좌석 엑셀 확인!\n\n📎 이제 스마트스토어 주문조회 엑셀(.xlsx)을 보내주세요.\n(취소/반품 제외된 최종 명단)\n⏰ 10분 이내에 파일을 보내주세요.`);
+        return;
+      }
       seatAssignWaiting = null;
     } catch (err) {
       await sendMessage(`❌ 좌석배정 오류: ${err.message}`);
@@ -6303,7 +6388,12 @@ async function handleMessage(msg) {
       await sendMessage(statusMsg);
       try {
         const { unsoldBuffer, heldBuffer } = await downloadUnsoldFromTadmin(tadminCode, chatId);
-        await executeSeatAssignment(unsoldBuffer, perfIndex, upgrades, exclusions, heldBuffer);
+        // 주문 엑셀 대기 모드: TADMIN 데이터 저장 후 엑셀 요청
+        seatAssignWaiting = {
+          perfIndex, chatId, timestamp: Date.now(), upgrades, exclusions,
+          unsoldBuffer, heldBuffer, waitingOrderExcel: true,
+        };
+        await sendMessage(`✅ TADMIN 다운로드 완료!\n\n📎 스마트스토어 주문조회 엑셀(.xlsx)을 보내주세요.\n(취소/반품 제외된 최종 명단)\n⏰ 10분 이내에 파일을 보내주세요.`);
       } catch (err) {
         console.log('   ⚠️ 자동 다운로드 실패:', err.message);
         // 실패 시 수동 업로드 폴백
