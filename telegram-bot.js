@@ -81,6 +81,7 @@ const CONFIG = {
   pendingDeliveryFile: path.join(__dirname, 'pending-delivery.json'),
   cancelledOrdersFile: path.join(__dirname, 'cancelled-orders.json'),
   smsLogFile: path.join(__dirname, 'sms-log.json'),
+  surveyLogFile: path.join(__dirname, 'survey-sent.json'),
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
@@ -110,6 +111,7 @@ let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
 let isEnsureBrowserRunning = false; // ensureBrowser 동시 호출 방지
 let lastSessionExpireNotice = 0;  // 세션 만료 알림 쿨다운
 let lastPendingReminder = 0;  // 승인 대기 리마인드 쿨다운
+let surveyState = null;  // 설문 발송 상태: { perfKey, candidates, selected }
 
 function shouldNotifySessionExpire() {
   const now = Date.now();
@@ -1868,6 +1870,128 @@ async function getActiveOrders(perfIndex) {
   }
 
   return { activeOrders, cancelledList, perf };
+}
+
+// ============================================================
+// 설문 발송: sms-log 기반 대상자 수집 (취소 제외 + 중복 제거)
+// ============================================================
+async function getSurveyRecipients(targetPerfKey) {
+  const smsLog = readJson(CONFIG.smsLogFile, []);
+
+  // 1) sms-log에서 해당 공연 주문만 필터
+  const perfOrders = smsLog.filter(entry => {
+    const parsed = parseProductInfo(entry.productName || '', '');
+    return parsed.perfKey === targetPerfKey;
+  });
+
+  if (perfOrders.length === 0) return [];
+
+  // 2) 취소자 목록 수집
+  const manualCancelled = readJson(CONFIG.cancelledOrdersFile, []);
+  let naverCancelled = [];
+  try {
+    naverCancelled = await getNaverCancelledOrders();
+  } catch (e) {
+    console.log(`   ⚠️ 네이버 취소 목록 조회 실패: ${e.message}`);
+  }
+
+  // 네이버 취소 중 해당 지역만 필터
+  const perfInfo = PERFORMANCES[targetPerfKey];
+  const perfRegion = targetPerfKey.split('_')[0] || '';
+  const cancelCount = {};
+  for (const c of naverCancelled) {
+    if (perfRegion && c.product) {
+      const parsed = parseProductInfo(c.product, '');
+      if (parsed.region !== perfRegion) continue;
+    }
+    const cKey = `${c.buyerName}_${c.seatType || ''}`;
+    cancelCount[cKey] = (cancelCount[cKey] || 0) + 1;
+  }
+
+  // 3) 취소자 제외
+  const activeOrders = [];
+  for (const order of perfOrders) {
+    const lastFour = (order.phone || '').replace(/-/g, '').slice(-4);
+    const parsed = parseProductInfo(order.productName || '', '');
+    const seatType = parsed.seat || '';
+
+    // 수동 취소 체크
+    const isManual = manualCancelled.some(c => {
+      const nameMatch = c.buyerName && order.buyerName &&
+        (c.buyerName === order.buyerName || c.buyerName.includes(order.buyerName) || order.buyerName.includes(c.buyerName));
+      const phoneMatch = c.lastFour && lastFour && c.lastFour === lastFour;
+      return nameMatch && phoneMatch;
+    });
+    if (isManual) continue;
+
+    // 네이버 취소 체크
+    const cKey = `${order.buyerName}_${seatType}`;
+    if (cancelCount[cKey] && cancelCount[cKey] > 0) {
+      cancelCount[cKey]--;
+      continue;
+    }
+
+    activeOrders.push({
+      buyerName: order.buyerName,
+      phone: order.phone,
+      productName: order.productName,
+      qty: order.qty || 1,
+      seatGrade: parsed.seatGrade || '',
+      seatType: parsed.seat || '',
+    });
+  }
+
+  // 4) 전화번호 중복 제거 (같은 사람 여러 주문 → 1건)
+  const seen = new Set();
+  const unique = [];
+  for (const o of activeOrders) {
+    const phoneKey = (o.phone || '').replace(/-/g, '');
+    if (seen.has(phoneKey)) continue;
+    seen.add(phoneKey);
+    unique.push(o);
+  }
+
+  // 5) 이미 설문 받은 사람 제외
+  const surveyLog = readJson(CONFIG.surveyLogFile, []);
+  const alreadySent = new Set(
+    surveyLog
+      .filter(s => s.perfKey === targetPerfKey)
+      .map(s => (s.phone || '').replace(/-/g, ''))
+  );
+
+  return unique.filter(o => !alreadySent.has((o.phone || '').replace(/-/g, '')));
+}
+
+// 설문 대상 공연 목록 (이미 지난 공연만)
+function getSurveyPerfList() {
+  const smsLog = readJson(CONFIG.smsLogFile, []);
+  const perfMap = {};
+
+  for (const entry of smsLog) {
+    const parsed = parseProductInfo(entry.productName || '', '');
+    if (!parsed.perfKey || !PERFORMANCES[parsed.perfKey]) continue;
+    // 아직 안 끝난 공연은 제외
+    if (isPerfFuture(parsed.perfKey)) continue;
+
+    if (!perfMap[parsed.perfKey]) {
+      perfMap[parsed.perfKey] = {
+        perfKey: parsed.perfKey,
+        name: PERFORMANCES[parsed.perfKey].name,
+        date: PERFORMANCES[parsed.perfKey].date,
+        count: 0,
+      };
+    }
+    perfMap[parsed.perfKey].count++;
+  }
+
+  // 날짜순 정렬
+  return Object.values(perfMap).sort((a, b) => {
+    const parseDate = (d) => {
+      const m = (d || '').match(/^(\d+)\/(\d+)/);
+      return m ? new Date(new Date().getFullYear(), parseInt(m[1]) - 1, parseInt(m[2])) : new Date(0);
+    };
+    return parseDate(a.date) - parseDate(b.date);
+  });
 }
 
 // 2단계: 선택한 공연 상세 (취소 목록 대조 후 제외)
@@ -4721,6 +4845,297 @@ async function sendSMS(order, _isRetry = false) {
 }
 
 // ============================================================
+// 설문 문자 발송 (뿌리오 템플릿 기반)
+// ============================================================
+async function sendSurveySMS(phone, _isRetry = false) {
+  if (!ppurioPage) {
+    if (!_isRetry) {
+      console.log('   ⚠️ 뿌리오 세션 없음 → 자동 재로그인 시도');
+      const ok = await ppurioAutoRelogin();
+      if (ok) return sendSurveySMS(phone, true);
+    }
+    throw new Error('뿌리오 세션 없음');
+  }
+
+  console.log(`📱 설문 문자 발송: ${phone}`);
+  await ppurioPage.goto('https://www.ppurio.com/send/sms/gn/view');
+  await ppurioPage.waitForTimeout(3000);
+
+  // 로그인 상태 확인
+  const smsPageOk = await ppurioPage.evaluate(() => {
+    const text = document.body.innerText;
+    const hasLoginForm = text.includes('아이디 저장') || text.includes('비밀번호 재설정');
+    const hasSmsUI = text.includes('내 문자함') || text.includes('메시지 입력');
+    return !hasLoginForm && hasSmsUI;
+  });
+
+  if (!smsPageOk) {
+    console.log('   ❌ 뿌리오 세션 만료됨 → 자동 재로그인 시도');
+    await ppurioPage.close().catch(() => {});
+    ppurioPage = null;
+    if (ppurioCtx) await ppurioCtx.close().catch(() => {});
+    ppurioCtx = null;
+    if (!_isRetry) {
+      const ok = await ppurioAutoRelogin();
+      if (ok) return sendSurveySMS(phone, true);
+    }
+    throw new Error('뿌리오 세션 만료');
+  }
+
+  // 1. 내 문자함 열기
+  console.log('   1️⃣ 내 문자함...');
+  await ppurioPage.click('button:has-text("내 문자함")');
+  await ppurioPage.waitForTimeout(2000);
+
+  // "로그인 후 사용이 가능합니다" 팝업 체크
+  const alertText = await ppurioPage.evaluate(() => {
+    return document.body.innerText.includes('로그인 후 사용이 가능합니다') ? '로그인필요' : '';
+  });
+  if (alertText) {
+    console.log('   ❌ 로그인 필요 알림 감지 → 자동 재로그인 시도');
+    await ppurioPage.keyboard.press('Escape');
+    await ppurioPage.close().catch(() => {});
+    ppurioPage = null;
+    if (ppurioCtx) await ppurioCtx.close().catch(() => {});
+    ppurioCtx = null;
+    if (!_isRetry) {
+      const ok = await ppurioAutoRelogin();
+      if (ok) return sendSurveySMS(phone, true);
+    }
+    throw new Error('뿌리오 세션 만료');
+  }
+
+  // 2. 설문 템플릿 찾기: [멜론] 공연 설문
+  console.log('   2️⃣ 설문 템플릿 찾기...');
+  let templateFound = false;
+  const templateName = '[멜론] 공연 설문';
+
+  // 방법1: 현재 페이지에서 바로 찾기
+  try {
+    await ppurioPage.click(`text=${templateName}`, { timeout: 3000 });
+    templateFound = true;
+    console.log('      1페이지에서 발견!');
+  } catch {}
+
+  // 방법2: 검색
+  if (!templateFound) {
+    console.log('      1페이지에 없음 → 검색 시도...');
+    try {
+      await ppurioPage.fill('input[placeholder*="검색"]', '공연 설문');
+      await ppurioPage.waitForTimeout(300);
+      await ppurioPage.keyboard.press('Enter');
+      await ppurioPage.waitForTimeout(2000);
+      try {
+        await ppurioPage.click(`text=${templateName}`, { timeout: 3000 });
+        templateFound = true;
+        console.log('      검색으로 발견!');
+      } catch {}
+    } catch (e) {
+      console.log(`      검색 실패: ${e.message}`);
+    }
+  }
+
+  // 방법3: 페이지 넘기기
+  if (!templateFound) {
+    for (let p = 2; p <= 5; p++) {
+      const clicked = await ppurioPage.evaluate((num) => {
+        const els = document.querySelectorAll('a, button, span, li');
+        for (const el of els) {
+          if (el.innerText?.trim() === String(num) && el.offsetParent !== null) {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      }, p);
+      if (!clicked) break;
+      await ppurioPage.waitForTimeout(1500);
+      try {
+        await ppurioPage.click(`text=${templateName}`, { timeout: 3000 });
+        templateFound = true;
+        console.log(`      페이지 ${p}에서 발견!`);
+        break;
+      } catch {}
+    }
+  }
+
+  if (!templateFound) {
+    console.log(`   ⚠️ 설문 템플릿 못 찾음: ${templateName}`);
+    await ppurioPage.keyboard.press('Escape');
+    return false;
+  }
+  await ppurioPage.waitForTimeout(1500);
+
+  // 내 문자함 팝업 닫기
+  await ppurioPage.keyboard.press('Escape');
+  await ppurioPage.waitForTimeout(1500);
+
+  // 단문전환 알림 팝업 닫기 (있으면)
+  try {
+    await ppurioPage.click('.jconfirm button', { timeout: 2000 });
+    await ppurioPage.waitForTimeout(500);
+  } catch {}
+
+  // 2.5 LMS 전환 (설문 링크 포함이라 장문일 가능성 높음)
+  const allTextareas = await ppurioPage.$$('textarea.user_message');
+  let leftTextarea = null;
+  for (const ta of allTextareas) {
+    const box = await ta.boundingBox();
+    if (box && box.x < 800) { leftTextarea = ta; break; }
+  }
+  if (leftTextarea) {
+    const content = await leftTextarea.inputValue();
+    const contentBytes = Buffer.byteLength(content, 'euc-kr');
+    if (contentBytes > 90) {
+      console.log(`      📏 메시지 ${contentBytes}바이트 → LMS 전환 시도`);
+      try {
+        const switched = await ppurioPage.evaluate(() => {
+          const lmsRadio = document.querySelector('input[value="LMS"], input[name="msgType"][value="4"]');
+          if (lmsRadio) { lmsRadio.click(); return 'radio'; }
+          const els = document.querySelectorAll('a, button, span, label');
+          for (const el of els) {
+            const t = el.innerText?.trim();
+            if (t === 'LMS' || t === '장문') { el.click(); return 'tab'; }
+          }
+          return null;
+        });
+        if (switched) {
+          console.log(`      ✅ LMS 전환 완료 (${switched})`);
+          await ppurioPage.waitForTimeout(1000);
+          try { await ppurioPage.click('.jconfirm button', { timeout: 2000 }); } catch {}
+          // LMS 전환 후 내용 재입력
+          const currentContent = await leftTextarea.inputValue().catch(() => '');
+          if (!currentContent || currentContent.length < content.length / 2) {
+            await leftTextarea.click();
+            await leftTextarea.fill(content);
+            await ppurioPage.waitForTimeout(500);
+          }
+        }
+      } catch (e) {
+        console.log(`      ⚠️ LMS 전환 오류 (무시):`, e.message);
+      }
+    }
+  }
+
+  // 3. 수신번호 입력
+  console.log(`   3️⃣ 수신번호: ${phone}`);
+  const textareas = await ppurioPage.$$('textarea.user_message');
+  let rightTextarea = null;
+  for (const ta of textareas) {
+    const box = await ta.boundingBox();
+    if (box && box.x > 800) { rightTextarea = ta; break; }
+  }
+
+  if (rightTextarea) {
+    await rightTextarea.click();
+    await rightTextarea.fill(phone.replace(/-/g, ''));
+    await ppurioPage.keyboard.press('Enter');
+    await ppurioPage.waitForTimeout(2000);
+  } else {
+    console.log('   ⚠️ 직접입력 영역 못 찾음');
+    return false;
+  }
+
+  // 4. "1건 추가되었습니다" 팝업 닫기
+  try {
+    await ppurioPage.click('.jconfirm button.btn-default', { timeout: 2000 });
+    await ppurioPage.waitForTimeout(1000);
+  } catch {}
+
+  // 받는사람 수 확인
+  const recipientCount = await ppurioPage.evaluate(() => {
+    const match = document.body.innerText.match(/전체\s*(\d+)\s*명/);
+    return match ? parseInt(match[1]) : 0;
+  });
+  if (recipientCount === 0) {
+    console.log('   ⚠️ 받는사람 추가 안 됨');
+    return false;
+  }
+
+  // 5. 발송하기
+  console.log('   5️⃣ 발송하기...');
+  await ppurioPage.click('#btn_sendRequest');
+  await ppurioPage.waitForTimeout(2000);
+
+  // 6. 발송 확인 팝업 처리 (sendSMS와 동일 로직)
+  console.log('   6️⃣ 발송 확인...');
+  let confirmClicked = false;
+  for (let attempt = 0; attempt < 3 && !confirmClicked; attempt++) {
+    const popupInfo = await ppurioPage.evaluate(() => {
+      const popup = document.querySelector('.jconfirm-box, .modal-content, [role="dialog"]');
+      if (!popup) return null;
+      const text = popup.innerText || '';
+      return { text: text.substring(0, 300) };
+    }).catch(() => null);
+
+    if (popupInfo) {
+      if (popupInfo.text.includes('장문') || popupInfo.text.includes('초과') || popupInfo.text.includes('LMS') || popupInfo.text.includes('전환')) {
+        try {
+          await ppurioPage.click('.jconfirm button:has-text("확인")', { timeout: 3000 }).catch(() =>
+            ppurioPage.click('.jconfirm button', { timeout: 3000 })
+          );
+          await ppurioPage.waitForTimeout(1500);
+          if (attempt === 0) {
+            await ppurioPage.click('#btn_sendRequest').catch(() => {});
+            await ppurioPage.waitForTimeout(2000);
+          }
+          continue;
+        } catch {}
+      }
+      if (popupInfo.text.includes('발송') || popupInfo.text.includes('전송')) {
+        try {
+          await ppurioPage.click('button.btn_b.bg_blue:has-text("확인")', { timeout: 3000 });
+          confirmClicked = true;
+        } catch {
+          try {
+            await ppurioPage.click('.jconfirm button:has-text("확인")', { timeout: 3000 });
+            confirmClicked = true;
+          } catch {
+            try {
+              await ppurioPage.click('button:has-text("확인")', { timeout: 3000 });
+              confirmClicked = true;
+            } catch {}
+          }
+        }
+        if (confirmClicked) await ppurioPage.waitForTimeout(2000);
+        continue;
+      }
+      if (popupInfo.text.includes('실패') || popupInfo.text.includes('부족') || popupInfo.text.includes('오류')) {
+        console.log(`   ❌ 에러 팝업: ${popupInfo.text.substring(0, 150)}`);
+        try { await ppurioPage.click('.jconfirm button', { timeout: 2000 }); } catch {}
+        return false;
+      }
+      try {
+        await ppurioPage.click('.jconfirm button:has-text("확인")', { timeout: 2000 }).catch(() =>
+          ppurioPage.click('.jconfirm button', { timeout: 2000 })
+        );
+        await ppurioPage.waitForTimeout(1500);
+      } catch {}
+    } else if (attempt === 0) {
+      try {
+        await ppurioPage.click('button.btn_b.bg_blue:has-text("확인")', { timeout: 5000 });
+        confirmClicked = true;
+        await ppurioPage.waitForTimeout(2000);
+      } catch {
+        console.log('   ⚠️ 확인 버튼/팝업 못 찾음');
+      }
+    }
+  }
+
+  if (!confirmClicked) {
+    console.log('   ❌ 설문 문자 발송 확인 실패');
+    try {
+      await ppurioPage.screenshot({ path: path.join(__dirname, 'debug-survey-fail.png') });
+    } catch {}
+    return false;
+  }
+
+  await ppurioPage.waitForTimeout(3000);
+  console.log('   ✅ 설문 문자 발송 완료!');
+  return true;
+}
+
+// ============================================================
 // 스마트스토어 배송처리
 // ============================================================
 async function processDelivery(orderId) {
@@ -4884,6 +5299,91 @@ async function handleCallbackQuery(cq) {
     delete pendingOrders[orderId];
     savePendingOrders(pendingOrders);
     await sendMessage(`⏸ 주문 ${orderId} 보류 완료`);
+
+  // ── 설문 발송 콜백 ──
+  } else if (data === 'survey_send') {
+    if (!surveyState || !surveyState.selected || surveyState.selected.length === 0) {
+      await answerCallbackQuery(queryId, '설문 대상이 없습니다.');
+      return;
+    }
+    await answerCallbackQuery(queryId, '설문 발송 시작...');
+    const { perfKey, selected } = surveyState;
+    const perfInfo = PERFORMANCES[perfKey];
+    const total = selected.length;
+    await sendMessage(`⏳ 설문 문자 발송 시작 (${total}명)...\n📋 ${perfInfo?.name || perfKey}`);
+
+    let success = 0, fail = 0;
+    for (let i = 0; i < selected.length; i++) {
+      const r = selected[i];
+      try {
+        const ok = await sendSurveySMS(r.phone);
+        if (ok) {
+          success++;
+          // 발송 성공 → 로그 저장
+          const surveyLog = readJson(CONFIG.surveyLogFile, []);
+          surveyLog.push({
+            perfKey,
+            buyerName: r.buyerName,
+            phone: r.phone,
+            sentAt: new Date().toISOString(),
+          });
+          writeJson(CONFIG.surveyLogFile, surveyLog);
+        } else {
+          fail++;
+        }
+      } catch (err) {
+        console.error(`설문 발송 오류 (${r.buyerName}):`, err.message);
+        fail++;
+      }
+      // 진행 상황 (5명마다 또는 마지막)
+      if ((i + 1) % 5 === 0 || i === selected.length - 1) {
+        await sendMessage(`📊 설문 발송 진행: ${i + 1}/${total} (성공 ${success}, 실패 ${fail})`);
+      }
+    }
+
+    await sendMessage(
+      `✅ <b>설문 발송 완료!</b>\n\n` +
+      `📋 ${perfInfo?.name || perfKey} (${perfInfo?.date || ''})\n` +
+      `📊 총 ${total}명 중 성공 ${success}건, 실패 ${fail}건`
+    );
+    surveyState = null;
+
+  } else if (data === 'survey_cancel') {
+    await answerCallbackQuery(queryId, '설문 발송 취소');
+    surveyState = null;
+    await sendMessage('❌ 설문 발송이 취소되었습니다.');
+
+  } else if (data === 'survey_redraw') {
+    if (!surveyState || !surveyState.candidates) {
+      await answerCallbackQuery(queryId, '다시 추첨할 대상이 없습니다.');
+      return;
+    }
+    await answerCallbackQuery(queryId, '다시 추첨 중...');
+    const { perfKey, candidates, drawCount } = surveyState;
+    const count = Math.min(drawCount, candidates.length);
+
+    // 셔플 후 N명 선택
+    const shuffled = [...candidates].sort(() => Math.random() - 0.5);
+    const selected = shuffled.slice(0, count);
+    surveyState.selected = selected;
+
+    const perfInfo = PERFORMANCES[perfKey];
+    let msg = `📋 <b>설문 발송 대상 (다시 추첨)</b>\n`;
+    msg += `🎵 ${perfInfo?.name || perfKey} (${perfInfo?.date || ''})\n`;
+    msg += `📊 ${candidates.length}명 중 ${selected.length}명 추첨\n\n`;
+    selected.forEach((r, idx) => {
+      const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
+      msg += `${idx + 1}. ${r.buyerName} (${maskedPhone}) ${r.seatType || ''} ${r.qty}매\n`;
+    });
+
+    const replyMarkup = {
+      inline_keyboard: [[
+        { text: '✅ 발송하기', callback_data: 'survey_send' },
+        { text: '🔄 다시 추첨', callback_data: 'survey_redraw' },
+        { text: '❌ 취소', callback_data: 'survey_cancel' },
+      ]],
+    };
+    await sendMessage(msg, replyMarkup);
   }
 }
 
@@ -5387,6 +5887,92 @@ async function handleMessage(msg) {
       }
       readyMsg += `📎 미판매 좌석 엑셀 파일(.xlsx)을 보내주세요.\n⏰ 10분 이내에 파일을 보내주세요.`;
       await sendMessage(readyMsg);
+    }
+    return;
+  }
+
+  // ── 설문발송: 공연 목록 표시 ──
+  if (text === '설문발송') {
+    await sendMessage('📋 설문 대상 공연 조회 중...');
+    try {
+      const perfList = getSurveyPerfList();
+      if (perfList.length === 0) {
+        await sendMessage('📋 설문 발송 가능한 (이미 끝난) 공연이 없습니다.');
+      } else {
+        let msg = `📋 <b>설문 발송 - 공연 목록</b>\n\n`;
+        perfList.forEach((p, idx) => {
+          msg += `${idx + 1}. ${p.name} (${p.date})\n   📊 발송 ${p.count}건\n\n`;
+        });
+        msg += `설문 보낼 공연과 인원수를 입력하세요.\n예: <b>설문 1 5</b> (1번 공연에서 5명 추첨)`;
+        // perfList를 surveyState에 임시 저장
+        surveyState = { perfList };
+        await sendMessage(msg);
+      }
+    } catch (err) {
+      await sendMessage(`❌ 설문 목록 오류: ${err.message}`);
+    }
+    return;
+  }
+
+  // ── 설문 N M: 랜덤 추첨 ──
+  if (text.startsWith('설문') && text.match(/설문\s*(\d+)\s+(\d+)/)) {
+    const match = text.match(/설문\s*(\d+)\s+(\d+)/);
+    const perfIdx = parseInt(match[1]) - 1;
+    const drawCount = parseInt(match[2]);
+
+    if (!surveyState || !surveyState.perfList) {
+      await sendMessage('⚠️ 먼저 "설문발송"을 입력해서 공연 목록을 불러오세요.');
+      return;
+    }
+    if (perfIdx < 0 || perfIdx >= surveyState.perfList.length) {
+      await sendMessage(`❌ 1~${surveyState.perfList.length} 사이로 입력해주세요.`);
+      return;
+    }
+    if (drawCount < 1) {
+      await sendMessage('❌ 추첨 인원은 1명 이상이어야 합니다.');
+      return;
+    }
+
+    const targetPerf = surveyState.perfList[perfIdx];
+    await sendMessage(`📋 ${targetPerf.name} 설문 대상 수집 중...\n(취소자 제외 + 기존 수신자 제외)`);
+
+    try {
+      const candidates = await getSurveyRecipients(targetPerf.perfKey);
+      if (candidates.length === 0) {
+        await sendMessage('📋 설문 발송 가능한 대상자가 없습니다.\n(전원 취소했거나 이미 설문을 받았습니다)');
+        return;
+      }
+
+      const count = Math.min(drawCount, candidates.length);
+      if (drawCount > candidates.length) {
+        await sendMessage(`ℹ️ 요청 ${drawCount}명 > 대상 ${candidates.length}명 → ${candidates.length}명 전원 선택`);
+      }
+
+      // 셔플 후 N명 선택
+      const shuffled = [...candidates].sort(() => Math.random() - 0.5);
+      const selected = shuffled.slice(0, count);
+
+      surveyState = { perfKey: targetPerf.perfKey, candidates, selected, drawCount };
+
+      const perfInfo = PERFORMANCES[targetPerf.perfKey];
+      let msg = `📋 <b>설문 발송 대상 (${selected.length}/${candidates.length}명 추첨)</b>\n`;
+      msg += `🎵 ${perfInfo?.name || targetPerf.perfKey} (${perfInfo?.date || ''})\n\n`;
+      selected.forEach((r, idx) => {
+        const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
+        msg += `${idx + 1}. ${r.buyerName} (${maskedPhone}) ${r.seatType || ''} ${r.qty}매\n`;
+      });
+      msg += `\n⚠️ 위 명단을 확인 후 발송 버튼을 눌러주세요.`;
+
+      const replyMarkup = {
+        inline_keyboard: [[
+          { text: '✅ 발송하기', callback_data: 'survey_send' },
+          { text: '🔄 다시 추첨', callback_data: 'survey_redraw' },
+          { text: '❌ 취소', callback_data: 'survey_cancel' },
+        ]],
+      };
+      await sendMessage(msg, replyMarkup);
+    } catch (err) {
+      await sendMessage(`❌ 설문 추첨 오류: ${err.message}`);
     }
     return;
   }
@@ -5975,7 +6561,8 @@ async function handleMessage(msg) {
       `• 비교N - 네이버↔뿌리오 주문 비교\n` +
       `• 취소목록 - 취소/반품 목록 확인\n` +
       `• 취소등록 이름 뒷자리 - 수동 취소\n` +
-      `• 취소삭제 번호 - 취소 목록에서 제거\n\n` +
+      `• 취소삭제 번호 - 취소 목록에서 제거\n` +
+      `• 설문발송 - 공연 후 설문 문자 발송\n\n` +
       `<b>🔍 검색</b>\n` +
       `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
       `<b>⚙️ 관리</b>\n` +
@@ -6121,7 +6708,8 @@ async function startPolling() {
       `• 최종결산 - 공연별 발송 명단\n` +
       `• 비교N - 네이버↔뿌리오 주문 비교\n` +
       `• 취소목록 - 취소/반품 목록 확인\n` +
-      `• 취소등록 이름 뒷자리 - 수동 취소 등록\n\n` +
+      `• 취소등록 이름 뒷자리 - 수동 취소 등록\n` +
+      `• 설문발송 - 공연 후 설문 문자 발송\n\n` +
       `<b>🔍 검색</b>\n` +
       `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
       `<b>⚙️ 관리</b>\n` +
