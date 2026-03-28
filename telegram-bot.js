@@ -1962,6 +1962,158 @@ async function getSurveyRecipients(targetPerfKey) {
   return unique.filter(o => !alreadySent.has((o.phone || '').replace(/-/g, '')));
 }
 
+// 설문발송: 주문 엑셀 기반 명단 파싱 + sms-log 전화번호 매칭
+async function processSurveyExcel(fileBuffer) {
+  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  if (rows.length === 0) {
+    await sendMessage('⚠️ 엑셀에 데이터가 없습니다.');
+    surveyState = null;
+    return;
+  }
+
+  // 컬럼 자동 매핑
+  const cols = Object.keys(rows[0]);
+  const claimCol = cols.find(c => c.includes('클레임') && c.includes('상태'))
+    || cols.find(c => c.includes('클레임'));
+  const buyerCol = cols.find(c => c.includes('구매자') && c.includes('명'))
+    || cols.find(c => c.includes('구매자'))
+    || cols.find(c => c.includes('주문자'));
+  const productCol = cols.find(c => c === '상품명')
+    || cols.find(c => c.includes('상품') && c.includes('명'));
+  const optionCol = cols.find(c => c.includes('판매옵션'))
+    || cols.find(c => c.includes('옵션'));
+  const qtyCol = cols.find(c => c === '수량')
+    || cols.find(c => c.includes('수량'));
+
+  if (!buyerCol) {
+    await sendMessage(`❌ 구매자명 컬럼을 찾을 수 없습니다.\n컬럼: ${cols.join(', ')}`);
+    surveyState = null;
+    return;
+  }
+
+  console.log(`   📋 설문 엑셀 매핑: 클레임=[${claimCol}], 구매자=[${buyerCol}], 상품=[${productCol}], 옵션=[${optionCol}], 수량=[${qtyCol}]`);
+
+  // 정상 주문자 추출 (클레임상태가 비어있는 건만)
+  const cancelStatuses = ['반품완료', '직권취소완료', '취소완료'];
+  const validBuyers = []; // { buyerName, seatType, qty, product }
+  const cancelledCount = { total: 0 };
+
+  for (const row of rows) {
+    const buyerName = String(row[buyerCol] || '').trim();
+    if (!buyerName) continue;
+
+    // 클레임상태 체크
+    if (claimCol) {
+      const claimStatus = String(row[claimCol] || '').trim();
+      if (cancelStatuses.some(s => claimStatus.includes(s))) {
+        cancelledCount.total++;
+        continue;
+      }
+    }
+
+    const product = productCol ? String(row[productCol] || '').trim() : '';
+    const optInfo = optionCol ? String(row[optionCol] || '').trim() : '';
+    const qty = qtyCol ? (parseInt(row[qtyCol]) || 1) : 1;
+
+    // 좌석 추출
+    const seatM = product.match(/,\s*(\S+석)\s*$/) || optInfo.match(/좌석정보\s*:\s*(\S+석)/) || optInfo.match(/:\s*(\S+석)\s*$/);
+    const seatType = seatM ? seatM[1] : '';
+
+    validBuyers.push({ buyerName, seatType, qty, product });
+  }
+
+  // 이름 중복 제거 (같은 이름 여러 주문 → 합산)
+  const buyerMap = {};
+  for (const b of validBuyers) {
+    if (!buyerMap[b.buyerName]) {
+      buyerMap[b.buyerName] = { ...b };
+    } else {
+      buyerMap[b.buyerName].qty += b.qty;
+    }
+  }
+  const uniqueBuyers = Object.values(buyerMap);
+
+  // sms-log에서 전화번호 매칭
+  const smsLog = readJson(CONFIG.smsLogFile, []);
+  const phoneMap = {}; // buyerName → phone
+  for (const entry of smsLog) {
+    if (entry.buyerName && entry.phone) {
+      phoneMap[entry.buyerName] = entry.phone;
+    }
+  }
+
+  // 이미 설문 보낸 사람 제외
+  const surveyLog = readJson(CONFIG.surveyLogFile, []);
+  const alreadySent = new Set(surveyLog.map(s => (s.phone || '').replace(/-/g, '')));
+
+  const matched = [];   // 전화번호 매칭 + 설문 미발송
+  const noPhone = [];   // 전화번호 없음
+  const alreadyDone = []; // 이미 설문 발송됨
+
+  for (const b of uniqueBuyers) {
+    const phone = phoneMap[b.buyerName];
+    if (!phone) {
+      noPhone.push(b);
+      continue;
+    }
+    const phoneClean = phone.replace(/-/g, '');
+    if (alreadySent.has(phoneClean)) {
+      alreadyDone.push(b);
+      continue;
+    }
+    matched.push({ ...b, phone });
+  }
+
+  // 결과 메시지
+  let msg = `📋 <b>설문 발송 대상</b>\n\n`;
+  msg += `📊 엑셀 전체: ${rows.length}건\n`;
+  if (cancelledCount.total > 0) msg += `❌ 취소/반품: ${cancelledCount.total}건 제외\n`;
+  msg += `👤 정상 주문자: ${uniqueBuyers.length}명 (중복 제거)\n`;
+  msg += `📱 전화번호 매칭: ${matched.length}명\n`;
+  if (noPhone.length > 0) msg += `⚠️ 전화번호 없음: ${noPhone.length}명\n`;
+  if (alreadyDone.length > 0) msg += `✅ 설문 기발송: ${alreadyDone.length}명\n`;
+  msg += `\n`;
+
+  if (matched.length === 0) {
+    msg += `설문 발송 가능한 대상이 없습니다.`;
+    if (noPhone.length > 0) {
+      msg += `\n\n⚠️ 전화번호 없는 사람:\n`;
+      noPhone.forEach(b => { msg += `  • ${b.buyerName} ${b.seatType || ''} ${b.qty}매\n`; });
+    }
+    await sendMessage(msg);
+    surveyState = null;
+    return;
+  }
+
+  // 명단 표시
+  msg += `<b>발송 대상 (${matched.length}명):</b>\n`;
+  matched.forEach((r, idx) => {
+    const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
+    msg += `${idx + 1}. ${r.buyerName} (${maskedPhone}) ${r.seatType || ''} ${r.qty}매\n`;
+  });
+
+  if (noPhone.length > 0) {
+    msg += `\n⚠️ <b>전화번호 없음 (${noPhone.length}명):</b>\n`;
+    noPhone.forEach(b => { msg += `  • ${b.buyerName} ${b.seatType || ''} ${b.qty}매\n`; });
+  }
+
+  msg += `\n💡 특정 번호만 발송: <b>설문보내기 1,3,5</b> 또는 <b>설문보내기 1-5,7</b>`;
+
+  // surveyState에 저장
+  surveyState = { selected: matched, noPhone };
+
+  const replyMarkup = {
+    inline_keyboard: [[
+      { text: `✅ 전체 발송 (${matched.length}명)`, callback_data: 'survey_send' },
+      { text: '❌ 취소', callback_data: 'survey_cancel' },
+    ]],
+  };
+  await sendMessage(msg, replyMarkup);
+}
+
 // 설문 대상 공연 목록 (이미 지난 공연만)
 function getSurveyPerfList() {
   const smsLog = readJson(CONFIG.smsLogFile, []);
@@ -5546,9 +5698,10 @@ async function handleCallbackQuery(cq) {
     }
     await answerCallbackQuery(queryId, '설문 발송 시작...');
     const { perfKey, selected } = surveyState;
-    const perfInfo = PERFORMANCES[perfKey];
+    const perfInfo = perfKey ? PERFORMANCES[perfKey] : null;
     const total = selected.length;
-    await sendMessage(`⏳ 설문 문자 발송 시작 (${total}명)...\n📋 ${perfInfo?.name || perfKey}`);
+    const label = perfInfo ? `${perfInfo.name} (${perfInfo.date})` : '엑셀 명단';
+    await sendMessage(`⏳ 설문 문자 발송 시작 (${total}명)...\n📋 ${label}`);
 
     let success = 0, fail = 0;
     for (let i = 0; i < selected.length; i++) {
@@ -5560,7 +5713,7 @@ async function handleCallbackQuery(cq) {
           // 발송 성공 → 로그 저장
           const surveyLog = readJson(CONFIG.surveyLogFile, []);
           surveyLog.push({
-            perfKey,
+            perfKey: perfKey || 'excel',
             buyerName: r.buyerName,
             phone: r.phone,
             sentAt: new Date().toISOString(),
@@ -5581,7 +5734,7 @@ async function handleCallbackQuery(cq) {
 
     await sendMessage(
       `✅ <b>설문 발송 완료!</b>\n\n` +
-      `📋 ${perfInfo?.name || perfKey} (${perfInfo?.date || ''})\n` +
+      `📋 ${label}\n` +
       `📊 총 ${total}명 중 성공 ${success}건, 실패 ${fail}건`
     );
     surveyState = null;
@@ -5766,6 +5919,28 @@ async function handleMessage(msg) {
       seatAssignWaiting = null;
     }
     return;
+  }
+
+  // 설문발송: 엑셀 수신 → 명단 파싱 + sms-log 전화번호 매칭
+  if (msg.document && isPersonalChat && surveyState && surveyState.waitingExcel) {
+    const doc = msg.document;
+    const fileName = doc.file_name || '';
+    if (fileName.match(/\.(xlsx?)$/i)) {
+      if (Date.now() - surveyState.timestamp > 10 * 60 * 1000) {
+        surveyState = null;
+        await sendMessage('⏰ 설문 대기 시간이 초과되었습니다. "설문발송"을 다시 입력해주세요.');
+        return;
+      }
+      try {
+        await sendMessage('📊 주문 엑셀 분석 중...');
+        const fileBuffer = await downloadTelegramFile(doc.file_id);
+        await processSurveyExcel(fileBuffer);
+      } catch (err) {
+        await sendMessage(`❌ 엑셀 분석 오류: ${err.message}`);
+        surveyState = null;
+      }
+      return;
+    }
   }
 
   // 스마트스토어 주문 엑셀 수신 → 취소 비교 후 재배정
@@ -6156,26 +6331,10 @@ async function handleMessage(msg) {
     return;
   }
 
-  // ── 설문발송: 공연 목록 표시 ──
+  // ── 설문발송: 엑셀 대기 모드 ──
   if (text === '설문발송') {
-    await sendMessage('📋 설문 대상 공연 조회 중...');
-    try {
-      const perfList = getSurveyPerfList();
-      if (perfList.length === 0) {
-        await sendMessage('📋 설문 발송 가능한 (이미 끝난) 공연이 없습니다.');
-      } else {
-        let msg = `📋 <b>설문 발송 - 공연 목록</b>\n\n`;
-        perfList.forEach((p, idx) => {
-          msg += `${idx + 1}. ${p.name} (${p.date})\n   📊 발송 ${p.count}건\n\n`;
-        });
-        msg += `설문 보낼 공연과 인원수를 입력하세요.\n예: <b>설문 1 5</b> (1번 공연에서 5명 추첨)`;
-        // perfList를 surveyState에 임시 저장
-        surveyState = { perfList };
-        await sendMessage(msg);
-      }
-    } catch (err) {
-      await sendMessage(`❌ 설문 목록 오류: ${err.message}`);
-    }
+    surveyState = { waitingExcel: true, timestamp: Date.now() };
+    await sendMessage('📋 <b>설문 발송</b>\n\n📎 스마트스토어 주문조회 엑셀 파일(.xlsx)을 보내주세요.\n(비번 0525, 클레임상태 필터 완료된 최종 명단)\n\n⏰ 10분 이내에 파일을 보내주세요.');
     return;
   }
 
@@ -6246,7 +6405,7 @@ async function handleMessage(msg) {
   if (text.startsWith('설문보내기') && text.match(/설문보내기\s+(.+)/)) {
     const numStr = text.match(/설문보내기\s+(.+)/)[1];
     if (!surveyState || !surveyState.selected || surveyState.selected.length === 0) {
-      await sendMessage('⚠️ 먼저 "설문 N M"으로 추첨한 후 사용하세요.');
+      await sendMessage('⚠️ 먼저 "설문발송"으로 엑셀을 보내거나 "설문 N M"으로 추첨한 후 사용하세요.');
       return;
     }
 
@@ -6275,10 +6434,11 @@ async function handleMessage(msg) {
     }
 
     const targets = sorted.map(n => surveyState.selected[n - 1]);
-    const { perfKey } = surveyState;
-    const perfInfo = PERFORMANCES[perfKey];
+    const perfKey = surveyState.perfKey || null;
+    const perfInfo = perfKey ? PERFORMANCES[perfKey] : null;
+    const label = perfInfo ? perfInfo.name : '엑셀 명단';
 
-    let confirmMsg = `⏳ 설문 문자 발송 시작 (${targets.length}명)...\n📋 ${perfInfo?.name || perfKey}\n\n`;
+    let confirmMsg = `⏳ 설문 문자 발송 시작 (${targets.length}명)...\n📋 ${label}\n\n`;
     targets.forEach((r, idx) => {
       confirmMsg += `${sorted[idx]}. ${r.buyerName}\n`;
     });
@@ -6295,7 +6455,7 @@ async function handleMessage(msg) {
           surveyLog.push({
             phone: r.phone,
             buyerName: r.buyerName,
-            perfKey,
+            perfKey: perfKey || 'excel',
             sentAt: new Date().toISOString(),
           });
           writeJson(CONFIG.surveyLogFile, surveyLog);
