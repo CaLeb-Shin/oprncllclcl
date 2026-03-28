@@ -5882,8 +5882,10 @@ async function handleCallbackQuery(cq) {
     const failReasons = [];
     for (let i = 0; i < selected.length; i++) {
       const r = selected[i];
+      const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
+      let ok = false;
       try {
-        const ok = await sendSurveySMS(r.phone);
+        ok = await sendSurveySMS(r.phone);
         if (ok) {
           success++;
           // 발송 성공 → 로그 저장
@@ -5910,10 +5912,9 @@ async function handleCallbackQuery(cq) {
           return;
         }
       }
-      // 진행 상황 (5명마다 또는 마지막)
-      if ((i + 1) % 5 === 0 || i === selected.length - 1) {
-        await sendMessage(`📊 설문 발송 진행: ${i + 1}/${total} (성공 ${success}, 실패 ${fail})`);
-      }
+      // 진행 상황 (매건마다)
+      await sendMessage(`${ok ? '✅' : '❌'} ${i + 1}/${total} ${r.buyerName} (${maskedPhone}) ${ok ? '성공' : '실패'}`);
+
     }
 
     let resultMsg = `✅ <b>설문 발송 완료!</b>\n\n📋 ${label}\n📊 총 ${total}명 중 성공 ${success}건, 실패 ${fail}건`;
