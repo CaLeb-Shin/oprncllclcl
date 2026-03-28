@@ -3899,9 +3899,22 @@ function findTadminCode(perfIndex) {
 // 좌석 배정 실행 (공통 로직: 자동 다운로드 / 수동 업로드 모두 사용)
 // 주문 엑셀에서 정상 주문자 이름 Set 추출
 function parseOrderExcelNames(fileBuffer) {
-  const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+  const wb = XLSX.read(fileBuffer, { type: 'buffer', cellStyles: true });
   const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+  const allRows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+  // 엑셀 필터(숨김 행) 감지 → 보이는 행만 추출
+  const rowInfo = sheet['!rows'] || [];
+  let rows;
+  if (rowInfo.some(r => r && r.hidden)) {
+    rows = allRows.filter((_, idx) => {
+      const ri = rowInfo[idx + 1]; // +1: 헤더가 row 0
+      return !ri || !ri.hidden;
+    });
+    console.log(`   🔍 주문 엑셀 필터 감지: ${allRows.length}건 → ${rows.length}건`);
+  } else {
+    rows = allRows;
+  }
 
   if (rows.length === 0) return null;
 
