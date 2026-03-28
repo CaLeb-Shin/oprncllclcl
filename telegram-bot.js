@@ -2118,30 +2118,41 @@ async function processSurveyExcel(fileBuffer) {
     return;
   }
 
-  // 명단 표시
-  msg += `<b>발송 대상 (${matched.length}명):</b>\n`;
-  matched.forEach((r, idx) => {
-    const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
-    msg += `${idx + 1}. ${r.buyerName} (${maskedPhone}) ${r.seatType || ''} ${r.qty}매\n`;
-  });
+  // 명단 표시 (텔레그램 4096자 제한 → 분할 전송)
+  // 먼저 요약 메시지 전송
+  await sendMessage(msg);
 
-  if (noPhone.length > 0) {
-    msg += `\n⚠️ <b>전화번호 없음 (${noPhone.length}명):</b>\n`;
-    noPhone.forEach(b => { msg += `  • ${b.buyerName} ${b.seatType || ''} ${b.qty}매\n`; });
+  // 명단을 분할 전송 (한 메시지당 최대 50명)
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < matched.length; i += CHUNK_SIZE) {
+    const chunk = matched.slice(i, i + CHUNK_SIZE);
+    let listMsg = `<b>발송 대상 (${i + 1}~${i + chunk.length} / ${matched.length}명):</b>\n`;
+    chunk.forEach((r, idx) => {
+      const maskedPhone = r.phone.replace(/(\d{3})-?(\d{3,4})-?(\d{4})/, '$1-****-$3');
+      listMsg += `${i + idx + 1}. ${r.buyerName} (${maskedPhone}) ${r.seatType || ''} ${r.qty}매\n`;
+    });
+    await sendMessage(listMsg);
   }
 
-  msg += `\n💡 특정 번호만 발송: <b>설문보내기 1,3,5</b> 또는 <b>설문보내기 1-5,7</b>`;
+  // 전화번호 없는 사람
+  if (noPhone.length > 0) {
+    let noPhoneMsg = `⚠️ <b>전화번호 없음 (${noPhone.length}명):</b>\n`;
+    noPhone.forEach(b => { noPhoneMsg += `  • ${b.buyerName} ${b.seatType || ''} ${b.qty}매\n`; });
+    await sendMessage(noPhoneMsg);
+  }
 
   // surveyState에 저장
   surveyState = { selected: matched, noPhone };
 
+  // 최종 안내 + 버튼
+  const guideMsg = `💡 특정 번호만 발송: <b>설문보내기 1,3,5</b> 또는 <b>설문보내기 1-5,7</b>`;
   const replyMarkup = {
     inline_keyboard: [[
       { text: `✅ 전체 발송 (${matched.length}명)`, callback_data: 'survey_send' },
       { text: '❌ 취소', callback_data: 'survey_cancel' },
     ]],
   };
-  await sendMessage(msg, replyMarkup);
+  await sendMessage(guideMsg, replyMarkup);
 }
 
 // 설문 대상 공연 목록 (이미 지난 공연만)
