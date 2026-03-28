@@ -2080,14 +2080,47 @@ async function processSurveyExcel(fileBuffer) {
   }
   const uniqueBuyers = Object.values(buyerMap);
 
-  // sms-log에서 전화번호 매칭
-  const smsLog = readJson(CONFIG.smsLogFile, []);
+  // 전화번호 매칭 (sms-log → pendingOrders → Firebase)
   const phoneMap = {}; // buyerName → phone
+  const stripParen = (name) => name.replace(/\(.*?\)/g, '').trim();
+
+  // 1) sms-log.json
+  const smsLog = readJson(CONFIG.smsLogFile, []);
   for (const entry of smsLog) {
     if (entry.buyerName && entry.phone) {
       phoneMap[entry.buyerName] = entry.phone;
+      phoneMap[stripParen(entry.buyerName)] = entry.phone;
     }
   }
+
+  // 2) pendingOrders (현재 대기 중인 주문)
+  for (const [, po] of Object.entries(pendingOrders)) {
+    if (po.buyerName && po.phone) {
+      phoneMap[po.buyerName] = po.phone;
+      phoneMap[stripParen(po.buyerName)] = po.phone;
+    }
+  }
+
+  // 3) Firebase (멜론티켓 주문 데이터)
+  try {
+    const eventsData = await callFirebaseCF('listEventsHttp', {});
+    const events = eventsData.events || [];
+    for (const event of events) {
+      try {
+        const data = await callFirebaseCF('listNaverOrdersHttp', { eventId: event.id }, 15000);
+        for (const fo of (data.orders || [])) {
+          if (fo.buyerName && fo.buyerPhone && !phoneMap[stripParen(fo.buyerName)]) {
+            phoneMap[fo.buyerName] = fo.buyerPhone;
+            phoneMap[stripParen(fo.buyerName)] = fo.buyerPhone;
+          }
+        }
+      } catch {}
+    }
+  } catch (e) {
+    console.log('   ⚠️ 설문 Firebase 전화번호 조회 실패:', e.message);
+  }
+
+  console.log(`   📋 설문 전화번호 소스: sms-log ${smsLog.length}건, 총 ${Object.keys(phoneMap).length}개 확보`);
 
   // 이미 설문 보낸 사람 제외
   const surveyLog = readJson(CONFIG.surveyLogFile, []);
@@ -2098,7 +2131,7 @@ async function processSurveyExcel(fileBuffer) {
   const alreadyDone = []; // 이미 설문 발송됨
 
   for (const b of uniqueBuyers) {
-    const phone = phoneMap[b.buyerName];
+    const phone = phoneMap[b.buyerName] || phoneMap[stripParen(b.buyerName)];
     if (!phone) {
       noPhone.push(b);
       continue;
