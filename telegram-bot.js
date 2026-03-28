@@ -2094,7 +2094,93 @@ async function processSurveyExcel(fileBuffer) {
     console.log('   ⚠️ 설문 Firebase 전화번호 조회 실패:', e.message);
   }
 
-  console.log(`   📋 설문 전화번호 소스: sms-log ${smsLog.length}건, 총 ${Object.keys(phoneMap).length}개 확보`);
+  const phoneCountBefore = Object.keys(phoneMap).length;
+  console.log(`   📋 설문 전화번호 소스: sms-log ${smsLog.length}건, Firebase 후 ${phoneCountBefore}개 확보`);
+
+  // 4) 네이버 주문 페이지 직접 스크래핑 (위 소스에서 못 찾은 전화번호 보완)
+  try {
+    while (isSmartstoreRunning || isKeepAliveRunning) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    isSmartstoreRunning = true;
+    await ensureBrowser();
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order', { timeout: 15000 });
+    await smartstorePage.waitForTimeout(5000);
+    try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
+    await smartstorePage.waitForTimeout(500);
+
+    let nFrame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+    if (nFrame) {
+      // "전체" 탭 + 3개월 검색
+      try {
+        await nFrame.evaluate(() => {
+          const candidates = document.querySelectorAll('a, button, li, span, label, div[role="tab"], input[type="radio"]');
+          for (const el of candidates) {
+            const text = el.textContent?.trim();
+            if (text === '전체' || text === '전체주문' || text === '전체 주문') { el.click(); return; }
+          }
+        });
+      } catch {}
+      await nFrame.waitForTimeout(1000);
+      try { await nFrame.click('text=3개월', { timeout: 3000 }); } catch {}
+      await nFrame.waitForTimeout(500);
+      await nFrame.evaluate(() => {
+        const btns = document.querySelectorAll('button, a, input[type="button"]');
+        for (const btn of btns) { if (btn.textContent.trim() === '검색') { btn.click(); return; } }
+      });
+      await smartstorePage.waitForTimeout(5000);
+      nFrame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || nFrame;
+
+      const scrapePhones = async () => {
+        return await nFrame.evaluate(() => {
+          const rows = document.querySelectorAll('table tbody tr');
+          const result = [];
+          for (const tr of rows) {
+            const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim());
+            if (cells.length < 11) continue;
+            const date = cells[0] || '';
+            if (!date.match(/^20\d{2}\.\d{2}\.\d{2}/)) continue;
+            const buyerName = cells[11] || '';
+            const phone = cells.find((c) => c && c.match(/^01[0-9]-?\d{3,4}-?\d{4}$/)) || '';
+            if (buyerName && phone) result.push({ buyerName, phone });
+          }
+          return result;
+        });
+      };
+
+      // 페이지네이션 (최대 10페이지)
+      const phoneEntries = await scrapePhones();
+      for (let np = 2; np <= 10; np++) {
+        const hasNext = await nFrame.evaluate((pageNum) => {
+          const links = document.querySelectorAll('a, button');
+          for (const link of links) {
+            if (link.textContent.trim() === String(pageNum)) { link.click(); return true; }
+          }
+          return false;
+        }, np).catch(() => false);
+        if (!hasNext) break;
+        await smartstorePage.waitForTimeout(3000);
+        nFrame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || nFrame;
+        phoneEntries.push(...await scrapePhones());
+      }
+
+      for (const e of phoneEntries) {
+        if (!phoneMap[e.buyerName] && !phoneMap[stripParen(e.buyerName)]) {
+          phoneMap[e.buyerName] = e.phone;
+          phoneMap[stripParen(e.buyerName)] = e.phone;
+        }
+      }
+      console.log(`   📋 네이버 주문 페이지: ${phoneEntries.length}건 스크래핑 → 신규 ${Object.keys(phoneMap).length - phoneCountBefore}개 추가`);
+    }
+    // 주문 페이지 복귀
+    try { await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 10000 }); } catch {}
+    isSmartstoreRunning = false;
+  } catch (e) {
+    console.log('   ⚠️ 네이버 전화번호 스크래핑 실패:', e.message);
+    isSmartstoreRunning = false;
+  }
+
+  console.log(`   📋 설문 전화번호 최종: ${Object.keys(phoneMap).length}개 확보`);
 
   // 이미 설문 보낸 사람 제외
   const surveyLog = readJson(CONFIG.surveyLogFile, []);
