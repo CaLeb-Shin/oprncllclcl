@@ -5118,45 +5118,58 @@ async function sendSMS(order, _isRetry = false) {
     throw new Error('뿌리오 세션 만료');
   }
 
-  // 2. 해당 지역 템플릿 찾기 (1페이지 시도 → 검색 시도 → 페이지 넘기기 시도)
-  console.log(`   2️⃣ 템플릿 찾기: ${region}`);
+  // 2. 해당 지역 템플릿 찾기 (날짜별 구분 → 기본 지역명)
+  // 공연 날짜 추출: 같은 지역에 공연이 여러 개일 때 날짜로 템플릿 구분
+  const perfInfo = parseProductInfo(order.productName, '');
+  const perfDate = perfInfo.perfDate ? perfInfo.perfDate.replace(/\([^)]*\)/, '') : ''; // "4/4(토)" → "4/4"
+  // 날짜별 템플릿명: "[멜론]4/4 부산 공연 예매 완료", 기본: "[멜론] 부산 공연 예매 완료"
+  const dateTemplateName = perfDate ? `[멜론]${perfDate} ${region} 공연 예매 완료` : '';
+  const defaultTemplateName = `[멜론] ${region} 공연 예매 완료`;
+  const templateName = dateTemplateName || defaultTemplateName;
+
+  console.log(`   2️⃣ 템플릿 찾기: ${templateName}`);
   let templateFound = false;
 
-  // 같은 지역 템플릿이 문자함에 2개 이상인지 실제 확인
-  const regionTemplateCount = await ppurioPage.evaluate((rgn) => {
-    return [...document.querySelectorAll('*')].filter(el =>
-      el.innerText?.trim().includes(`[멜론] ${rgn}`) && el.children.length === 0
-    ).length;
-  }, region).catch(() => 0);
-
-  if (regionTemplateCount >= 2) {
-    await sendMessage(
-      `⚠️ <b>${region} 지역 문자 템플릿이 ${regionTemplateCount}개 있습니다!</b>\n\n` +
-      `문자함에서 올바른 템플릿만 남겨주세요.\n자동 발송은 첫 번째 템플릿으로 진행됩니다.`
-    );
+  // 방법1: 현재 페이지(1페이지)에서 날짜별 템플릿 우선 → 기본 템플릿 fallback
+  if (dateTemplateName) {
+    try {
+      await ppurioPage.click(`text=${dateTemplateName}`, { timeout: 3000 });
+      templateFound = true;
+      console.log(`      1페이지에서 날짜별 템플릿 발견! (${dateTemplateName})`);
+    } catch {}
   }
-
-  // 방법1: 현재 페이지(1페이지)에서 바로 찾기
-  try {
-    await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
-    templateFound = true;
-    console.log(`      1페이지에서 발견!`);
-  } catch {}
+  if (!templateFound) {
+    try {
+      await ppurioPage.click(`text=${defaultTemplateName}`, { timeout: 3000 });
+      templateFound = true;
+      console.log(`      1페이지에서 발견! (${defaultTemplateName})`);
+    } catch {}
+  }
 
   // 방법2: 검색 시도
   if (!templateFound) {
     console.log(`      1페이지에 없음 → 검색 시도...`);
     try {
-      await ppurioPage.fill('input[placeholder*="검색"]', region);
+      const searchKeyword = perfDate ? `${perfDate} ${region}` : region;
+      await ppurioPage.fill('input[placeholder*="검색"]', searchKeyword);
       await ppurioPage.waitForTimeout(300);
       await ppurioPage.keyboard.press('Enter');
       await ppurioPage.waitForTimeout(2000);
 
-      try {
-        await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
-        templateFound = true;
-        console.log(`      검색으로 발견!`);
-      } catch {}
+      if (dateTemplateName) {
+        try {
+          await ppurioPage.click(`text=${dateTemplateName}`, { timeout: 3000 });
+          templateFound = true;
+          console.log(`      검색으로 날짜별 템플릿 발견!`);
+        } catch {}
+      }
+      if (!templateFound) {
+        try {
+          await ppurioPage.click(`text=${defaultTemplateName}`, { timeout: 3000 });
+          templateFound = true;
+          console.log(`      검색으로 발견!`);
+        } catch {}
+      }
     } catch (e) {
       console.log(`      검색 실패: ${e.message}`);
     }
@@ -5183,17 +5196,27 @@ async function sendSMS(order, _isRetry = false) {
       }
 
       await ppurioPage.waitForTimeout(1500);
-      try {
-        await ppurioPage.click(`text=[멜론] ${region} 공연 예매 완료`, { timeout: 3000 });
-        templateFound = true;
-        console.log(`      페이지 ${p}에서 발견!`);
-        break;
-      } catch {}
+      if (dateTemplateName) {
+        try {
+          await ppurioPage.click(`text=${dateTemplateName}`, { timeout: 3000 });
+          templateFound = true;
+          console.log(`      페이지 ${p}에서 날짜별 템플릿 발견!`);
+          break;
+        } catch {}
+      }
+      if (!templateFound) {
+        try {
+          await ppurioPage.click(`text=${defaultTemplateName}`, { timeout: 3000 });
+          templateFound = true;
+          console.log(`      페이지 ${p}에서 발견!`);
+          break;
+        } catch {}
+      }
     }
   }
 
   if (!templateFound) {
-    console.log(`   ⚠️ 템플릿 못 찾음: [멜론] ${region} 공연 예매 완료`);
+    console.log(`   ⚠️ 템플릿 못 찾음: ${templateName}`);
     await ppurioPage.keyboard.press('Escape');
     return false;
   }
