@@ -340,9 +340,9 @@ function matchEventByKeywords(events, productName) {
   if (!productName || events.length === 0) return null;
   const name = productName.toLowerCase();
 
-  // 상품명에서 지역 추출 (예: "[창원] ..." → "창원")
+  // 상품명에서 지역 추출 (예: "... 부산, S석" 또는 "[창원] ...")
   const regionMatch = productName.match(/^\[([^\]]+)\]/) || productName.match(/(대구|창원|광주|대전|부산|고양|인천|울산)/);
-  const productRegion = regionMatch ? regionMatch[1] : null;
+  const productRegion = regionMatch ? (regionMatch[1] || regionMatch[0]) : null;
 
   let bestMatch = null;
   let bestScore = 0;
@@ -4572,9 +4572,12 @@ async function fetchStoreProductLinks() {
 }
 
 function parseProductInfo(productStr, optionInfo) {
-  // "[대구] MelON(멜론) 디즈니 + 지브리 오케스트라 콘서트 [비지정석] 대구, S석"
-  const regionMatch = productStr.match(/^\[([^\]]+)\]/);
-  const region = regionMatch ? regionMatch[1] : '기타';
+  // "지브리 & 뮤지컬 멜론심포니 오케스트라 콘서트 비지정석 부산, S석"
+  // fallback: "[대구] MelON(멜론) 디즈니 + 지브리 오케스트라 콘서트 [비지정석] 대구, S석"
+  const bracketMatch = productStr.match(/^\[([^\]]+)\]/);
+  const tailMatch = productStr.match(/(대구|창원|광주|대전|부산|고양|인천|울산|부천|구미|서울),\s*\S+석\s*$/);
+  const anyMatch = productStr.match(/(대구|창원|광주|대전|부산|고양|인천|울산|부천|구미|서울)/);
+  const region = bracketMatch ? bracketMatch[1] : tailMatch ? tailMatch[1] : anyMatch ? anyMatch[1] : '기타';
 
   const seatMatch = productStr.match(/,\s*(\S+석)\s*$/);
   // fallback 1: 옵션정보(cells[8])에서 좌석 찾기 (초기 상품용)
@@ -5017,8 +5020,10 @@ async function requestApproval(order) {
 // 뿌리오 문자 발송
 // ============================================================
 function extractRegion(productName) {
-  // 상품명에서 지역 추출: "[대전] ..." 또는 "... 대전, S석"
-  const m = productName.match(/(대전|광주|창원|울산|대구|부산|서울|고양)/);
+  // 상품명에서 지역 추출: "[대전] ..." 또는 "... 부산, S석"
+  const bracket = productName.match(/^\[([^\]]+)\]/);
+  if (bracket) return bracket[1];
+  const m = productName.match(/(대전|광주|창원|울산|대구|부산|서울|고양|인천|부천|구미)/);
   return m ? m[1] : '';
 }
 
