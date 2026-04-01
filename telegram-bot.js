@@ -1204,6 +1204,12 @@ async function getNewOrders() {
                            || cells.find((c) => c && c.match(/(대구|창원|광주|대전|부산|고양|인천|울산|부천|구미|서울),\s*\S+석\s*$/s))
                            || cells.find((c) => c && c.length > 8 && /멜론|MelON|콘서트|공연|오케스트라|디즈니|지브리|뮤지컬/.test(c))
                            || '';
+          // 디버그: 상품명 못 찾으면 셀 내용 출력
+          if (!productName) {
+            console.log(`   ⚠️ 상품명 매칭 실패! 주문: ${orderId}`);
+            console.log(`      셀 개수: ${cells.length}`);
+            cells.forEach((c, idx) => { if (c && c.length > 5) console.log(`      [${idx}] ${c.substring(0, 80)}`); });
+          }
           // 구매자: 셀[9]
           const buyerName = cells[9] || '';
           
