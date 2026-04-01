@@ -1199,9 +1199,10 @@ async function getNewOrders() {
           const orderId = headerOrderIds[i] || '';
           if (!orderId) continue;
 
-          // 상품명: [지역] ... 석 패턴 우선, fallback으로 [지역]+ 긴 텍스트 (줄바꿈 대응 s플래그)
+          // 상품명: "...지역, 좌석석" 또는 "[지역]...석" 패턴, fallback으로 키워드 매칭
           const productName = cells.find((c) => c && c.match(/^\[.+\].*석$/s))
-                           || cells.find((c) => c && /^\[.+\]/.test(c) && c.length > 8 && /멜론|MelON|콘서트|공연|오케스트라|디즈니|지브리|뮤지컬/.test(c))
+                           || cells.find((c) => c && c.match(/(대구|창원|광주|대전|부산|고양|인천|울산|부천|구미|서울),\s*\S+석\s*$/s))
+                           || cells.find((c) => c && c.length > 8 && /멜론|MelON|콘서트|공연|오케스트라|디즈니|지브리|뮤지컬/.test(c))
                            || '';
           // 구매자: 셀[9]
           const buyerName = cells[9] || '';
