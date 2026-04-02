@@ -1313,7 +1313,9 @@ async function getNewOrders() {
 async function checkCancelledOrders() {
   console.log('   🔍 취소/반품 주문 확인 (주문통합검색)...');
   try {
-    // 주문통합검색 페이지로 이동 (취소완료/반품완료가 영구 표시됨)
+    // 다른 페이지 경유 (같은 URL 연속 접속 시 iframe 미로드 방지)
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/home/about', { timeout: 15000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(2000);
     await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order', { timeout: 15000, waitUntil: 'domcontentloaded' });
     await smartstorePage.waitForTimeout(5000);
 
@@ -1321,7 +1323,13 @@ async function checkCancelledOrders() {
     try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
     await smartstorePage.waitForTimeout(500);
 
-    let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+    // 프레임 로딩 대기 (최대 15초 재시도)
+    let frame = null;
+    for (let i = 0; i < 5; i++) {
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+      if (frame) break;
+      await smartstorePage.waitForTimeout(3000);
+    }
     if (!frame) {
       console.log('   ⚠️ 주문 프레임을 찾을 수 없습니다.');
       return;
@@ -4656,7 +4664,9 @@ async function getStoreSalesSummary() {
   console.log('📦 스토어 판매현황 조회...');
   await ensureBrowser();
 
-  // 발주(주문)확인 페이지 → 3개월 검색
+  // 다른 페이지 경유 (같은 URL 연속 접속 시 iframe 미로드 방지)
+  await smartstorePage.goto('https://sell.smartstore.naver.com/#/home/about', { timeout: 15000, waitUntil: 'domcontentloaded' });
+  await smartstorePage.waitForTimeout(2000);
   await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order');
   await smartstorePage.waitForTimeout(5000);
 
@@ -4664,7 +4674,13 @@ async function getStoreSalesSummary() {
   try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 2000 }); } catch {}
   await smartstorePage.waitForTimeout(1000);
 
-  let frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+  // 프레임 로딩 대기 (최대 15초 재시도)
+  let frame = null;
+  for (let i = 0; i < 5; i++) {
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+    if (frame) break;
+    await smartstorePage.waitForTimeout(3000);
+  }
   if (!frame) throw new Error('주문 프레임을 찾을 수 없습니다.');
 
   // "전체" 주문 상태 탭 선택 (상태 필터에 관계없이 모든 주문 조회)
