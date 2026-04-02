@@ -959,13 +959,19 @@ async function ensureBrowser() {
       // 페이지는 살아있지만, 세션도 유효한지 확인 (다른 PC 로그인으로 세션 킥 감지)
       try {
         await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
-        await smartstorePage.waitForTimeout(3000);
-        const sessionValid = await smartstorePage.evaluate(() =>
+        await smartstorePage.waitForTimeout(5000);
+        const checkSession = () => smartstorePage.evaluate(() =>
           document.body.textContent.includes('판매관리') ||
           document.body.textContent.includes('정산관리') ||
           document.body.textContent.includes('주문/배송') ||
           document.body.textContent.includes('상품관리')
         );
+        let sessionValid = await checkSession();
+        if (!sessionValid) {
+          // SPA 렌더링 지연 대비 — 한번 더 기다려서 재확인
+          await smartstorePage.waitForTimeout(5000);
+          sessionValid = await checkSession();
+        }
         if (sessionValid) {
           await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
           return;  // 세션도 정상
