@@ -4100,8 +4100,17 @@ async function executeSeatAssignment(fileBuffer, perfIndex, upgrades, exclusions
   // 주문 엑셀 명단으로 필터링 (엑셀에 없는 사람 제외)
   if (orderExcelNames && orderExcelNames.size > 0) {
     const before = activeOrders.length;
-    const removed = activeOrders.filter(o => !orderExcelNames.has(o.buyerName));
-    activeOrders = activeOrders.filter(o => orderExcelNames.has(o.buyerName));
+    const nameInExcel = (o) => {
+      if (orderExcelNames.has(o.buyerName)) return true;
+      // 김선진(박송이) → 김선진, 박송이 각각 체크
+      const baseName = o.buyerName.replace(/\(.*?\)/g, '').trim();
+      if (baseName !== o.buyerName && orderExcelNames.has(baseName)) return true;
+      const parenMatch = o.buyerName.match(/\((.+?)\)/);
+      if (parenMatch && orderExcelNames.has(parenMatch[1])) return true;
+      return false;
+    };
+    const removed = activeOrders.filter(o => !nameInExcel(o));
+    activeOrders = activeOrders.filter(o => nameInExcel(o));
     const removedQty = removed.reduce((s, o) => s + o.qty, 0);
 
     if (removed.length > 0) {
