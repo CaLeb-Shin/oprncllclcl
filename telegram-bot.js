@@ -760,14 +760,18 @@ async function smartstoreAutoRelogin() {
 
     // 스마트스토어 직접 접속 (storageState 쿠키로 자동 로그인)
     await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(5000);
-
-    const ssLoggedIn = await smartstorePage.evaluate(() =>
-      document.body.textContent.includes('판매관리') ||
-      document.body.textContent.includes('정산관리') ||
-      document.body.textContent.includes('주문/배송') ||
-      document.body.textContent.includes('상품관리')
-    );
+    // SPA 렌더링 대기: 텍스트가 나타날 때까지 최대 15초 대기
+    let ssLoggedIn = false;
+    for (let i = 0; i < 5; i++) {
+      await smartstorePage.waitForTimeout(3000);
+      ssLoggedIn = await smartstorePage.evaluate(() =>
+        document.body.textContent.includes('판매관리') ||
+        document.body.textContent.includes('정산관리') ||
+        document.body.textContent.includes('주문/배송') ||
+        document.body.textContent.includes('상품관리')
+      );
+      if (ssLoggedIn) break;
+    }
 
     if (ssLoggedIn) {
       await smartstoreCtx.storageState({ path: CONFIG.smartstoreStateFile });
@@ -832,14 +836,18 @@ async function smartstoreKeepAlive() {
 
     // 2. 스마트스토어 메인 페이지 방문 (세션 갱신)
     await smartstorePage.goto(CONFIG.smartstore.mainUrl, { timeout: 20000, waitUntil: 'domcontentloaded' });
-    await smartstorePage.waitForTimeout(4000);
-
-    const isOk = await smartstorePage.evaluate(() =>
-      document.body.textContent.includes('판매관리') ||
-      document.body.textContent.includes('정산관리') ||
-      document.body.textContent.includes('주문/배송') ||
-      document.body.textContent.includes('상품관리')
-    );
+    // SPA 렌더링 대기: 텍스트가 나타날 때까지 최대 12초 대기
+    let isOk = false;
+    for (let i = 0; i < 6; i++) {
+      await smartstorePage.waitForTimeout(2000);
+      isOk = await smartstorePage.evaluate(() =>
+        document.body.textContent.includes('판매관리') ||
+        document.body.textContent.includes('정산관리') ||
+        document.body.textContent.includes('주문/배송') ||
+        document.body.textContent.includes('상품관리')
+      );
+      if (isOk) break;
+    }
 
     if (isOk) {
       // 세션 파일도 갱신 (갱신된 네이버+스마트스토어 쿠키 모두 저장)
