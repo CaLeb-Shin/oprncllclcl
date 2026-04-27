@@ -214,7 +214,7 @@ let pendingOrders = loadPendingOrders();
 // ============================================================
 // 텔레그램 API (타임아웃 포함)
 // ============================================================
-function telegramRequest(method, body = {}, timeoutMs = CONFIG.httpTimeoutMs) {
+function telegramRequestOnce(method, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(body);
     const options = {
@@ -222,6 +222,7 @@ function telegramRequest(method, body = {}, timeoutMs = CONFIG.httpTimeoutMs) {
       port: 443,
       path: `/bot${CONFIG.telegramBotToken}/${method}`,
       method: 'POST',
+      family: 4, // IPv4 강제 (Windows IPv6 행 방지)
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
@@ -247,6 +248,24 @@ function telegramRequest(method, body = {}, timeoutMs = CONFIG.httpTimeoutMs) {
     req.write(postData);
     req.end();
   });
+}
+
+async function telegramRequest(method, body = {}, timeoutMs = CONFIG.httpTimeoutMs) {
+  const maxAttempts = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await telegramRequestOnce(method, body, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      const msg = err && err.message ? err.message : String(err);
+      console.log(`⚠️ Telegram ${method} 실패 (${attempt}/${maxAttempts}): ${msg}`);
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 2000 * attempt)); // 2s, 4s
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // ============================================================
