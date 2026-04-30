@@ -5159,26 +5159,32 @@ async function getStoreSalesSummary() {
 // ============================================================
 // 텔레그램 승인 요청
 // ============================================================
-async function requestApproval(order) {
+function buildApprovalReplyMarkup(orderId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ 문자만', callback_data: `approve_${orderId}` },
+        { text: '🎫 문자+발권', callback_data: `approve_ticket_${orderId}` },
+        { text: '❌ 보류', callback_data: `reject_${orderId}` },
+      ],
+    ],
+  };
+}
+
+async function sendApprovalPrompt(order, title = '새 주문!') {
   const qtyStr = ` (${order.qty || 1}매)`;
   const msg =
-    `📦 <b>새 주문!</b>\n\n` +
+    `📦 <b>${title}</b>\n\n` +
     `🎫 공연: ${order.productName}${qtyStr}\n` +
     `👤 구매자: ${order.buyerName}\n` +
     (order.phone ? `📱 연락처: ${order.phone}\n` : '') +
     `\n주문번호: ${order.orderId}`;
 
-  const replyMarkup = {
-    inline_keyboard: [
-      [
-        { text: '✅ 문자만', callback_data: `approve_${order.orderId}` },
-        { text: '🎫 문자+발권', callback_data: `approve_ticket_${order.orderId}` },
-        { text: '❌ 보류', callback_data: `reject_${order.orderId}` },
-      ],
-    ],
-  };
+  await sendMessage(msg, buildApprovalReplyMarkup(order.orderId));
+}
 
-  await sendMessage(msg, replyMarkup);
+async function requestApproval(order) {
+  await sendApprovalPrompt(order, '새 주문!');
   pendingOrders[order.orderId] = order;
   savePendingOrders(pendingOrders);
 
@@ -5197,6 +5203,29 @@ async function requestApproval(order) {
       writeJson(CONFIG.smsLogFile, smsLog);
     }
   } catch {}
+}
+
+async function sendPendingOrderReminders(options = {}) {
+  const { force = false, excludeIds = [] } = options;
+  const now = Date.now();
+  if (!force && now - lastPendingReminder < CONFIG.pendingReminderInterval) return;
+
+  const excluded = new Set(excludeIds);
+  const pendingKeys = Object.keys(pendingOrders).filter((key) => !excluded.has(key));
+  if (pendingKeys.length === 0) return;
+
+  lastPendingReminder = now;
+  let summary = `🔔 <b>미처리 주문 알림 (${pendingKeys.length}건)</b>\n\n주문처리 전이라 계속 알려드릴게요.`;
+  for (const key of pendingKeys) {
+    const order = pendingOrders[key];
+    const qtyStr = `${order.qty || 1}매`;
+    summary += `\n• ${order.buyerName} - ${order.productName || ''} ${qtyStr}`;
+  }
+  await sendMessage(summary);
+
+  for (const key of pendingKeys) {
+    await sendApprovalPrompt(pendingOrders[key], '미처리 주문 리마인드');
+  }
 }
 
 // ============================================================
@@ -7070,16 +7099,7 @@ async function handleMessage(msg) {
         await sendMessage('✅ 신규 주문 없음 (대기 건 아래 참고)');
       }
 
-      // 승인 대기 중인 주문 알림
-      if (pendingKeys.length > 0) {
-        let pendingMsg = `⏳ <b>승인 대기 (${pendingKeys.length}건)</b>\n승인/거절을 선택해주세요!\n`;
-        for (const key of pendingKeys) {
-          const po = pendingOrders[key];
-          const qtyStr = ` ${po.qty || 1}매`;
-          pendingMsg += `\n• ${po.buyerName}${qtyStr} - 승인&거절 선택 필요`;
-        }
-        await sendMessage(pendingMsg);
-      }
+      await sendPendingOrderReminders({ force: true });
 
       // 발송처리 대기 목록 알림
       if (pendingDelivery.length > 0) {
@@ -7726,20 +7746,7 @@ async function startPolling() {
 
   // 봇 시작 시 승인 대기 건 리마인드
   try {
-    const pendingKeys = Object.keys(pendingOrders);
-    if (pendingKeys.length > 0) {
-      let pendingMsg = `⏳ <b>승인 대기 (${pendingKeys.length}건)</b>\n승인/거절을 선택해주세요!\n`;
-      for (const key of pendingKeys) {
-        const po = pendingOrders[key];
-        const qtyStr = ` ${po.qty || 1}매`;
-        pendingMsg += `\n• ${po.buyerName}${qtyStr} - 승인&거절 선택 필요`;
-      }
-      // 버튼 포함해서 다시 보내기
-      for (const key of pendingKeys) {
-        const po = pendingOrders[key];
-        await requestApproval(po);
-      }
-    }
+    await sendPendingOrderReminders({ force: true });
     // 발송처리 대기는 수동 조회만 (자동 알림 제거)
   } catch (e) {
     console.log('⚠️ 대기 건 알림 실패:', e.message);
