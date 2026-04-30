@@ -6,6 +6,45 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const XLSX = require('xlsx');
 
+function loadLocalEnv(filePath = path.join(__dirname, '.env')) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const key = match[1];
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
+
+loadLocalEnv();
+
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} 환경변수가 필요합니다. .env.example을 참고해 .env에 설정해주세요.`);
+  }
+  return value;
+}
+
+function optionalEnv(name, fallback = '') {
+  return process.env[name] || fallback;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 // Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell 콘솔 창 방지)
 function findFullChromium() {
   if (process.platform !== 'win32') return null;
@@ -62,9 +101,9 @@ function execSyncHidden(cmd, options = {}) {
 // 설정
 // ============================================================
 const CONFIG = {
-  telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
-  telegramChatId: '7718215110',
-  telegramGroupId: '-5176942774',  // 멜론 OS 그룹
+  telegramBotToken: requiredEnv('TELEGRAM_BOT_TOKEN'),
+  telegramChatId: requiredEnv('TELEGRAM_CHAT_ID'),
+  telegramGroupId: optionalEnv('TELEGRAM_GROUP_ID'),  // 멜론 OS 그룹
 
   smartstore: {
     mainUrl: 'https://sell.smartstore.naver.com/#/home/dashboard',
@@ -91,8 +130,8 @@ const CONFIG = {
 
   // 멜론티켓 Firebase CF 연동
   firebase: {
-    cfBaseUrl: 'https://us-central1-melon-ticket-mvp-2026.cloudfunctions.net',
-    botApiKey: 'melon-bot-secret-2026',
+    cfBaseUrl: optionalEnv('FIREBASE_CF_BASE_URL', 'https://us-central1-melon-ticket-mvp-2026.cloudfunctions.net'),
+    botApiKey: requiredEnv('BOT_API_KEY'),
     // perfKey → Firebase eventId 매핑 (어드민에서 이벤트 만들 때 ID 확인 후 입력)
     eventMap: {
       // '대구_지브리': 'FIREBASE_EVENT_ID_HERE',
@@ -210,6 +249,30 @@ function savePendingOrders(orders) {
 }
 
 let pendingOrders = loadPendingOrders();
+const processingOrderIds = new Set();
+
+function appendUniqueJsonArray(filePath, item) {
+  const list = readJson(filePath, []);
+  if (!list.includes(item)) {
+    list.push(item);
+    writeJson(filePath, list);
+  }
+  return list;
+}
+
+function claimPendingOrder(orderId) {
+  if (processingOrderIds.has(orderId)) return null;
+  const order = pendingOrders[orderId];
+  if (!order) return null;
+  processingOrderIds.add(orderId);
+  delete pendingOrders[orderId];
+  savePendingOrders(pendingOrders);
+  return order;
+}
+
+function releaseProcessingOrder(orderId) {
+  processingOrderIds.delete(orderId);
+}
 
 // ============================================================
 // 텔레그램 API (타임아웃 포함)
@@ -325,7 +388,7 @@ async function createMelonTicket(order, eventId, options = {}) {
     buyerName: order.buyerName,
     buyerPhone: order.phone || '',
     productName: order.productName,
-    seatGrade: info.seatGrade || 'S',
+    seatGrade: order.seatGrade || info.seatGrade || 'S',
     quantity: order.qty || 1,
     orderDate: new Date().toISOString(),
     memo: `봇 자동 등록`,
@@ -1540,28 +1603,51 @@ async function scrapePpurioResults() {
   }
 
   // 발송결과 페이지 → 미리보기 모드
-  await ppurioPage.goto('https://www.ppurio.com/result/message');
-  await ppurioPage.waitForTimeout(4000);
+  await ppurioPage.goto('https://www.ppurio.com/result/message', { waitUntil: 'domcontentloaded' });
+  await ppurioPage.waitForTimeout(6000);
 
   const loggedIn = await isPpurioLoggedIn(ppurioPage);
   if (!loggedIn) {
     throw new Error('뿌리오 로그인 만료. "뿌리오로그인" 해주세요.');
   }
 
-  // 미리보기 모드인지 확인, 아니면 클릭
-  try {
-    const isPreview = await ppurioPage.evaluate(() => {
-      const btn = document.querySelector('[class*="preview"], .btn_preview');
-      // 미리보기 버튼이 active 상태인지 확인
-      return document.body.innerText.includes('공연 정보') ||
-             document.body.innerText.includes('예매자');
+  // 미리보기 모드 진입 시도 — 여러 방법 (텍스트, getByText, 클래스 셀렉터)
+  for (let i = 0; i < 3; i++) {
+    const isPreview = await ppurioPage.evaluate(() =>
+      document.body.innerText.includes('[멜론]') ||
+      document.body.innerText.includes('예매자')
+    );
+    if (isPreview) break;
+
+    const clicked = await ppurioPage.evaluate(() => {
+      const els = document.querySelectorAll('a, button, span, li, div');
+      for (const el of els) {
+        const t = (el.innerText || '').trim();
+        if (t === '미리보기' || t === '미리 보기') {
+          el.click();
+          return true;
+        }
+      }
+      return false;
     });
-    if (!isPreview) {
-      // 미리보기 버튼 클릭
-      await ppurioPage.click('text=미리보기', { timeout: 3000 }).catch(() => {});
-      await ppurioPage.waitForTimeout(2000);
-    }
-  } catch {}
+    console.log(`   🔍 미리보기 진입 시도 ${i + 1} → ${clicked ? '클릭됨' : '버튼 못 찾음'}`);
+    await ppurioPage.waitForTimeout(3000);
+  }
+
+  // 진입 성공 여부 최종 확인 + 디버그 덤프
+  const debugInfo = await ppurioPage.evaluate(() => {
+    const text = document.body.innerText || '';
+    return {
+      hasMelon: text.includes('[멜론]'),
+      hasReserver: text.includes('예매자'),
+      url: location.href,
+      preview: text.substring(0, 800),
+    };
+  });
+  console.log(`   📊 페이지 상태: [멜론]=${debugInfo.hasMelon}, 예매자=${debugInfo.hasReserver}, URL=${debugInfo.url}`);
+  if (!debugInfo.hasMelon && !debugInfo.hasReserver) {
+    console.log(`   📝 페이지 미리보기:\n${debugInfo.preview}`);
+  }
 
   // 모든 페이지를 순회하며 카드 데이터 수집
   const allOrders = [];
@@ -5045,10 +5131,10 @@ async function requestApproval(order) {
   const qtyStr = ` (${order.qty || 1}매)`;
   const msg =
     `📦 <b>새 주문!</b>\n\n` +
-    `🎫 공연: ${order.productName}${qtyStr}\n` +
-    `👤 구매자: ${order.buyerName}\n` +
-    (order.phone ? `📱 연락처: ${order.phone}\n` : '') +
-    `\n주문번호: ${order.orderId}`;
+    `🎫 공연: ${escapeHtml(order.productName)}${qtyStr}\n` +
+    `👤 구매자: ${escapeHtml(order.buyerName)}\n` +
+    (order.phone ? `📱 연락처: ${escapeHtml(order.phone)}\n` : '') +
+    `\n주문번호: ${escapeHtml(order.orderId)}`;
 
   const replyMarkup = {
     inline_keyboard: [
@@ -5325,7 +5411,7 @@ async function sendSMS(order, _isRetry = false) {
 
     // 좌석 정보 교체 ("- 좌석:" 뒤 전체를 교체)
     const seatMatch = order.productName?.match(/,\s*(\S+석)\s*$/);
-    const seatType = seatMatch ? seatMatch[1] : '석';
+    const seatType = order.seatGrade ? `${order.seatGrade}석` : seatMatch ? seatMatch[1] : '석';
     const qty = order.qty || 1;
     content = content.replace(/- 좌석: .+/, `- 좌석: ${seatType} ${qty}매 (비지정석)`);
 
@@ -5870,16 +5956,16 @@ async function processOrder(order, options = {}) {
           const groupUrl = urls[0];
           await sendMessage(
             `🎫 <b>모바일 티켓 발권 완료!</b>\n\n` +
-            `👤 ${order.buyerName} (${order.seatGrade || parseProductInfo(order.productName).seatGrade || 'A'}석 ${order.qty || 1}매)\n` +
-            `📋 주문: ${order.orderId}\n\n` +
-            `🔗 그룹티켓 링크:\n${groupUrl}`
+            `👤 ${escapeHtml(order.buyerName)} (${escapeHtml(order.seatGrade || parseProductInfo(order.productName).seatGrade || 'A')}석 ${order.qty || 1}매)\n` +
+            `📋 주문: ${escapeHtml(order.orderId)}\n\n` +
+            `🔗 그룹티켓 링크:\n${escapeHtml(groupUrl)}`
           );
         } else {
           await sendMessage(`⚠️ 매칭되는 이벤트 없음 — 모바일 발권 건너뜀. 문자만 발송합니다.`);
         }
       } catch (cfErr) {
         console.log('   ⚠️ 멜론티켓 발권 오류:', cfErr.message);
-        await sendMessage(`⚠️ <b>모바일 티켓 생성 실패</b>\n\n${cfErr.message}\n\n문자 발송은 계속 진행합니다.`);
+        await sendMessage(`⚠️ <b>모바일 티켓 생성 실패</b>\n\n${escapeHtml(cfErr.message)}\n\n문자 발송은 계속 진행합니다.`);
       }
     }
 
@@ -5906,16 +5992,14 @@ async function processOrder(order, options = {}) {
 
     if (smsSent) {
       const verifyNote = verified === true ? ' (발송 확인됨)' : '';
-      await sendMessage(`✅ <b>문자 발송 완료!</b>${verifyNote}\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n\n⚠️ 배송처리는 직접 해주세요.`);
+      await sendMessage(`✅ <b>문자 발송 완료!</b>${verifyNote}\n\n주문: ${escapeHtml(order.orderId)}\n구매자: ${escapeHtml(order.buyerName)}\n\n⚠️ 배송처리는 직접 해주세요.`);
     } else {
-      await sendMessage(`⚠️ <b>문자 발송 실패</b>\n\n주문: ${order.orderId}\n구매자: ${order.buyerName}\n다음 체크 때 다시 알려드릴게요.`);
+      await sendMessage(`⚠️ <b>문자 발송 실패</b>\n\n주문: ${escapeHtml(order.orderId)}\n구매자: ${escapeHtml(order.buyerName)}\n다음 체크 때 다시 알려드릴게요.`);
     }
 
     // 2) 문자 발송 성공했을 때만 처리 완료 저장 (실패 시 다음에 다시 새 주문으로 감지)
     if (smsSent) {
-      const processed = readJson(CONFIG.processedOrdersFile);
-      processed.push(order.orderId);
-      writeJson(CONFIG.processedOrdersFile, processed);
+      appendUniqueJsonArray(CONFIG.processedOrdersFile, order.orderId);
 
       // 발송처리 대기 목록에 추가
       const pendingDelivery = readJson(CONFIG.pendingDeliveryFile);
@@ -5936,9 +6020,9 @@ async function processOrder(order, options = {}) {
     // 세션 만료 에러 시 브라우저 재초기화 필요
     if (err.message.includes('세션 만료') || err.message.includes('detached') || err.message.includes('closed')) {
       await closeBrowser();
-      await sendMessage(`⚠️ <b>뿌리오 세션 만료</b>\n\n"ppuriologin" 명령으로 재로그인 해주세요.\n주문 ${order.orderId}은 다음 체크 때 다시 알려드릴게요.`);
+      await sendMessage(`⚠️ <b>뿌리오 세션 만료</b>\n\n"ppuriologin" 명령으로 재로그인 해주세요.\n주문 ${escapeHtml(order.orderId)}은 다음 체크 때 다시 알려드릴게요.`);
     } else {
-      await sendMessage(`❌ <b>처리 실패</b>\n\n오류: ${err.message}`);
+      await sendMessage(`❌ <b>처리 실패</b>\n\n오류: ${escapeHtml(err.message)}`);
     }
   }
 }
@@ -5948,45 +6032,56 @@ async function processOrder(order, options = {}) {
 // ============================================================
 async function handleCallbackQuery(cq) {
   const { data, id: queryId } = cq;
+  const chatId = String(cq.message?.chat?.id || '');
+  if (chatId && chatId !== CONFIG.telegramChatId && chatId !== CONFIG.telegramGroupId) {
+    await answerCallbackQuery(queryId, '허용되지 않은 채팅입니다.');
+    return;
+  }
 
   if (data.startsWith('approve_ticket_')) {
     // 🎫 문자+발권: 모바일티켓 생성 후 SMS 발송
     const orderId = data.replace('approve_ticket_', '');
-    const order = pendingOrders[orderId];
+    const order = claimPendingOrder(orderId);
     if (order) {
       await answerCallbackQuery(queryId, '발권+문자 처리 중...');
-      await sendMessage(`⏳ <b>${order.buyerName}</b> 모바일 발권 + 문자 발송 중...${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
-      await enqueueOrder(order, { withTicket: true });
-      delete pendingOrders[orderId];
-      savePendingOrders(pendingOrders);
+      await sendMessage(`⏳ <b>${escapeHtml(order.buyerName)}</b> 모바일 발권 + 문자 발송 중...${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
+      try {
+        await enqueueOrder(order, { withTicket: true });
+      } finally {
+        releaseProcessingOrder(orderId);
+      }
     } else {
-      await answerCallbackQuery(queryId, '주문을 찾을 수 없습니다.');
+      await answerCallbackQuery(queryId, processingOrderIds.has(orderId) ? '이미 처리 중입니다.' : '주문을 찾을 수 없습니다.');
     }
   } else if (data.startsWith('approve_')) {
     // ✅ 문자만: 기존 SMS만 발송
     const orderId = data.replace('approve_', '');
-    const order = pendingOrders[orderId];
+    const order = claimPendingOrder(orderId);
     if (order) {
       await answerCallbackQuery(queryId, '처리 중...');
-      await sendMessage(`⏳ <b>${order.buyerName}</b> 주문 처리 중... 문자 발송을 시작합니다.${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
-      await enqueueOrder(order);
-      delete pendingOrders[orderId];
-      savePendingOrders(pendingOrders);
+      await sendMessage(`⏳ <b>${escapeHtml(order.buyerName)}</b> 주문 처리 중... 문자 발송을 시작합니다.${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
+      try {
+        await enqueueOrder(order);
+      } finally {
+        releaseProcessingOrder(orderId);
+      }
     } else {
-      await answerCallbackQuery(queryId, '주문을 찾을 수 없습니다.');
+      await answerCallbackQuery(queryId, processingOrderIds.has(orderId) ? '이미 처리 중입니다.' : '주문을 찾을 수 없습니다.');
     }
   } else if (data.startsWith('reject_')) {
     const orderId = data.replace('reject_', '');
+    if (processingOrderIds.has(orderId)) {
+      await answerCallbackQuery(queryId, '이미 처리 중입니다.');
+      return;
+    }
     await answerCallbackQuery(queryId, '보류 처리 완료');
 
     // processed에 추가 → 다시 알림 안 뜸
-    const processed = readJson(CONFIG.processedOrdersFile);
-    processed.push(orderId);
-    writeJson(CONFIG.processedOrdersFile, processed);
+    appendUniqueJsonArray(CONFIG.processedOrdersFile, orderId);
 
     delete pendingOrders[orderId];
     savePendingOrders(pendingOrders);
-    await sendMessage(`⏸ 주문 ${orderId} 보류 완료`);
+    await sendMessage(`⏸ 주문 ${escapeHtml(orderId)} 보류 완료`);
 
   // ── 설문 발송 콜백 ──
   } else if (data === 'survey_send') {
@@ -6105,17 +6200,17 @@ function parseNaverOrderMessage(text) {
   if (!text) return null;
   const result = {};
 
-  const perfMatch = text.match(/🎫\s*공연:\s*(.+)/);
-  if (perfMatch) {
-    const perfLine = perfMatch[1].trim();
-    const gradeMatch = perfLine.match(/,\s*(VIP|R|S|A)석\s*\((\d+)매\)\s*$/i);
-    if (gradeMatch) {
-      result.productName = perfLine.slice(0, gradeMatch.index).trim();
-      result.seatGrade = gradeMatch[1].toUpperCase();
-      result.qty = parseInt(gradeMatch[2], 10);
-    } else {
-      const qtyMatch = perfLine.match(/\((\d+)매\)\s*$/);
-      result.productName = qtyMatch ? perfLine.slice(0, qtyMatch.index).trim() : perfLine;
+	  const perfMatch = text.match(/🎫\s*공연:\s*(.+)/);
+	  if (perfMatch) {
+	    const perfLine = perfMatch[1].trim();
+	    const gradeMatch = perfLine.match(/(?:,\s*)?(VIP|R|S|A)석\s*(?:\(?\s*(\d+)매\s*\)?)?\s*$/i);
+	    if (gradeMatch) {
+	      result.productName = perfLine.slice(0, gradeMatch.index).trim();
+	      result.seatGrade = gradeMatch[1].toUpperCase();
+	      result.qty = parseInt(gradeMatch[2] || '1', 10);
+	    } else {
+	      const qtyMatch = perfLine.match(/\((\d+)매\)\s*$/);
+	      result.productName = qtyMatch ? perfLine.slice(0, qtyMatch.index).trim() : perfLine;
       result.qty = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
       result.seatGrade = 'A';
     }
@@ -6147,13 +6242,13 @@ async function handleIssueCommand(orderText) {
     return;
   }
 
-  await sendMessage(
-    `🔄 <b>수동 발권 처리 중...</b>\n\n` +
-    `👤 ${parsed.buyerName} (${parsed.phone})\n` +
-    `🎫 ${parsed.seatGrade || 'A'}석 ${parsed.qty}매\n` +
-    `📋 주문번호: ${parsed.orderId}\n` +
-    (parsed.productName ? `📦 ${parsed.productName}` : '')
-  );
+	  await sendMessage(
+	    `🔄 <b>수동 발권 처리 중...</b>\n\n` +
+	    `👤 ${escapeHtml(parsed.buyerName)} (${escapeHtml(parsed.phone)})\n` +
+	    `🎫 ${escapeHtml(parsed.seatGrade || 'A')}석 ${parsed.qty}매\n` +
+	    `📋 주문번호: ${escapeHtml(parsed.orderId)}\n` +
+	    (parsed.productName ? `📦 ${escapeHtml(parsed.productName)}` : '')
+	  );
 
   // 모바일 티켓 발권 + SMS 발송 (큐를 통해 순차 처리)
   await enqueueOrder(parsed, { withTicket: true });
