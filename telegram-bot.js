@@ -1580,6 +1580,54 @@ async function checkCancelledOrders() {
 let finalSummaryData = {};  // { '공연키': [주문들...] }
 let finalSummaryKeys = [];  // 공연키 목록
 
+function normalizeFinalSummaryDate(value) {
+  const text = String(value || '');
+  let match = text.match(/(\d{4})(\d{2})(\d{2})/);
+  if (match) return `${parseInt(match[2])}/${parseInt(match[3])}`;
+
+  match = text.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if (match) return `${parseInt(match[1])}/${parseInt(match[2])}`;
+
+  match = text.match(/(?:\d{4}\s*[./-]\s*)?(\d{1,2})\s*[./-]\s*(\d{1,2})/);
+  if (match) return `${parseInt(match[1])}/${parseInt(match[2])}`;
+
+  return '';
+}
+
+function getActiveFinalSummaryTargets() {
+  return Object.entries(PERFORMANCES)
+    .filter(([perfKey, perf]) => perf?.date && isPerfFuture(perfKey))
+    .map(([perfKey, perf]) => {
+      const [region, type = ''] = perfKey.split('_');
+      return {
+        perfKey,
+        region,
+        type,
+        name: perf.name || '',
+        dateKey: normalizeFinalSummaryDate(perf.date),
+      };
+    })
+    .filter((target) => target.region && target.dateKey);
+}
+
+function isActiveFinalSummaryOrder(order, targets) {
+  if (!targets.length) return true;
+
+  const haystack = `${order.title || ''} ${order.date || ''} ${order.venue || ''} ${order.raw || ''}`;
+  const orderDate = normalizeFinalSummaryDate(`${order.date || ''} ${order.raw || ''}`);
+
+  return targets.some((target) => {
+    const sameDateTargets = targets.filter((t) => t.dateKey === target.dateKey);
+    const dateMatched = orderDate && orderDate === target.dateKey;
+    const regionMatched = haystack.includes(target.region);
+    const typeMatched = !target.type || haystack.includes(target.type) || target.name.includes(target.type);
+
+    if (dateMatched && (regionMatched || sameDateTargets.length === 1)) return true;
+    if (regionMatched && typeMatched && (!orderDate || dateMatched)) return true;
+    return false;
+  });
+}
+
 // 뿌리오 발송결과 카드에서 모든 데이터 수집
 async function scrapePpurioResults() {
   console.log('📋 뿌리오 발송결과 스크래핑 중...');
@@ -1634,8 +1682,16 @@ async function scrapePpurioResults() {
 
   // 모든 페이지를 순회하며 카드 데이터 수집
   const allOrders = [];
+  const activeTargets = getActiveFinalSummaryTargets();
   let pageNum = 1;
   const maxPages = 20;
+  let pagesWithoutActive = 0;
+
+  console.log(
+    `   🎯 진행 공연 필터: ${
+      activeTargets.map((target) => `${target.region} ${target.dateKey}`).join(', ') || '없음(전체 수집)'
+    }`
+  );
 
   while (pageNum <= maxPages) {
     console.log(`   📄 페이지 ${pageNum} 스캔 중...`);
@@ -1679,15 +1735,21 @@ async function scrapePpurioResults() {
       return { results, pageNums, bodySnippet: bodyText.substring(0, 1500) };
     });
 
-    console.log(`      카드 ${cards.results.length}개 발견`);
-    for (const c of cards.results) {
+    const activeCards = cards.results.filter((order) => isActiveFinalSummaryOrder(order, activeTargets));
+    console.log(`      카드 ${cards.results.length}개 발견 / 진행공연 ${activeCards.length}개`);
+    for (const c of activeCards) {
       console.log(`      📨 ${c.title} | ${c.date} | ${c.buyerName} (${c.lastFour}) | ${c.seatType} ${c.qty}매`);
     }
     if (cards.results.length === 0) {
       console.log(`      📝 페이지 ${pageNum} 텍스트(앞 1500자):\n${cards.bodySnippet}`);
     }
 
-    allOrders.push(...cards.results);
+    allOrders.push(...activeCards);
+    pagesWithoutActive = activeCards.length > 0 ? 0 : pagesWithoutActive + 1;
+    if (allOrders.length > 0 && pagesWithoutActive >= 2) {
+      console.log('      ⏹ 진행 공연 발송내역 이후 2페이지 연속 신규 대상 없음');
+      break;
+    }
 
     // 다음 페이지
     if (cards.results.length === 0 && pageNum > 1) break;
