@@ -1208,6 +1208,129 @@ async function ensureBrowser() {
 // ============================================================
 // 스마트스토어: 주문 조회
 // ============================================================
+async function getActiveOrdersFromManageSearch() {
+  console.log('   🔁 배송관리 0건 → 주문통합검색 보조 조회...');
+  try {
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/home/about', { timeout: 15000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(1500);
+    await smartstorePage.goto('https://sell.smartstore.naver.com/#/naverpay/manage/order', { timeout: 20000, waitUntil: 'domcontentloaded' });
+    await smartstorePage.waitForTimeout(5000);
+
+    try { await smartstorePage.click('text=하루동안 보지 않기', { timeout: 1500 }); } catch {}
+    await smartstorePage.waitForTimeout(500);
+
+    let frame = null;
+    for (let i = 0; i < 5; i++) {
+      frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order'));
+      if (frame) break;
+      await smartstorePage.waitForTimeout(3000);
+    }
+    if (!frame) {
+      console.log('   ⚠️ 주문통합검색 프레임을 찾을 수 없습니다.');
+      return [];
+    }
+
+    try {
+      await frame.evaluate(() => {
+        const candidates = document.querySelectorAll('a, button, li, span, label, div[role="tab"], input[type="radio"]');
+        for (const el of candidates) {
+          const text = el.textContent?.trim();
+          if (text === '전체' || text === '전체주문' || text === '전체 주문') {
+            el.click();
+            return text;
+          }
+        }
+        const labels = document.querySelectorAll('label');
+        for (const label of labels) {
+          if (label.textContent?.trim().includes('전체')) {
+            label.click();
+            return label.textContent.trim();
+          }
+        }
+        return null;
+      });
+    } catch {}
+    await frame.waitForTimeout(1000);
+
+    try { await frame.click('text=1개월', { timeout: 3000 }); } catch {}
+    await frame.waitForTimeout(500);
+    await frame.evaluate(() => {
+      const btns = document.querySelectorAll('button, a, input[type="button"]');
+      for (const btn of btns) {
+        if (btn.textContent.trim() === '검색') {
+          btn.click();
+          return;
+        }
+      }
+    });
+    await smartstorePage.waitForTimeout(5000);
+
+    frame = smartstorePage.frames().find((f) => f.url().includes('/o/v3/manage/order')) || frame;
+    const orders = await frame.evaluate(() => {
+      const rows = document.querySelectorAll('table tbody tr');
+      const result = [];
+      const activeStatuses = [
+        '신규주문', '발주확인', '결제완료', '상품준비', '배송대기', '발송대기',
+        '배송준비', '주문접수'
+      ];
+
+      for (const tr of rows) {
+        const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim()).filter(Boolean);
+        if (cells.length < 8) continue;
+
+        const status = cells[1] || '';
+        if (status.includes('취소') || status.includes('반품') || status.includes('환불')) continue;
+        if (!activeStatuses.some((s) => status.includes(s))) continue;
+
+        let orderId = '';
+        for (const c of cells) {
+          const match = c.match(/(\d{16,})/);
+          if (match) { orderId = match[1]; break; }
+        }
+        if (!orderId) continue;
+
+        const productCell = cells.find((c) => c && /멜론|MelON|콘서트|공연|오케스트라|디즈니|지브리|뮤지컬/.test(c)) || cells[7] || '';
+        const optionCell = cells.find((c) => c && /VIP석|R석|S석|A석|B석|C석/.test(c)) || cells[8] || '';
+        const seatMatch = `${productCell} ${optionCell}`.match(/(VIP|R|S|A|B|C)석/);
+        const seatType = seatMatch ? `${seatMatch[1]}석` : '';
+        let productName = productCell;
+        if (seatType && !productName.includes(seatType)) productName = `${productName}, ${seatType}`;
+
+        const qtyCell = cells.find((c) => /^\d+\s*개?$/.test(c) || /^\d+\s*매?$/.test(c));
+        const qty = qtyCell ? parseInt(qtyCell) : (parseInt(cells[10]) || 1);
+        const phone = cells.find((c) => /^01[0-9]-?\d{3,4}-?\d{4}$/.test(c)) || '';
+
+        let buyerName = cells[11] || '';
+        const nameCandidate = cells.find((c) => /^[가-힣]{2,4}$/.test(c) && !['신규주문', '발주확인', '결제완료', '상품준비', '배송대기', '발송대기', '배송준비'].includes(c));
+        if (!buyerName || buyerName.length > 12) buyerName = nameCandidate || buyerName;
+
+        result.push({
+          orderId,
+          productName,
+          buyerName,
+          recipientName: buyerName,
+          qty,
+          phone,
+          option: optionCell,
+          _nameDebug: cells.slice(0, 25).map((c, idx) => `[${idx}]${c}`).join(' | '),
+          _source: 'manage-order',
+        });
+      }
+      return result;
+    });
+
+    console.log(`   📦 주문통합검색 활성 주문: ${orders.length}건`);
+    return orders;
+  } catch (e) {
+    console.log(`   ⚠️ 주문통합검색 보조 조회 실패: ${e.message}`);
+    return [];
+  } finally {
+    try {
+      await smartstorePage.goto(CONFIG.smartstore.orderUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
+    } catch {}
+  }
+}
+
 async function getNewOrders() {
   console.log('📋 새 주문 확인 중...');
   
@@ -1357,11 +1480,21 @@ async function getNewOrders() {
 
   // 중복 주문 제거 (발주 전/후 양쪽에 같은 주문이 있을 수 있음)
   const seen = new Set();
-  const uniqueOrders = allOrders.filter(o => {
+  let uniqueOrders = allOrders.filter(o => {
     if (seen.has(o.orderId)) return false;
     seen.add(o.orderId);
     return true;
   });
+
+  if (uniqueOrders.length === 0) {
+    const fallbackOrders = await getActiveOrdersFromManageSearch();
+    const fallbackSeen = new Set();
+    uniqueOrders = fallbackOrders.filter(o => {
+      if (!o.orderId || fallbackSeen.has(o.orderId)) return false;
+      fallbackSeen.add(o.orderId);
+      return true;
+    });
+  }
 
   console.log(`   📦 총 ${uniqueOrders.length}개 신규주문 발견${allOrders.length !== uniqueOrders.length ? ` (중복 ${allOrders.length - uniqueOrders.length}건 제거)` : ''}`);
   // 디버그: 주문자/수취인 정보 출력
