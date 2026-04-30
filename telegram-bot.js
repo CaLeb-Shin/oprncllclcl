@@ -7842,17 +7842,9 @@ function startAutoSmartstore() {
         new Promise((_, reject) => setTimeout(() => reject(new Error('주문확인 2분 타임아웃')), 120000)),
       ]);
 
-      // 승인 대기 건 리마인드 (10분마다, 방금 추가된 주문 제외)
-      const pendingKeys = Object.keys(pendingOrders);
+      // 승인 대기 건 리마인드 (자동 확인 주기마다, 방금 추가된 주문 제외)
       const newOrderIds = new Set((newOrders || []).map(o => o.orderId));
-      const reminderKeys = pendingKeys.filter(k => !newOrderIds.has(k));
-      const now = Date.now();
-      if (reminderKeys.length > 0 && now - lastPendingReminder > 10 * 60 * 1000) {
-        lastPendingReminder = now;
-        for (const key of reminderKeys) {
-          await requestApproval(pendingOrders[key]);
-        }
-      }
+      await sendPendingOrderReminders({ excludeIds: Array.from(newOrderIds) });
     } catch (err) {
       console.error('스마트스토어 오류:', err.message);
       isSmartstoreRunning = false;
