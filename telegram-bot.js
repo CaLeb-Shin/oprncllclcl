@@ -6,8 +6,20 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const XLSX = require('xlsx');
 
-// Windows에서 일반 Chromium 실행파일 찾기 (chrome-headless-shell 콘솔 창 방지)
+// Playwright 브라우저 실행파일 찾기
 function findFullChromium() {
+  if (process.platform === 'darwin') {
+    const chromePaths = [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      path.join(process.env.HOME || '', 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ];
+    for (const chromePath of chromePaths) {
+      if (fs.existsSync(chromePath)) return chromePath;
+    }
+    return null;
+  }
+
   if (process.platform !== 'win32') return null;
 
   try {
@@ -3087,7 +3099,8 @@ const PERFORMANCES = {
   '대전_지브리': { date: '3/29(일)', name: '대전 지브리&뮤지컬', link: '', tadminCode: '26000629' },
   '부산_지브리': { date: '4/4(토)', name: '부산 지브리&뮤지컬', link: '', tadminCode: '26001746' },
   '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '', tadminCode: '26001872' },
-  '부산_디즈니': { date: '5/10(토)', name: '부산 디즈니+지브리', link: '', tadminCode: '' },
+  '부천_디즈니': { date: '5/5(화)', name: '부천 디즈니+지브리 어린이날', link: '', tadminCode: '26003471' },
+  '부산_디즈니': { date: '5/10(토)', name: '부산 디즈니+지브리', link: '', tadminCode: '26003654' },
 };
 
 // ============================================================
@@ -3981,17 +3994,37 @@ function findTadminCode(perfIndex) {
   const perf = finalSummaryData[key];
   const title = perf?.title || key;
   const venue = perf?.venue || '';
+  const date = perf?.date || '';
   let perfConfig = PERFORMANCES[key];
   if (!perfConfig || !perfConfig.tadminCode) {
     const regions = ['울산', '대구', '창원', '광주', '대전', '부산', '고양', '인천', '부천', '구미'];
-    const haystack = `${title} ${key} ${venue}`;
+    const haystack = `${title} ${key} ${venue} ${date}`;
     const matchedRegion = regions.find(r => haystack.includes(r));
+    const normalizeDate = (value) => {
+      const m = String(value || '').match(/(\d{1,2})\s*(?:\/|\.|월)\s*(\d{1,2})/);
+      return m ? `${parseInt(m[1])}/${parseInt(m[2])}` : '';
+    };
+    const wantedDate = normalizeDate(date);
+    const wantedType = haystack.includes('지브리') && !haystack.includes('디즈니') ? '지브리'
+      : haystack.includes('디즈니') ? '디즈니'
+        : '';
+    const hasMatchHint = !!matchedRegion || !!wantedDate || !!wantedType;
+    let candidates = Object.entries(PERFORMANCES).filter(([k, v]) =>
+      v.tadminCode && isPerfFuture(k)
+    );
     if (matchedRegion) {
-      const candidates = Object.entries(PERFORMANCES).filter(([k, v]) =>
-        k.includes(matchedRegion) && v.tadminCode && isPerfFuture(k)
-      );
-      if (candidates.length > 0) perfConfig = candidates[0][1];
+      candidates = candidates.filter(([k]) => k.includes(matchedRegion));
     }
+    if (wantedType) {
+      const typed = candidates.filter(([k, v]) => k.includes(wantedType) || v.name.includes(wantedType));
+      if (typed.length > 0) candidates = typed;
+    }
+    if (wantedDate) {
+      const dated = candidates.filter(([, v]) => normalizeDate(v.date) === wantedDate);
+      candidates = dated;
+    }
+    if (candidates.length === 1 && hasMatchHint) perfConfig = candidates[0][1];
+    else if (candidates.length > 1 && hasMatchHint) perfConfig = candidates[0][1];
   }
   return perfConfig?.tadminCode || null;
 }

@@ -4,6 +4,12 @@ smartstore-data/
 ppurio-state.json
 naver-credentials.json
 
+# 로컬 운영 데이터
+phone-book.json
+sms-log.json
+downloads/
+좌석정보/
+
 # Node.js
 node_modules/
 package-lock.json
