@@ -3980,10 +3980,12 @@ function findTadminCode(perfIndex) {
   const key = finalSummaryKeys[perfIndex];
   const perf = finalSummaryData[key];
   const title = perf?.title || key;
+  const venue = perf?.venue || '';
   let perfConfig = PERFORMANCES[key];
   if (!perfConfig || !perfConfig.tadminCode) {
     const regions = ['울산', '대구', '창원', '광주', '대전', '부산', '고양', '인천', '부천', '구미'];
-    const matchedRegion = regions.find(r => title.includes(r) || key.includes(r));
+    const haystack = `${title} ${key} ${venue}`;
+    const matchedRegion = regions.find(r => haystack.includes(r));
     if (matchedRegion) {
       const candidates = Object.entries(PERFORMANCES).filter(([k, v]) =>
         k.includes(matchedRegion) && v.tadminCode && isPerfFuture(k)
@@ -6550,11 +6552,13 @@ async function handleMessage(msg) {
     // PERFORMANCES에서 tadminCode 찾기 (지역명 기반 매칭)
     // key: 뿌리오 발송결과 키 (예: "울산 공연 예매 완료"), PERFORMANCES key: "울산_디즈니"
     const title = perf.title || key;
+    const venue = perf.venue || '';
     let perfConfig = PERFORMANCES[key]; // 직접 매칭 시도
     if (!perfConfig || !perfConfig.tadminCode) {
-      // 지역명으로 매칭: title/key에 지역명이 포함된 PERFORMANCES 찾기
+      // 지역명으로 매칭: title/key/venue에 지역명이 포함된 PERFORMANCES 찾기
       const regions = ['울산', '대구', '창원', '광주', '대전', '부산', '고양', '인천', '부천', '구미'];
-      const matchedRegion = regions.find(r => title.includes(r) || key.includes(r));
+      const haystack = `${title} ${key} ${venue}`;
+      const matchedRegion = regions.find(r => haystack.includes(r));
       if (matchedRegion) {
         // 해당 지역의 미래 공연 중 가장 가까운 것
         const candidates = Object.entries(PERFORMANCES).filter(([k, v]) =>
