@@ -7940,6 +7940,10 @@ async function startPolling() {
       }
     } catch (err) {
       const msg = err.message || '';
+      if (msg.includes('Telegram getUpdates timeout')) {
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
       console.error('폴링 오류:', msg);
       
       if (msg.includes('ENOTFOUND') || msg.includes('ENETUNREACH') || msg.includes('INTERNET_DISCONNECTED') || msg.includes('EAI_AGAIN')) {
