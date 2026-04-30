@@ -1540,28 +1540,47 @@ async function scrapePpurioResults() {
   }
 
   // 발송결과 페이지 → 미리보기 모드
-  await ppurioPage.goto('https://www.ppurio.com/result/message');
-  await ppurioPage.waitForTimeout(4000);
+  await ppurioPage.goto('https://www.ppurio.com/result/message', { waitUntil: 'domcontentloaded' });
+  await ppurioPage.waitForTimeout(6000);
 
   const loggedIn = await isPpurioLoggedIn(ppurioPage);
   if (!loggedIn) {
     throw new Error('뿌리오 로그인 만료. "뿌리오로그인" 해주세요.');
   }
 
-  // 미리보기 모드인지 확인, 아니면 클릭
-  try {
-    const isPreview = await ppurioPage.evaluate(() => {
-      const btn = document.querySelector('[class*="preview"], .btn_preview');
-      // 미리보기 버튼이 active 상태인지 확인
-      return document.body.innerText.includes('공연 정보') ||
-             document.body.innerText.includes('예매자');
+  // 미리보기 모드 진입 — 최대 3회 재시도 (모든 클릭 가능 요소에서 텍스트 매칭)
+  for (let i = 0; i < 3; i++) {
+    const isPreview = await ppurioPage.evaluate(() =>
+      document.body.innerText.includes('[멜론]') ||
+      document.body.innerText.includes('예매자')
+    );
+    if (isPreview) break;
+    const clicked = await ppurioPage.evaluate(() => {
+      const els = document.querySelectorAll('a, button, span, li, div, label');
+      for (const el of els) {
+        const t = (el.innerText || '').trim();
+        if (t === '미리보기' || t === '미리 보기') {
+          el.click();
+          return true;
+        }
+      }
+      return false;
     });
-    if (!isPreview) {
-      // 미리보기 버튼 클릭
-      await ppurioPage.click('text=미리보기', { timeout: 3000 }).catch(() => {});
-      await ppurioPage.waitForTimeout(2000);
-    }
-  } catch {}
+    console.log(`   🔍 미리보기 진입 시도 ${i + 1}: ${clicked ? '클릭됨' : '버튼 못 찾음'}`);
+    await ppurioPage.waitForTimeout(3000);
+  }
+
+  // 진단용: 현재 페이지 상태 출력
+  const dbg = await ppurioPage.evaluate(() => ({
+    hasMelon: (document.body.innerText || '').includes('[멜론]'),
+    hasReserver: (document.body.innerText || '').includes('예매자'),
+    url: location.href,
+    snippet: (document.body.innerText || '').substring(0, 600),
+  }));
+  console.log(`   📊 페이지 상태: [멜론]=${dbg.hasMelon}, 예매자=${dbg.hasReserver}, URL=${dbg.url}`);
+  if (!dbg.hasMelon && !dbg.hasReserver) {
+    console.log(`   📝 페이지 텍스트(앞 600자):\n${dbg.snippet}`);
+  }
 
   // 모든 페이지를 순회하며 카드 데이터 수집
   const allOrders = [];
