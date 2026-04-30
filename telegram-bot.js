@@ -1593,85 +1593,48 @@ async function scrapePpurioResults() {
     // 현재 페이지의 카드들에서 데이터 추출
     const cards = await ppurioPage.evaluate(() => {
       const results = [];
-      // 카드/항목들을 찾기 - 체크박스가 있는 각 항목
-      // 페이지 전체 텍스트에서 카드별로 분리
       const bodyText = document.body.innerText;
-      
-      // "[멜론]" 으로 시작하는 각 카드 블록 찾기
-      // 각 카드는 제목 + 내용으로 구성
-      const cardElements = document.querySelectorAll('.message_list > div, .msg_list > div, .result_list > li, .card, [class*="message_item"], [class*="msg_item"]');
-      
-      // 카드 요소를 못 찾으면 텍스트 기반으로 파싱
-      if (cardElements.length === 0) {
-        // 텍스트에서 "[멜론]" 패턴으로 카드 분리
-        const blocks = bodyText.split(/(?=\[멜론\]\s*\S+\s*공연\s*예매\s*완료)/);
-        for (const block of blocks) {
-          if (!block.includes('[멜론]')) continue;
-          
-          // 제목 추출
-          const titleMatch = block.match(/(\[멜론\]\s*\S+\s*공연\s*예매\s*완료)/);
-          // 일시 추출
-          const dateMatch = block.match(/일시[:\s]*(.+?)(?:\n|$)/);
-          // 장소 추출
-          const venueMatch = block.match(/장소[:\s]*(.+?)(?:\n|$)/);
-          // 예매자 추출
-          const nameMatch = block.match(/예매자[:\s]*(.+?)님/);
-          // 뒷자리 추출
-          const lastFourMatch = block.match(/뒷자리\s*(\d{4})/);
-          // 좌석 추출
-          const seatMatch = block.match(/좌석[:\s]*(\S+석)\s*(\d+)매/);
-          
-          if (titleMatch) {
-            results.push({
-              title: titleMatch[1].trim(),
-              date: dateMatch ? dateMatch[1].trim() : '',
-              venue: venueMatch ? venueMatch[1].trim() : '',
-              buyerName: nameMatch ? nameMatch[1].trim() : '',
-              lastFour: lastFourMatch ? lastFourMatch[1] : '',
-              seatType: seatMatch ? seatMatch[1] : '',
-              qty: seatMatch ? parseInt(seatMatch[2]) : 1,
-              raw: block.substring(0, 300),
-            });
-          }
-        }
-      } else {
-        // 카드 요소가 있으면 각 카드에서 추출
-        for (const card of cardElements) {
-          const text = card.innerText || '';
-          if (!text.includes('[멜론]')) continue;
-          
-          const titleMatch = text.match(/(\[멜론\]\s*\S+\s*공연\s*예매\s*완료)/);
-          const dateMatch = text.match(/일시[:\s]*(.+?)(?:\n|$)/);
-          const venueMatch = text.match(/장소[:\s]*(.+?)(?:\n|$)/);
-          const nameMatch = text.match(/예매자[:\s]*(.+?)님/);
-          const lastFourMatch = text.match(/뒷자리\s*(\d{4})/);
-          const seatMatch = text.match(/좌석[:\s]*(\S+석)\s*(\d+)매/);
-          
-          if (titleMatch) {
-            results.push({
-              title: titleMatch[1].trim(),
-              date: dateMatch ? dateMatch[1].trim() : '',
-              venue: venueMatch ? venueMatch[1].trim() : '',
-              buyerName: nameMatch ? nameMatch[1].trim() : '',
-              lastFour: lastFourMatch ? lastFourMatch[1] : '',
-              seatType: seatMatch ? seatMatch[1] : '',
-              qty: seatMatch ? parseInt(seatMatch[2]) : 1,
-              raw: text.substring(0, 300),
-            });
-          }
+
+      // "[멜론]" 으로 시작하는 카드 블록 분리 (제목 다음 줄까지로 완화)
+      const blocks = bodyText.split(/(?=\[멜론\])/);
+      for (const block of blocks) {
+        if (!block.includes('[멜론]')) continue;
+
+        // 제목: "[멜론]" 부터 같은 줄 끝까지
+        const titleMatch = block.match(/(\[멜론\][^\n]*)/);
+        const dateMatch = block.match(/일시[:\s]*(.+?)(?:\n|$)/);
+        const venueMatch = block.match(/장소[:\s]*(.+?)(?:\n|$)/);
+        const nameMatch = block.match(/예매자[:\s]*(.+?)님/);
+        const lastFourMatch = block.match(/뒷자리\s*(\d{4})/);
+        const seatMatch = block.match(/좌석[:\s]*(\S+석)\s*(\d+)매/);
+
+        // 제목 + (예매자 OR 좌석 OR 일시 중 하나라도) 있으면 카드로 인정
+        if (titleMatch && (nameMatch || seatMatch || dateMatch)) {
+          results.push({
+            title: titleMatch[1].trim(),
+            date: dateMatch ? dateMatch[1].trim() : '',
+            venue: venueMatch ? venueMatch[1].trim() : '',
+            buyerName: nameMatch ? nameMatch[1].trim() : '',
+            lastFour: lastFourMatch ? lastFourMatch[1] : '',
+            seatType: seatMatch ? seatMatch[1] : '',
+            qty: seatMatch ? parseInt(seatMatch[2]) : 1,
+            raw: block.substring(0, 300),
+          });
         }
       }
-      
-      // 페이지네이션 정보
+
       const pageLinks = document.querySelectorAll('.pagination a, .paging a, [class*="page"] a, [class*="paging"] a');
       const pageNums = Array.from(pageLinks).map(a => a.innerText?.trim()).filter(t => t && t.match(/^\d+$/));
-      
-      return { results, pageNums };
+
+      return { results, pageNums, bodySnippet: bodyText.substring(0, 1500) };
     });
 
     console.log(`      카드 ${cards.results.length}개 발견`);
     for (const c of cards.results) {
       console.log(`      📨 ${c.title} | ${c.date} | ${c.buyerName} (${c.lastFour}) | ${c.seatType} ${c.qty}매`);
+    }
+    if (cards.results.length === 0) {
+      console.log(`      📝 페이지 ${pageNum} 텍스트(앞 1500자):\n${cards.bodySnippet}`);
     }
 
     allOrders.push(...cards.results);
