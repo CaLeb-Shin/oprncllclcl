@@ -1273,13 +1273,17 @@ async function getActiveOrdersFromManageSearch() {
         '신규주문', '발주확인', '결제완료', '상품준비', '배송대기', '발송대기',
         '배송준비', '주문접수'
       ];
+      const inactiveStatuses = ['취소', '반품', '환불', '배송완료', '구매확정', '구매확인'];
 
       for (const tr of rows) {
         const cells = Array.from(tr.querySelectorAll('td')).map((td) => td.innerText?.trim()).filter(Boolean);
         if (cells.length < 8) continue;
 
-        const status = cells[1] || '';
-        if (status.includes('취소') || status.includes('반품') || status.includes('환불')) continue;
+        const status = cells.find((c) =>
+          activeStatuses.some((s) => c.includes(s)) ||
+          inactiveStatuses.some((s) => c.includes(s))
+        ) || cells[1] || '';
+        if (inactiveStatuses.some((s) => status.includes(s))) continue;
         if (!activeStatuses.some((s) => status.includes(s))) continue;
 
         let orderId = '';
