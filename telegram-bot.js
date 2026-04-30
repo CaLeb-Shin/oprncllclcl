@@ -484,13 +484,51 @@ async function pushSeatsToFirebase(assignments, perf, region) {
 }
 
 function sendMessage(text, replyMarkup = null) {
+  if (typeof text === 'string' && text.length > 3900 && !replyMarkup) {
+    return sendLongMessage(text);
+  }
   const body = { chat_id: CONFIG.telegramChatId, text, parse_mode: 'HTML' };
   if (replyMarkup) body.reply_markup = replyMarkup;
-  return telegramRequest('sendMessage', body);
+  return telegramRequest('sendMessage', body, 30_000);
 }
 
 function sendMessageTo(chatId, text) {
-  return telegramRequest('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' });
+  if (typeof text === 'string' && text.length > 3900) {
+    return sendLongMessage(text, chatId);
+  }
+  return telegramRequest('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' }, 30_000);
+}
+
+async function sendLongMessage(text, chatId = CONFIG.telegramChatId) {
+  const lines = String(text).split('\n');
+  let chunk = '';
+  let lastResult = null;
+
+  for (const line of lines) {
+    const next = chunk ? `${chunk}\n${line}` : line;
+    if (next.length > 3800) {
+      if (chunk) {
+        lastResult = await telegramRequest('sendMessage', {
+          chat_id: chatId,
+          text: chunk,
+          parse_mode: 'HTML',
+        }, 30_000);
+      }
+      chunk = line;
+    } else {
+      chunk = next;
+    }
+  }
+
+  if (chunk) {
+    lastResult = await telegramRequest('sendMessage', {
+      chat_id: chatId,
+      text: chunk,
+      parse_mode: 'HTML',
+    }, 30_000);
+  }
+
+  return lastResult;
 }
 
 // 텔레그램 파일 전송 (multipart/form-data)
