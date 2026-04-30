@@ -272,6 +272,9 @@ async function telegramRequest(method, body = {}, timeoutMs = CONFIG.httpTimeout
     } catch (err) {
       lastErr = err;
       const msg = err && err.message ? err.message : String(err);
+      if (method === 'getUpdates' && msg.includes('timeout')) {
+        break;
+      }
       console.log(`⚠️ Telegram ${method} 실패 (${attempt}/${maxAttempts}): ${msg}`);
       if (attempt < maxAttempts) {
         await new Promise((r) => setTimeout(r, 2000 * attempt)); // 2s, 4s
@@ -605,7 +608,7 @@ function getUpdates(offset, timeout = 30) {
   return telegramRequest(
     'getUpdates',
     { offset, timeout, allowed_updates: ['message', 'callback_query'] },
-    (timeout + 10) * 1000  // 텔레그램 long poll 시간 + 여유
+    (timeout + 45) * 1000  // 텔레그램 long poll 시간 + 네트워크 여유
   );
 }
 
