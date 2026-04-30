@@ -98,6 +98,7 @@ const CONFIG = {
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
+  pendingReminderInterval: 3 * 60 * 1000,    // 미처리 주문 리마인드
   maxProcessedAge: 90,                       // processed 목록 최대 보관일
   httpTimeoutMs: 60_000,                     // HTTP 요청 타임아웃
 
