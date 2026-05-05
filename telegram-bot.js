@@ -6138,13 +6138,13 @@ async function processDelivery(orderId) {
 }
 
 // ============================================================
-// 주문 처리 (문자 발송 + 선택적 모바일 티켓 발권)
+// 주문 처리 (문자 발송 + 선택적 M티켓 발권)
 // ============================================================
 async function processOrder(order, options = {}) {
   try {
     await ensureBrowser();
 
-    // 🎫 문자+발권 모드: 모바일 티켓 생성 (SMS는 보내지 않고 텔레그램에 링크만)
+    // 🎫 문자+발권 모드: M티켓 생성 (SMS는 보내지 않고 텔레그램에 링크만)
     if (options.withTicket) {
       try {
         const eventId = await resolveEventId(order.productName);
@@ -6156,17 +6156,17 @@ async function processOrder(order, options = {}) {
           // 그룹티켓 링크 (첫 번째 티켓 = 그룹 허브)
           const groupUrl = urls[0];
           await sendMessage(
-            `🎫 <b>모바일 티켓 발권 완료!</b>\n\n` +
+            `🎫 <b>M티켓 발권 완료!</b>\n\n` +
             `👤 ${order.buyerName} (${order.seatGrade || parseProductInfo(order.productName).seatGrade || 'A'}석 ${order.qty || 1}매)\n` +
             `📋 주문: ${order.orderId}\n\n` +
             `🔗 그룹티켓 링크:\n${groupUrl}`
           );
         } else {
-          await sendMessage(`⚠️ 매칭되는 이벤트 없음 — 모바일 발권 건너뜀. 문자만 발송합니다.`);
+          await sendMessage(`⚠️ 매칭되는 이벤트 없음 — M티켓 발권 건너뜀. 문자만 발송합니다.`);
         }
       } catch (cfErr) {
         console.log('   ⚠️ 멜론티켓 발권 오류:', cfErr.message);
-        await sendMessage(`⚠️ <b>모바일 티켓 생성 실패</b>\n\n${cfErr.message}\n\n문자 발송은 계속 진행합니다.`);
+        await sendMessage(`⚠️ <b>M티켓 생성 실패</b>\n\n${cfErr.message}\n\n문자 발송은 계속 진행합니다.`);
       }
     }
 
@@ -6237,12 +6237,12 @@ async function handleCallbackQuery(cq) {
   const { data, id: queryId } = cq;
 
   if (data.startsWith('approve_ticket_')) {
-    // 🎫 문자+발권: 모바일티켓 생성 후 SMS 발송
+    // 🎫 문자+발권: M티켓 생성 후 SMS 발송
     const orderId = data.replace('approve_ticket_', '');
     const order = pendingOrders[orderId];
     if (order) {
       await answerCallbackQuery(queryId, '발권+문자 처리 중...');
-      await sendMessage(`⏳ <b>${order.buyerName}</b> 모바일 발권 + 문자 발송 중...${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
+      await sendMessage(`⏳ <b>${order.buyerName}</b> M티켓 발권 + 문자 발송 중...${orderQueue.length > 0 ? ` (대기 ${orderQueue.length}건)` : ''}`);
       await enqueueOrder(order, { withTicket: true });
       delete pendingOrders[orderId];
       savePendingOrders(pendingOrders);
@@ -6442,7 +6442,7 @@ async function handleIssueCommand(orderText) {
     (parsed.productName ? `📦 ${parsed.productName}` : '')
   );
 
-  // 모바일 티켓 발권 + SMS 발송 (큐를 통해 순차 처리)
+  // M티켓 발권 + SMS 발송 (큐를 통해 순차 처리)
   await enqueueOrder(parsed, { withTicket: true });
 }
 
@@ -7676,7 +7676,7 @@ async function handleMessage(msg) {
       `<b>📦 주문관리</b>\n` +
       `• 체크 - 새 주문 확인\n` +
       `• 발송완료 - 발송처리 완료\n\n` +
-      `<b>🎫 모바일 티켓</b>\n` +
+      `<b>🎫 M티켓</b>\n` +
       `• /issue + 주문메시지 - 수동 발권\n` +
       `  (자동 감지 주문은 🎫 버튼으로 발권)\n\n` +
       `<b>📊 매출</b>\n` +
@@ -7824,7 +7824,7 @@ async function startPolling() {
       `<b>📦 주문관리</b>\n` +
       `• 체크 - 새 주문 확인\n` +
       `• 발송완료 - 발송처리 완료\n\n` +
-      `<b>🎫 모바일 티켓</b>\n` +
+      `<b>🎫 M티켓</b>\n` +
       `• /issue + 주문메시지 - 수동 발권\n` +
       `  (자동 감지 주문은 🎫 버튼으로 발권)\n\n` +
       `<b>📊 매출</b>\n` +
