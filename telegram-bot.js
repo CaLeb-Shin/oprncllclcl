@@ -3342,6 +3342,8 @@ const PERFORMANCES = {
   '고양_지브리': { date: '4/19(토)', name: '고양 지브리&뮤지컬', link: '', tadminCode: '26001872' },
   '부천_디즈니': { date: '5/5(화)', name: '부천 디즈니+지브리 어린이날', link: '', tadminCode: '26003471' },
   '부산_디즈니': { date: '5/10(토)', name: '부산 디즈니+지브리', link: '', tadminCode: '26003654' },
+  '인천_디즈니': { date: '6/13(토)', name: '인천 디즈니+지브리', link: '', tadminCode: '' },
+  '고양_디즈니': { date: '6/27(토)', name: '고양 디즈니+지브리', link: '', tadminCode: '' },
 };
 
 // ============================================================
@@ -5482,26 +5484,73 @@ async function sendSMS(order, _isRetry = false) {
   // 날짜별 템플릿명: "[멜론]4/4 부산 공연 예매 완료", 기본: "[멜론] 부산 공연 예매 완료"
   const dateTemplateName = perfDate ? `[멜론]${perfDate} ${region} 공연 예매 완료` : '';
   const defaultTemplateName = `[멜론] ${region} 공연 예매 완료`;
+  const noSpaceDefaultTemplateName = `[멜론]${region} 공연 예매 완료`;
   const templateName = dateTemplateName || defaultTemplateName;
+  const templateCandidates = [...new Set([
+    dateTemplateName,
+    defaultTemplateName,
+    noSpaceDefaultTemplateName,
+  ].filter(Boolean))];
+
+  const clickTemplateByCandidates = async (label) => {
+    for (const candidate of templateCandidates) {
+      try {
+        await ppurioPage.click(`text=${candidate}`, { timeout: 2500 });
+        console.log(`      ${label} 템플릿 발견! (${candidate})`);
+        return true;
+      } catch {}
+    }
+
+    const fuzzyClicked = await ppurioPage.evaluate(({ candidates, region, perfDate }) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const candidateSet = candidates.map(normalize);
+      const visible = (el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+      };
+
+      const matches = Array.from(document.querySelectorAll('button, a, div, li, label, span, p, strong'))
+        .filter(visible)
+        .map((el) => ({ el, text: normalize(el.innerText || el.textContent) }))
+        .filter(({ text }) => text && text.length < 900)
+        .filter(({ text }) => {
+          const exact = candidateSet.some((candidate) => text.includes(candidate));
+          const fuzzy = text.includes('[멜론]')
+            && text.includes(region)
+            && text.includes('공연 예매 완료')
+            && (!perfDate || text.includes(perfDate));
+          return exact || fuzzy;
+        })
+        .sort((a, b) => a.text.length - b.text.length);
+
+      if (!matches.length) return '';
+      matches[0].el.click();
+      return matches[0].text.slice(0, 120);
+    }, { candidates: templateCandidates, region, perfDate });
+
+    if (fuzzyClicked) {
+      console.log(`      ${label} 화면 템플릿 매칭 성공: ${fuzzyClicked}`);
+      return true;
+    }
+    return false;
+  };
+
+  const getVisibleTemplateTitles = async () => ppurioPage.evaluate(() => {
+    const titles = new Set();
+    const re = /\[멜론\][^\n\r]*(?:공연 예매 완료|공연 설문)/g;
+    for (const line of document.body.innerText.split(/\n+/)) {
+      const matches = line.match(re);
+      if (matches) matches.forEach((m) => titles.add(m.trim()));
+    }
+    return Array.from(titles).slice(0, 10);
+  }).catch(() => []);
 
   console.log(`   2️⃣ 템플릿 찾기: ${templateName}`);
   let templateFound = false;
 
   // 방법1: 현재 페이지(1페이지)에서 날짜별 템플릿 우선 → 기본 템플릿 fallback
-  if (dateTemplateName) {
-    try {
-      await ppurioPage.click(`text=${dateTemplateName}`, { timeout: 3000 });
-      templateFound = true;
-      console.log(`      1페이지에서 날짜별 템플릿 발견! (${dateTemplateName})`);
-    } catch {}
-  }
-  if (!templateFound) {
-    try {
-      await ppurioPage.click(`text=${defaultTemplateName}`, { timeout: 3000 });
-      templateFound = true;
-      console.log(`      1페이지에서 발견! (${defaultTemplateName})`);
-    } catch {}
-  }
+  templateFound = await clickTemplateByCandidates('1페이지에서');
 
   // 방법2: 검색 시도
   if (!templateFound) {
@@ -5513,20 +5562,7 @@ async function sendSMS(order, _isRetry = false) {
       await ppurioPage.keyboard.press('Enter');
       await ppurioPage.waitForTimeout(2000);
 
-      if (dateTemplateName) {
-        try {
-          await ppurioPage.click(`text=${dateTemplateName}`, { timeout: 3000 });
-          templateFound = true;
-          console.log(`      검색으로 날짜별 템플릿 발견!`);
-        } catch {}
-      }
-      if (!templateFound) {
-        try {
-          await ppurioPage.click(`text=${defaultTemplateName}`, { timeout: 3000 });
-          templateFound = true;
-          console.log(`      검색으로 발견!`);
-        } catch {}
-      }
+      templateFound = await clickTemplateByCandidates('검색으로');
     } catch (e) {
       console.log(`      검색 실패: ${e.message}`);
     }
@@ -5553,27 +5589,17 @@ async function sendSMS(order, _isRetry = false) {
       }
 
       await ppurioPage.waitForTimeout(1500);
-      if (dateTemplateName) {
-        try {
-          await ppurioPage.click(`text=${dateTemplateName}`, { timeout: 3000 });
-          templateFound = true;
-          console.log(`      페이지 ${p}에서 날짜별 템플릿 발견!`);
-          break;
-        } catch {}
-      }
-      if (!templateFound) {
-        try {
-          await ppurioPage.click(`text=${defaultTemplateName}`, { timeout: 3000 });
-          templateFound = true;
-          console.log(`      페이지 ${p}에서 발견!`);
-          break;
-        } catch {}
-      }
+      templateFound = await clickTemplateByCandidates(`페이지 ${p}에서`);
+      if (templateFound) break;
     }
   }
 
   if (!templateFound) {
     console.log(`   ⚠️ 템플릿 못 찾음: ${templateName}`);
+    const visibleTemplates = await getVisibleTemplateTitles();
+    if (visibleTemplates.length) {
+      console.log(`      현재 보이는 템플릿: ${visibleTemplates.join(' | ')}`);
+    }
     await ppurioPage.keyboard.press('Escape');
     return false;
   }
