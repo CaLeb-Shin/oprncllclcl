@@ -8155,6 +8155,46 @@ function startPpurioKeepAlive() {
 }
 
 // ============================================================
+// 멜론OS 그룹 매 정시 자동 결산
+// ============================================================
+function startHourlyGroupSettlementReport() {
+  if (!CONFIG.telegramGroupId) {
+    console.log('⏰ 멜론OS 정시 자동결산 건너뜀: telegramGroupId 없음');
+    return;
+  }
+
+  function scheduleNext() {
+    const now = new Date();
+    const target = new Date(now);
+    target.setMinutes(0, 0, 0);
+    target.setHours(target.getHours() + 1);
+
+    const delay = target.getTime() - now.getTime();
+    const mins = Math.ceil(delay / 60000);
+    console.log(`⏰ 다음 멜론OS 정시 자동결산: ${target.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (${mins}분 후)`);
+
+    setTimeout(async () => {
+      try {
+        console.log('🕐 멜론OS 정시 자동 결산 시작...');
+        await runGroupSettlementReport(CONFIG.telegramGroupId, '정시 자동');
+        console.log('✅ 멜론OS 정시 자동 결산 완료');
+      } catch (err) {
+        console.error('멜론OS 정시 자동결산 오류:', err.message);
+        try {
+          await sendMessageTo(CONFIG.telegramGroupId, `❌ 정시 자동결산 오류: ${err.message}`);
+        } catch (sendErr) {
+          console.error('멜론OS 정시 자동결산 오류 메시지 전송 실패:', sendErr.message);
+        }
+      } finally {
+        scheduleNext();
+      }
+    }, delay);
+  }
+
+  scheduleNext();
+}
+
+// ============================================================
 // 매일 23:50 자동 결산
 // ============================================================
 function startDailyReport() {
@@ -8374,5 +8414,6 @@ startSmartstoreKeepAlive();
 startPpurioKeepAlive();
 startSmsPoll();
 startNaverProductSync();
+startHourlyGroupSettlementReport();
 startDailyReport();
 startSeatDownloadScheduler();
