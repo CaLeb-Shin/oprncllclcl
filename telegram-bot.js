@@ -6699,28 +6699,7 @@ async function handleMessage(msg) {
 
     if (cmd === '결산') {
       console.log(`📩 그룹: /결산 from ${msg.from?.first_name || ''}`);
-      await sendMessageTo(chatId, '📊 결산 조회 중... (놀티켓 → 네이버 순)');
-      try {
-        await sendMessageTo(chatId, '🎫 <b>놀티켓 (인터파크)</b> 조회 중... 약 1분 소요.');
-        await runSalesScript(chatId);
-        await sendMessageTo(chatId, '📦 <b>네이버 스토어</b> 조회 중...');
-        const storeReport = await getStoreSalesSummary();
-        await sendMessageTo(chatId, storeReport);
-      } catch (err) {
-        if (err.message.includes('세션 만료') || err.message.includes('Target closed') || err.message.includes('closed')) {
-          await sendMessageTo(chatId, '🔄 세션 복구 중... 잠시만 기다려주세요.');
-          try {
-            await closeBrowser();
-            await ensureBrowser();
-            const storeReport = await getStoreSalesSummary();
-            await sendMessageTo(chatId, storeReport);
-          } catch (retryErr) {
-            await sendMessageTo(chatId, `❌ 결산 조회 오류: ${retryErr.message}`);
-          }
-        } else {
-          await sendMessageTo(chatId, `❌ 결산 조회 오류: ${err.message}`);
-        }
-      }
+      await runGroupSettlementReport(chatId);
     }
 
     // /지역공연 → 해당 지역 네이버 스토어 링크
