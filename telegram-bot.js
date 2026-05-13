@@ -535,6 +535,42 @@ async function sendLongMessage(text, chatId = CONFIG.telegramChatId) {
   return lastResult;
 }
 
+let groupSettlementRunning = false;
+
+async function runGroupSettlementReport(chatId, sourceLabel = '수동') {
+  if (groupSettlementRunning) {
+    await sendMessageTo(chatId, '⏳ 결산이 이미 진행 중입니다. 완료 후 다시 시도해주세요.');
+    return;
+  }
+
+  groupSettlementRunning = true;
+  try {
+    await sendMessageTo(chatId, `📊 ${sourceLabel} 결산 조회 중... (놀티켓 → 네이버 순)`);
+    await sendMessageTo(chatId, '🎫 <b>놀티켓 (인터파크)</b> 조회 중... 약 1분 소요.');
+    await runSalesScript(chatId);
+
+    await sendMessageTo(chatId, '📦 <b>네이버 스토어</b> 조회 중...');
+    const storeReport = await getStoreSalesSummary();
+    await sendMessageTo(chatId, storeReport);
+  } catch (err) {
+    if (err.message.includes('세션 만료') || err.message.includes('Target closed') || err.message.includes('closed')) {
+      await sendMessageTo(chatId, '🔄 세션 복구 중... 잠시만 기다려주세요.');
+      try {
+        await closeBrowser();
+        await ensureBrowser();
+        const storeReport = await getStoreSalesSummary();
+        await sendMessageTo(chatId, storeReport);
+      } catch (retryErr) {
+        await sendMessageTo(chatId, `❌ 결산 조회 오류: ${retryErr.message}`);
+      }
+    } else {
+      await sendMessageTo(chatId, `❌ 결산 조회 오류: ${err.message}`);
+    }
+  } finally {
+    groupSettlementRunning = false;
+  }
+}
+
 // 텔레그램 파일 전송 (multipart/form-data)
 function sendDocument(pdfBuffer, filename, caption = '') {
   return new Promise((resolve, reject) => {
