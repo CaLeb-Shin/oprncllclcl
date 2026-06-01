@@ -27,6 +27,7 @@ function getBrowserLaunchOptions() {
 const CONFIG = {
   loginUrl: 'https://tadmin20.interpark.com',
   salesUrl: 'https://tadmin20.interpark.com/stat/dailysalesinfo',
+  reservedUrl: 'https://tadmin20.interpark.com/stat/goodsreservedpersoninfo',
   username: 'iproduc1',
   password: 'jjys1314!!',
   telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
@@ -57,6 +58,103 @@ function isAfterToday(dateStr) {
   const today = parseInt(getTodayStr());
   const target = parseInt(dateStr);
   return target >= today;
+}
+
+// ============================================================
+// 상품예매자별현황(판매처별 내역) 헬퍼 — nolticket-orders.js 와 동일 패턴
+// ============================================================
+// 상품 돋보기 열고 상품 목록 가져오기
+async function openProductPickerAndList(page) {
+  await page.click('#btnSearch_lookupGoods');
+  for (let w = 0; w < 10; w++) {
+    await page.waitForTimeout(1000);
+    const c = await page.evaluate(() => {
+      try { return window.LookupGrid_Provider ? window.LookupGrid_Provider.getRowCount() : 0; } catch { return 0; }
+    });
+    if (c > 0) break;
+  }
+  return await page.evaluate(() => {
+    const items = [];
+    const p = window.LookupGrid_Provider;
+    if (p) {
+      for (let i = 0; i < p.getRowCount(); i++) {
+        const row = p.getJsonRow(i);
+        items.push({ index: i, GoodsCode: String(row.GoodsCode || '') });
+      }
+    }
+    return items;
+  });
+}
+
+// 팝업 그리드 행 더블클릭 (캔버스 좌표)
+async function dblclickLookupRow(page, gridId, rowIndex) {
+  const canvas = await page.$(`#${gridId} canvas`);
+  if (!canvas) return false;
+  const box = await canvas.boundingBox();
+  const topItem = await page.evaluate((gid) => {
+    const g = window[gid];
+    return g && typeof g.getTopItem === 'function' ? g.getTopItem() : 0;
+  }, gridId);
+  const metrics = await page.evaluate((gid) => {
+    const g = window[gid];
+    if (g && typeof g.displayOptions === 'function') {
+      const o = g.displayOptions();
+      return { rowHeight: o.rowHeight || 20, headerHeight: o.headerHeight || 25 };
+    }
+    return { rowHeight: 20, headerHeight: 25 };
+  }, gridId);
+  const x = box.x + 150;
+  const y = box.y + metrics.headerHeight + (rowIndex - topItem) * metrics.rowHeight + metrics.rowHeight / 2;
+  await page.mouse.dblclick(x, y);
+  await page.waitForTimeout(1200);
+  return true;
+}
+
+// 한 공연(상품코드)의 예매자 목록 반환 (GoodsReservedPersonInfoList Data[])
+async function fetchReservationsForProduct(page, productCode) {
+  await page.goto(CONFIG.reservedUrl);
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForTimeout(1200);
+
+  const products = await openProductPickerAndList(page);
+  const match = products.find((p) => p.GoodsCode === String(productCode));
+  if (!match) return [];
+  await dblclickLookupRow(page, 'LookupGrid_lookupGoods', match.index);
+
+  // 회차 선택 (전부 1회차 → 첫 행)
+  await page.click('#btnSearch_lookupGoodsSales').catch(() => {});
+  await page.waitForTimeout(1800);
+  const hasSchedule = await page.evaluate(() => {
+    const p = window.LookupGrid_Provider;
+    return p && typeof p.getRowCount === 'function' && p.getRowCount() > 0;
+  });
+  if (hasSchedule) {
+    const ok = await dblclickLookupRow(page, 'LookupGrid_lookupGoodsSales', 0);
+    if (!ok) {
+      const all = await page.$$('canvas');
+      if (all.length) {
+        const b = await all[all.length - 1].boundingBox();
+        await page.mouse.dblclick(b.x + 100, b.y + 35);
+        await page.waitForTimeout(1200);
+      }
+    }
+  }
+
+  const respPromise = page
+    .waitForResponse((r) => r.url().includes('GoodsReservedPersonInfoList'), { timeout: 20000 })
+    .catch(() => null);
+  await page.click('#btnSearch').catch(async () => {
+    await page.evaluate(() => {
+      for (const b of document.querySelectorAll('button, a, input[type="button"]')) {
+        if ((b.textContent || b.value || '').trim() === '조회') { b.click(); return; }
+      }
+    });
+  });
+  const resp = await respPromise;
+  if (!resp) return [];
+  let json = await resp.json().catch(() => null);
+  if (typeof json === 'string') { try { json = JSON.parse(json); } catch {} }
+  return json && Array.isArray(json.Data) ? json.Data : [];
 }
 
 // 텔레그램 메시지 전송
@@ -741,7 +839,30 @@ async function scrapeSales() {
         });
       }
     }
-    
+
+    // 6-2. 판매처별 오늘 내역 (goodsreservedpersoninfo 2차 패스)
+    console.log('\n🛒 판매처별 오늘 내역 수집...');
+    const todayChannelsByCode = {};
+    for (const product of futureProducts) {
+      try {
+        const rows = await fetchReservationsForProduct(page, product.productCode);
+        const todays = rows.filter((r) => String(r.BDate) === todayStr);
+        const map = {};
+        for (const r of todays) {
+          const ch = r.BizName || '기타';
+          if (!map[ch]) map[ch] = { qty: 0, amt: 0 };
+          map[ch].qty += Number(r.BCnt) || 0;
+          map[ch].amt += Number(r.BAmt) || 0;
+        }
+        todayChannelsByCode[product.productCode] = Object.entries(map)
+          .map(([name, v]) => ({ name, qty: v.qty, amt: v.amt }))
+          .sort((a, b) => b.qty - a.qty);
+        console.log(`   ${product.venue || product.productCode}: 판매처 ${todayChannelsByCode[product.productCode].length}곳`);
+      } catch (e) {
+        console.log(`   ⚠️ 판매처 내역 실패(${product.productCode}): ${e.message}`);
+      }
+    }
+
     // 7. 결과 정리 (어제/오늘 데이터)
     const yesterdayStr = getYesterdayStr();
     console.log('\n' + '='.repeat(60));
@@ -801,14 +922,20 @@ async function scrapeSales() {
         totalTodaySales += Number(todayS);
         totalYesterdaySales += Number(yesterdayS);
         
+        // 오늘 판매처별 내역 (오늘 매수 > 0 일 때만)
+        const chans = todayChannelsByCode[data.productCode];
+        const hasChans = Number(todayS) > 0 && chans && chans.length;
+
         console.log(`🎵 ${data.venue} (${perfDate})`);
         console.log(`   오늘(${todayFormatted}): ${todayS}매 / ${Number(todayA).toLocaleString()}원`);
+        if (hasChans) for (const c of chans) console.log(`     · ${c.name}: ${c.qty}매 / ${Number(c.amt).toLocaleString()}원`);
         console.log(`   어제(${yesterdayFormatted}): ${yesterdayS}매 / ${Number(yesterdayA).toLocaleString()}원`);
         console.log(`   누계: ${totalS}매 | 판매율: ${rate}%`);
         console.log('');
-        
+
         reportMessage += `🎵 <b>${data.venue}</b> (${perfDate})\n`;
         reportMessage += `   오늘(${todayFormatted}): ${todayS}매 / ${Number(todayA).toLocaleString()}원\n`;
+        if (hasChans) for (const c of chans) reportMessage += `     · ${c.name}: ${c.qty}매 / ${Number(c.amt).toLocaleString()}원\n`;
         reportMessage += `   어제(${yesterdayFormatted}): ${yesterdayS}매 / ${Number(yesterdayA).toLocaleString()}원\n`;
         reportMessage += `   누계: ${totalS}매 (${rate}%)\n\n`;
       }
