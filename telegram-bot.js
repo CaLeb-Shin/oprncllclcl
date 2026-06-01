@@ -95,10 +95,13 @@ const CONFIG = {
   phoneBookFile: path.join(__dirname, 'phone-book.json'),
   smsLogFile: path.join(__dirname, 'sms-log.json'),
   surveyLogFile: path.join(__dirname, 'survey-sent.json'),
+  processedNolticketFile: path.join(__dirname, 'processed-nolticket.json'),
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
   pendingReminderInterval: 3 * 60 * 1000,    // 미처리 주문 리마인드
+  nolticketCheckInterval: 60 * 60 * 1000,    // 놀티켓 신규 예매 1시간 확인
+  nolticketNotifyChatId: '7718215110',       // 놀티켓 알림 → 개인 봇 대화
   maxProcessedAge: 90,                       // processed 목록 최대 보관일
   httpTimeoutMs: 60_000,                     // HTTP 요청 타임아웃
 
@@ -120,6 +123,7 @@ const CONFIG = {
 let lastUpdateId = 0;
 const recentMessageIds = new Set(); // 중복 메시지 방지
 let isSalesRunning = false;
+let isNolticketRunning = false;  // 놀티켓 신규 예매 확인 중복 실행 방지
 let isSmartstoreRunning = false;
 let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
 let isEnsureBrowserRunning = false; // ensureBrowser 동시 호출 방지
@@ -686,6 +690,40 @@ function runSalesScript(targetChatId) {
     });
     child.on('error', (err) => {
       isSalesRunning = false;
+      reject(err);
+    });
+  });
+}
+
+// 놀티켓(인터파크) 신규 예매 확인 — nolticket-orders.js 를 자식 프로세스로 실행
+function runNolticketCheck(targetChatId) {
+  return new Promise((resolve, reject) => {
+    if (isNolticketRunning) {
+      resolve('이미 확인 중입니다.');
+      return;
+    }
+    isNolticketRunning = true;
+    console.log('🎟️ 놀티켓 신규 예매 확인 시작...');
+
+    const child = spawn('node', ['nolticket-orders.js'], {
+      cwd: CONFIG.baseDir,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        PATH: `/Users/erwin_shin/.nvm/versions/node/v22.20.0/bin:${process.env.PATH}`,
+        TELEGRAM_CHAT_ID: targetChatId || CONFIG.nolticketNotifyChatId,
+      },
+    });
+
+    child.stdout.on('data', (d) => process.stdout.write(d));
+    child.stderr.on('data', (d) => process.stderr.write(d));
+
+    child.on('close', (code) => {
+      isNolticketRunning = false;
+      resolve(code === 0 ? '완료!' : `오류 (코드: ${code})`);
+    });
+    child.on('error', (err) => {
+      isNolticketRunning = false;
       reject(err);
     });
   });
@@ -6823,6 +6861,17 @@ async function handleMessage(msg) {
     return;
   }
 
+  // 놀티켓 신규 예매 즉시 확인 (자동 1시간 확인을 수동으로 트리거)
+  if (['놀티켓확인', '예매확인', '놀확인'].includes(text)) {
+    await sendMessage('🎟️ 놀티켓 신규 예매 확인 중... 약 1분 소요됩니다.');
+    try {
+      await runNolticketCheck();
+    } catch (err) {
+      await sendMessage(`❌ 오류: ${err.message}`);
+    }
+    return;
+  }
+
   // 주문비교: "비교1", "비교 2", "주문비교1"
   if (text.match(/(?:주문)?비교\s*(\d+)/)) {
     const num = parseInt(text.match(/(?:주문)?비교\s*(\d+)/)[1]);
@@ -7723,7 +7772,8 @@ async function handleMessage(msg) {
       `<b>📊 매출</b>\n` +
       `• 결산 - 놀티켓 + 네이버\n` +
       `• 스토어 - 네이버 판매현황\n` +
-      `• 조회 - 놀티켓 판매현황\n\n` +
+      `• 조회 - 놀티켓 판매현황\n` +
+      `• 놀티켓확인 - 놀티켓 새 예매 즉시 확인\n\n` +
       `<b>📋 결산</b>\n` +
       `• 최종결산 - 공연별 발송 명단\n` +
       `• 비교N - 네이버↔뿌리오 주문 비교\n` +
@@ -7871,7 +7921,8 @@ async function startPolling() {
       `<b>📊 매출</b>\n` +
       `• 결산 - 놀티켓 + 네이버\n` +
       `• 스토어 - 네이버 판매현황\n` +
-      `• 조회 - 놀티켓 판매현황\n\n` +
+      `• 조회 - 놀티켓 판매현황\n` +
+      `• 놀티켓확인 - 놀티켓 새 예매 즉시 확인\n\n` +
       `<b>📋 결산</b>\n` +
       `• 최종결산 - 공연별 발송 명단\n` +
       `• 비교N - 네이버↔뿌리오 주문 비교\n` +
@@ -8054,6 +8105,23 @@ function startAutoSmartstore() {
     }
   }, CONFIG.orderCheckInterval);
   console.log('⏰ 스마트스토어 3분 자동 확인 설정');
+}
+
+function startAutoNolticket() {
+  // 부팅 직후 1회 (첫 실행 = 베이스라인 시딩), 이후 1시간 간격
+  setTimeout(() => {
+    runNolticketCheck().catch((e) => console.error('놀티켓 초기 확인 오류:', e.message));
+  }, 90 * 1000);
+  setInterval(async () => {
+    console.log('\n⏰ 1시간 놀티켓 신규 예매 확인...');
+    if (wasDisconnected) { console.log('   인터넷 끊김 → 스킵'); return; }
+    try {
+      await runNolticketCheck();
+    } catch (err) {
+      console.error('놀티켓 자동 확인 오류:', err.message);
+    }
+  }, CONFIG.nolticketCheckInterval);
+  console.log('⏰ 놀티켓 1시간 자동 확인 설정');
 }
 
 function startSmartstoreKeepAlive() {
@@ -8410,6 +8478,7 @@ if (process.platform === 'win32') {
 startPolling();
 startAutoSales();
 startAutoSmartstore();
+startAutoNolticket();
 startSmartstoreKeepAlive();
 startPpurioKeepAlive();
 startSmsPoll();

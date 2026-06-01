@@ -32,6 +32,7 @@ pending-delivery.json
 processed-orders.json
 cancelled-orders.json
 processed-cancels.json
+processed-nolticket.json
 
 # macOS
 .DS_Store
