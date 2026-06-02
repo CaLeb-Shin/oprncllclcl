@@ -45,6 +45,8 @@ const CONFIG = {
   stateFile: path.join(__dirname, 'processed-nolticket.json'),
   maxState: 3000,        // 상태 파일 최대 보관 (초과 시 최근 maxKeep 만 유지)
   maxKeep: 2000,
+  dailyLogFile: path.join(__dirname, 'nolticket-daily-log.json'),  // 하루끝 정리용 감지 로그
+  dailyLogKeepDays: 7,   // 일일 로그 보관 기간
 };
 
 // ── 유틸 ────────────────────────────────────────────────────
@@ -83,6 +85,12 @@ function seatOf(ticketno) {
   return m ? m[1] : '';
 }
 
+// 공연명 → 지역만 ("... - 인천" → "인천")
+function regionOf(goodsName) {
+  const m = String(goodsName || '').match(/-\s*([가-힣]+)\s*$/);
+  return m ? m[1] : shortShow(goodsName);
+}
+
 // 중복제거 키
 function keyOf(r) {
   if (r.Ticketno) return String(r.Ticketno);
@@ -100,6 +108,20 @@ function writeState(arr) {
   const tmp = CONFIG.stateFile + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(out));
   fs.renameSync(tmp, CONFIG.stateFile);
+}
+
+// ── 하루끝 정리용 감지 로그 (봇이 23:55에 읽어 타임라인 생성) ──
+function readDailyLog() {
+  try { return JSON.parse(fs.readFileSync(CONFIG.dailyLogFile, 'utf-8')); }
+  catch { return []; }
+}
+function appendDailyLog(entries) {
+  if (!entries || !entries.length) return;
+  const cutoff = Date.now() - CONFIG.dailyLogKeepDays * 24 * 60 * 60 * 1000;
+  const out = readDailyLog().filter((e) => Number(e.t) >= cutoff).concat(entries);
+  const tmp = CONFIG.dailyLogFile + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(out));
+  fs.renameSync(tmp, CONFIG.dailyLogFile);
 }
 
 // ── 텔레그램 ─────────────────────────────────────────────────
@@ -336,6 +358,17 @@ async function scrapeNolticket() {
       await new Promise((r) => setTimeout(r, 400));
     }
     writeState([...seen, ...newRows.map(keyOf)]);
+
+    // 하루끝 정리용 로그 적재 (이번 실행의 감지 시각 1개 공유)
+    const detectedAt = Date.now();
+    appendDailyLog(newRows.map((r) => ({
+      t: detectedAt,
+      bdate: r.BDate,
+      region: regionOf(r._GoodsName),
+      channel: r.BizName || '기타',
+      qty: Number(r.BCnt) || 0,
+      amount: Number(r.BAmt) || 0,
+    })));
   } catch (err) {
     console.error('❌ 오류:', err.message);
     await page.screenshot({ path: 'debug-nolticket-error.png' }).catch(() => {});

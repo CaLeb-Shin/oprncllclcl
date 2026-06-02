@@ -33,6 +33,7 @@ processed-orders.json
 cancelled-orders.json
 processed-cancels.json
 processed-nolticket.json
+nolticket-daily-log.json
 
 # macOS
 .DS_Store

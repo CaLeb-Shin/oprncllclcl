@@ -96,6 +96,7 @@ const CONFIG = {
   smsLogFile: path.join(__dirname, 'sms-log.json'),
   surveyLogFile: path.join(__dirname, 'survey-sent.json'),
   processedNolticketFile: path.join(__dirname, 'processed-nolticket.json'),
+  nolticketDailyLogFile: path.join(__dirname, 'nolticket-daily-log.json'),
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
@@ -727,6 +728,51 @@ function runNolticketCheck(targetChatId) {
       reject(err);
     });
   });
+}
+
+// 놀티켓 하루끝 정리 메시지 생성 (nolticket-daily-log.json → 감지시각 타임라인)
+function buildNolticketDailySummary(dateObj = new Date()) {
+  const getDayName = (d) => ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
+  const dateLabel = `${dateObj.getMonth() + 1}/${dateObj.getDate()}${getDayName(dateObj)}`;
+  const sameDay = (t) => {
+    const d = new Date(Number(t));
+    return d.getFullYear() === dateObj.getFullYear() && d.getMonth() === dateObj.getMonth() && d.getDate() === dateObj.getDate();
+  };
+
+  const log = readJson(CONFIG.nolticketDailyLogFile, []).filter((e) => sameDay(e.t));
+
+  let msg = `📊 <b>놀티켓 오늘 판매 정리</b> (${dateLabel})\n━━━━━━━━━━━━━━━━\n`;
+  if (log.length === 0) {
+    return msg + '오늘 놀티켓 신규 예매 없음';
+  }
+
+  // 감지 시각(t)별 그룹 → 그 안에서 (지역,판매처) 합산
+  const byTime = new Map();
+  for (const e of log) {
+    if (!byTime.has(e.t)) byTime.set(e.t, new Map());
+    const g = byTime.get(e.t);
+    const key = `${e.region}|${e.channel}`;
+    if (!g.has(key)) g.set(key, { region: e.region, channel: e.channel, qty: 0, amount: 0 });
+    const v = g.get(key);
+    v.qty += Number(e.qty) || 0;
+    v.amount += Number(e.amount) || 0;
+  }
+
+  let totalQty = 0;
+  let totalAmount = 0;
+  for (const t of [...byTime.keys()].sort((a, b) => a - b)) {
+    const d = new Date(Number(t));
+    const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    msg += `🕛 ${hhmm}\n`;
+    const rows = [...byTime.get(t).values()].sort((a, b) => b.qty - a.qty);
+    for (const r of rows) {
+      msg += `  · ${r.region} | ${r.channel}: ${r.qty}매 / ${Number(r.amount).toLocaleString()}원\n`;
+      totalQty += r.qty;
+      totalAmount += r.amount;
+    }
+  }
+  msg += `━━━━━━━━━━━━━━━━\n💰 <b>오늘 총 ${totalQty}매 / ${totalAmount.toLocaleString()}원</b>`;
+  return msg;
 }
 
 // ============================================================
@@ -6740,6 +6786,11 @@ async function handleMessage(msg) {
       await runGroupSettlementReport(chatId);
     }
 
+    if (cmd === '놀티켓정리' || cmd === '오늘정리') {
+      console.log(`📩 그룹: /놀티켓정리 from ${msg.from?.first_name || ''}`);
+      await sendMessageTo(chatId, buildNolticketDailySummary());
+    }
+
     // /지역공연 → 해당 지역 네이버 스토어 링크
     const regionMatch = cmd.match(/^(대구|창원|광주|대전|부산|고양|인천|울산)공연$/);
     if (regionMatch) {
@@ -6869,6 +6920,12 @@ async function handleMessage(msg) {
     } catch (err) {
       await sendMessage(`❌ 오류: ${err.message}`);
     }
+    return;
+  }
+
+  // 놀티켓 오늘 판매 정리 (감지시각 타임라인) 즉시 전송
+  if (['놀티켓정리', '오늘정리', '판매정리'].includes(text)) {
+    await sendMessage(buildNolticketDailySummary());
     return;
   }
 
@@ -7773,7 +7830,8 @@ async function handleMessage(msg) {
       `• 결산 - 놀티켓 + 네이버\n` +
       `• 스토어 - 네이버 판매현황\n` +
       `• 조회 - 놀티켓 판매현황\n` +
-      `• 놀티켓확인 - 놀티켓 새 예매 즉시 확인\n\n` +
+      `• 놀티켓확인 - 놀티켓 새 예매 즉시 확인\n` +
+      `• 놀티켓정리 - 오늘 시각별 판매 정리\n\n` +
       `<b>📋 결산</b>\n` +
       `• 최종결산 - 공연별 발송 명단\n` +
       `• 비교N - 네이버↔뿌리오 주문 비교\n` +
@@ -7922,7 +7980,8 @@ async function startPolling() {
       `• 결산 - 놀티켓 + 네이버\n` +
       `• 스토어 - 네이버 판매현황\n` +
       `• 조회 - 놀티켓 판매현황\n` +
-      `• 놀티켓확인 - 놀티켓 새 예매 즉시 확인\n\n` +
+      `• 놀티켓확인 - 놀티켓 새 예매 즉시 확인\n` +
+      `• 놀티켓정리 - 오늘 시각별 판매 정리\n\n` +
       `<b>📋 결산</b>\n` +
       `• 최종결산 - 공연별 발송 명단\n` +
       `• 비교N - 네이버↔뿌리오 주문 비교\n` +
@@ -8381,6 +8440,38 @@ function startNaverProductSync() {
 }
 
 // ============================================================
+// 놀티켓 하루끝(23:55) 판매 정리 → 멜론 OS 그룹
+// ============================================================
+function startNolticketDailyReport() {
+  if (!CONFIG.telegramGroupId) {
+    console.log('⏰ 놀티켓 하루정리 건너뜀: telegramGroupId 없음');
+    return;
+  }
+  function scheduleNext() {
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(23, 55, 0, 0);
+    if (now >= target) target.setDate(target.getDate() + 1);
+    const delay = target.getTime() - now.getTime();
+    console.log(`⏰ 다음 놀티켓 하루정리: ${target.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}`);
+    setTimeout(async () => {
+      try {
+        console.log('🌙 놀티켓 하루끝 정리 시작...');
+        await runNolticketCheck().catch((e) => console.error('하루정리 막판 확인 오류:', e.message)); // 막판 catch-up
+        await new Promise((r) => setTimeout(r, 3000)); // 자식 로그 파일 쓰기 안정화
+        await sendMessageTo(CONFIG.telegramGroupId, buildNolticketDailySummary());
+        console.log('✅ 놀티켓 하루끝 정리 완료');
+      } catch (err) {
+        console.error('놀티켓 하루정리 오류:', err.message);
+      } finally {
+        scheduleNext();
+      }
+    }, delay);
+  }
+  scheduleNext();
+}
+
+// ============================================================
 // 좌석현황 자동 다운로드 스케줄러
 // ============================================================
 function startSeatDownloadScheduler() {
@@ -8485,4 +8576,5 @@ startSmsPoll();
 startNaverProductSync();
 startHourlyGroupSettlementReport();
 startDailyReport();
+startNolticketDailyReport();
 startSeatDownloadScheduler();
