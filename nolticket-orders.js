@@ -39,7 +39,7 @@ const CONFIG = {
   loginUrl: 'https://tadmin20.interpark.com',
   reservedUrl: 'https://tadmin20.interpark.com/stat/goodsreservedpersoninfo',
   username: 'iproduc1',
-  password: 'jjys1314!!',
+  password: '2755jjys!!',
   telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '7718215110',
   stateFile: path.join(__dirname, 'processed-nolticket.json'),
@@ -47,6 +47,9 @@ const CONFIG = {
   maxKeep: 2000,
   dailyLogFile: path.join(__dirname, 'nolticket-daily-log.json'),  // 하루끝 정리용 감지 로그
   dailyLogKeepDays: 7,   // 일일 로그 보관 기간
+  // 멜론 허브(랜딩페이지 통계)로 실구매 기록 전송 — landingPurchases 공개 create(REST)
+  hubProjectId: 'melon-hub-os',
+  hubApiKey: 'AIzaSyAGNn0psK34_eoouZeiBeafoakyPmlC9H0',
 };
 
 // ── 유틸 ────────────────────────────────────────────────────
@@ -136,6 +139,36 @@ async function sendTelegram(message) {
     const r = await res.json();
     if (!r.ok) console.error('❌ 텔레그램 전송 실패:', r.description);
   } catch (e) { console.error('❌ 텔레그램 오류:', e.message); }
+}
+
+// ── 멜론 허브로 실구매 전송 ──────────────────────────────────
+// 신규 감지분을 허브 Firestore landingPurchases에 공개 create(REST)로 적재.
+// 허브 통계 화면이 지역(region)으로 랜딩페이지와 매칭해 방문·클릭 추이와 비교한다.
+async function pushToHub(entries) {
+  if (!entries || !entries.length) return;
+  const url = `https://firestore.googleapis.com/v1/projects/${CONFIG.hubProjectId}/databases/(default)/documents/landingPurchases?key=${CONFIG.hubApiKey}`;
+  const nowIso = new Date().toISOString();
+  for (const e of entries) {
+    const fields = {
+      region: { stringValue: String(e.region || '') },
+      purchasedAt: { stringValue: new Date(Number(e.t) || Date.now()).toISOString() },
+      createdAt: { stringValue: nowIso },
+      source: { stringValue: 'bot' },
+    };
+    if (e.channel) fields.channel = { stringValue: String(e.channel).slice(0, 80) };
+    if (Number(e.qty) > 0) fields.qty = { integerValue: String(Math.round(Number(e.qty))) };
+    if (Number(e.amount) > 0) fields.amount = { integerValue: String(Math.round(Number(e.amount))) };
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields }),
+      });
+      if (!res.ok) console.error('⚠️ 허브 전송 실패:', res.status, await res.text().catch(() => ''));
+    } catch (err) {
+      console.error('⚠️ 허브 전송 오류:', err.message);
+    }
+  }
 }
 
 // ── 상품 돋보기 열고 목록 가져오기 ───────────────────────────
@@ -361,14 +394,17 @@ async function scrapeNolticket() {
 
     // 하루끝 정리용 로그 적재 (이번 실행의 감지 시각 1개 공유)
     const detectedAt = Date.now();
-    appendDailyLog(newRows.map((r) => ({
+    const hubEntries = newRows.map((r) => ({
       t: detectedAt,
       bdate: r.BDate,
       region: regionOf(r._GoodsName),
       channel: r.BizName || '기타',
       qty: Number(r.BCnt) || 0,
       amount: Number(r.BAmt) || 0,
-    })));
+    }));
+    appendDailyLog(hubEntries);
+    // 멜론 허브 통계로도 전송 (실패해도 봇 흐름은 계속)
+    await pushToHub(hubEntries);
   } catch (err) {
     console.error('❌ 오류:', err.message);
     await page.screenshot({ path: 'debug-nolticket-error.png' }).catch(() => {});

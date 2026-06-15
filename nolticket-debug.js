@@ -38,7 +38,7 @@ const CONFIG = {
   loginUrl: 'https://tadmin20.interpark.com',
   reservedUrl: 'https://tadmin20.interpark.com/stat/goodsreservedpersoninfo',
   username: 'iproduc1',
-  password: 'jjys1314!!',
+  password: '2755jjys!!',
 };
 
 function getTodayStr() {

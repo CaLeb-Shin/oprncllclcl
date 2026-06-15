@@ -29,7 +29,7 @@ const CONFIG = {
   salesUrl: 'https://tadmin20.interpark.com/stat/dailysalesinfo',
   reservedUrl: 'https://tadmin20.interpark.com/stat/goodsreservedpersoninfo',
   username: 'iproduc1',
-  password: 'jjys1314!!',
+  password: '2755jjys!!',
   telegramBotToken: '8562209480:AAFpKfnXTItTQXgyrixFCEoaugl5ozFTyIw',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '7718215110',
 };
