@@ -2719,50 +2719,10 @@ async function getFinalSummaryDetail(perfIndex) {
   return msg;
 }
 
-// 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
+// 라벨 시트 PDF 드로잉 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
+// labels = [{ line1, line2, isUpgraded }] → A4 PDF Buffer 반환
 // pdfkit으로 mm 단위 정확한 좌표 배치 (Playwright HTML→PDF 오차 제거)
-async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = null) {
-  let activeOrders, perf;
-  if (preloadedOrders) {
-    activeOrders = preloadedOrders.activeOrders;
-    perf = preloadedOrders.perf;
-  } else {
-    const result = await getActiveOrders(perfIndex);
-    if (!result) throw new Error('잘못된 공연 번호');
-    activeOrders = result.activeOrders;
-    perf = result.perf;
-  }
-  if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
-
-  const upgradeMap = upgInfo ? (upgInfo.upgradeMap || {}) : {};
-  const upgradedNames = upgInfo ? (upgInfo.upgradedNames || new Set()) : new Set();
-
-  // 뿌리오 데이터(최신순) → reverse → 선착순 (preloaded는 이미 선착순)
-  if (!preloadedOrders) activeOrders.reverse();
-
-  // 등급별 정렬: VIP석 → R석 → S석 → A석 (각 등급 내 선착순 유지)
-  // 업그레이드된 사람은 업그레이드 후 등급으로 정렬 (좋은 자리 순서)
-  const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
-  activeOrders.sort((a, b) => {
-    const aUpg = !!upgradeMap[a.buyerName];
-    const bUpg = !!upgradeMap[b.buyerName];
-    const aGrade = aUpg ? upgradeMap[a.buyerName].to : a.seatType;
-    const bGrade = bUpg ? upgradeMap[b.buyerName].to : b.seatType;
-    const ai = gradeOrder.indexOf(aGrade);
-    const bi = gradeOrder.indexOf(bGrade);
-    if (ai !== bi) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
-    // 같은 등급 내: 업그레이드된 사람은 맨 뒤
-    if (aUpg !== bUpg) return aUpg ? 1 : -1;
-    return 0; // 동일 조건이면 선착순 유지
-  });
-
-  // 라벨 데이터 준비 (원래 등급 표시 + 업그레이드 밑줄)
-  const labels = activeOrders.map(o => ({
-    line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
-    line2: `${o.seatType || ''} ${o.qty || 1}매`,
-    isUpgraded: upgradedNames.has(o.buyerName),
-  }));
-
+function buildLabelSheetBuffer(labels) {
   // mm → pt 변환 (1mm = 72/25.4 pt)
   const mm = v => v * 72 / 25.4;
 
@@ -2792,7 +2752,7 @@ async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = nul
     const doc = new PDFDocument({ size: 'A4', margin: 0 });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
-    doc.on('end', () => resolve({ pdfBuffer: Buffer.concat(chunks), orderCount: activeOrders.length, perf }));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
     doc.registerFont('label', fontPath);
@@ -2845,6 +2805,119 @@ async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = nul
 
     doc.end();
   });
+}
+
+// 라벨 시트 PDF 생성 (글로리텍 8189: 25.4×10mm, 7열×27행=189칸)
+// pdfkit으로 mm 단위 정확한 좌표 배치 (Playwright HTML→PDF 오차 제거)
+async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = null) {
+  let activeOrders, perf;
+  if (preloadedOrders) {
+    activeOrders = preloadedOrders.activeOrders;
+    perf = preloadedOrders.perf;
+  } else {
+    const result = await getActiveOrders(perfIndex);
+    if (!result) throw new Error('잘못된 공연 번호');
+    activeOrders = result.activeOrders;
+    perf = result.perf;
+  }
+  if (activeOrders.length === 0) throw new Error('유효 주문이 없습니다');
+
+  const upgradeMap = upgInfo ? (upgInfo.upgradeMap || {}) : {};
+  const upgradedNames = upgInfo ? (upgInfo.upgradedNames || new Set()) : new Set();
+
+  // 뿌리오 데이터(최신순) → reverse → 선착순 (preloaded는 이미 선착순)
+  if (!preloadedOrders) activeOrders.reverse();
+
+  // 등급별 정렬: VIP석 → R석 → S석 → A석 (각 등급 내 선착순 유지)
+  // 업그레이드된 사람은 업그레이드 후 등급으로 정렬 (좋은 자리 순서)
+  const gradeOrder = ['VIP석', 'R석', 'S석', 'A석'];
+  activeOrders.sort((a, b) => {
+    const aUpg = !!upgradeMap[a.buyerName];
+    const bUpg = !!upgradeMap[b.buyerName];
+    const aGrade = aUpg ? upgradeMap[a.buyerName].to : a.seatType;
+    const bGrade = bUpg ? upgradeMap[b.buyerName].to : b.seatType;
+    const ai = gradeOrder.indexOf(aGrade);
+    const bi = gradeOrder.indexOf(bGrade);
+    if (ai !== bi) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    // 같은 등급 내: 업그레이드된 사람은 맨 뒤
+    if (aUpg !== bUpg) return aUpg ? 1 : -1;
+    return 0; // 동일 조건이면 선착순 유지
+  });
+
+  // 라벨 데이터 준비 (원래 등급 표시 + 업그레이드 밑줄)
+  const labels = activeOrders.map(o => ({
+    line1: `${o.buyerName || '?'}(${o.lastFour || '----'})`,
+    line2: `${o.seatType || ''} ${o.qty || 1}매`,
+    isUpgraded: upgradedNames.has(o.buyerName),
+  }));
+
+  const pdfBuffer = await buildLabelSheetBuffer(labels);
+  return { pdfBuffer, orderCount: activeOrders.length, perf };
+}
+
+// ── /라벨추가: 사용자 명단 텍스트 파싱 ───────────────────────
+// 입력은 스킬(/라벨편집)이 정리한 표준 형식: `이름[(뒷4자리)] [좌석등급] N매`
+// 한 줄 = 1명. 그룹 헤더([쿠팡] 등)·머리 불릿(-, •)·빈 줄은 스킵.
+// 직접 붙여넣어도 어느 정도 견디도록 관대하게 파싱.
+function parseManualLabelList(text) {
+  const items = [];
+  const failed = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const original = raw.trim();
+    if (!original) continue;
+    if (/^\[.*\]$/.test(original)) continue;           // 그룹 헤더 [쿠팡]
+    let line = original.replace(/^[-*•·\d.)\s]+/, '').trim();  // 머리 불릿/번호 제거
+    if (!line) continue;
+
+    // 뒷4자리: (1234)
+    let lastFour = '';
+    const f = line.match(/\((\d{3,4})\)/);
+    if (f) { lastFour = f[1]; line = line.replace(f[0], ' '); }
+
+    // 좌석등급: VIP석 / R석 / S석 / A석
+    let seatType = '';
+    const g = line.match(/(VIP|R|S|A)\s*석/i);
+    if (g) { seatType = g[1].toUpperCase() + '석'; line = line.replace(g[0], ' '); }
+
+    // 매수: "N매" 우선, 없으면 남은 1~2자리 숫자
+    let qty = 1;
+    const q = line.match(/(\d+)\s*(?:매|장|명)/);
+    if (q) { qty = parseInt(q[1], 10); line = line.replace(q[0], ' '); }
+    else {
+      const qn = line.match(/(?:^|\s)(\d{1,2})(?:\s|$)/);
+      if (qn) { qty = parseInt(qn[1], 10); line = line.replace(qn[0], ' '); }
+    }
+
+    // 남은 텍스트의 첫 토큰 = 이름
+    const name = line.replace(/[,/]+/g, ' ').trim().split(/\s+/)[0] || '';
+    if (!name) { failed.push(original); continue; }
+    items.push({ name, lastFour, seatType, qty });
+  }
+  return { items, failed };
+}
+
+// /라벨추가: 명단 텍스트 → 라벨 시트 PDF (등급순 정렬, 기존 규격 재사용)
+async function generateManualLabelPdf(text) {
+  const { items, failed } = parseManualLabelList(text);
+  if (items.length === 0) throw new Error('인식된 명단이 없습니다. 형식을 확인해주세요.');
+
+  const GRADE_ORDER = ['VIP석', 'R석', 'S석', 'A석'];
+  // 안정 정렬(Node): 등급순 정렬, 같은 등급 내 입력 순서 유지. 등급 없으면 맨 뒤.
+  items.sort((a, b) => {
+    const ai = GRADE_ORDER.indexOf(a.seatType);
+    const bi = GRADE_ORDER.indexOf(b.seatType);
+    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+  });
+
+  const labels = items.map(o => ({
+    line1: o.lastFour ? `${o.name}(${o.lastFour})` : o.name,
+    line2: o.seatType ? `${o.seatType} ${o.qty}매` : `${o.qty}매`,
+    isUpgraded: false,
+  }));
+
+  const pdfBuffer = await buildLabelSheetBuffer(labels);
+  const totalQty = items.reduce((s, o) => s + (o.qty || 1), 0);
+  return { pdfBuffer, count: items.length, totalQty, failed };
 }
 
 // 업그레이드 라벨 시트 PDF 생성 (글로리텍 8189: 동일 규격)
@@ -3517,6 +3590,7 @@ const VENUE_SEATS_PER_LINE = {
 
 // 좌석배정 대기 플래그
 let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
+let labelAddWaiting = null;  // { timestamp } - /라벨추가 명단 입력 대기
 let lastAssignmentUpgrades = null; // { perfIndex, upgradedNames: Set } - 라벨 생성 시 참조
 let lastAssignmentContext = null;  // 직전 좌석배정 컨텍스트 (엑셀 취소 비교용)
 
@@ -6834,6 +6908,46 @@ async function handleMessage(msg) {
   }
 
   console.log(`📩 메시지: "${text}"`);
+
+  // ── /라벨추가: 명단 텍스트 → 라벨 PDF (스킬 /라벨편집 출력 붙여넣기) ──
+  if (/^\/?라벨추가$/.test(text)) {
+    labelAddWaiting = { timestamp: Date.now() };
+    await sendMessage(
+      '🏷 <b>라벨추가</b> — 명단을 보내주세요.\n\n' +
+      '다음 메시지에 명단을 붙여넣으면 라벨 PDF로 만들어 드려요.\n' +
+      '한 줄에 한 명, 형식: <code>이름(뒷4자리) 좌석등급 N매</code>\n' +
+      '예) <code>김송희(3586) VIP석 3매</code>\n' +
+      '    <code>박근해 R석 3매</code>\n\n' +
+      '<i>스샷 정리는 클로드에 "라벨링작업하게 편집해줘"로 부탁하세요.</i>\n' +
+      '취소하려면 <code>취소</code> 입력.'
+    );
+    return;
+  }
+
+  // 라벨추가 대기 중 → 다음 텍스트를 명단으로 처리
+  if (labelAddWaiting) {
+    if (Date.now() - labelAddWaiting.timestamp > 10 * 60 * 1000) {
+      labelAddWaiting = null;  // 만료 → 일반 명령으로 통과
+    } else if (text === '취소') {
+      labelAddWaiting = null;
+      await sendMessage('❎ 라벨추가를 취소했습니다.');
+      return;
+    } else {
+      labelAddWaiting = null;
+      try {
+        await sendMessage('🏷 라벨 생성 중...');
+        // 원본 msg.text 사용 (대소문자·줄바꿈 보존)
+        const { pdfBuffer, count, totalQty, failed } = await generateManualLabelPdf(msg.text || '');
+        const filename = `라벨_추가_${count}건.pdf`;
+        let caption = `🏷 추가 라벨 (${count}건, 총 ${totalQty}매)`;
+        if (failed.length) caption += `\n⚠️ 인식 실패 ${failed.length}줄: ${failed.slice(0, 5).join(' / ')}`;
+        await sendDocument(pdfBuffer, filename, caption);
+      } catch (err) {
+        await sendMessage(`❌ 라벨 생성 오류: ${err.message}`);
+      }
+      return;
+    }
+  }
 
   // 결산 (놀티켓 + 네이버 어제/오늘 따로)
   if (['결산'].includes(text)) {
