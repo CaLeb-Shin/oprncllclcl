@@ -2770,6 +2770,7 @@ function buildLabelSheetBuffer(labels) {
 
           const label = labels[idx];
           const ul = !!label.isUpgraded;
+          const ob = label.italic ? 10 : 0;  // 쿠팡 등 → 기울임(oblique 각도)
           const cellX = MARGIN_LEFT + col * H_PITCH;
           const cellY = MARGIN_TOP + row * V_PITCH;
           const centerX = cellX + LABEL_W / 2;
@@ -2781,7 +2782,7 @@ function buildLabelSheetBuffer(labels) {
           const w1 = doc.widthOfString(t1) || 0;
           const x1 = mm(centerX) - w1 / 2;
           const y1 = mm(centerY) - FONT_SIZE * 1.1;
-          doc.text(t1, x1, y1, { lineBreak: false });
+          doc.text(t1, x1, y1, { lineBreak: false, oblique: ob });
 
           // line2 — 셀 중앙 아래쪽
           doc.font('label').fontSize(FONT_SIZE);
@@ -2789,7 +2790,7 @@ function buildLabelSheetBuffer(labels) {
           const w2 = doc.widthOfString(t2) || 0;
           const x2 = mm(centerX) - w2 / 2;
           const y2 = mm(centerY) + FONT_SIZE * 0.15;
-          doc.text(t2, x2, y2, { lineBreak: false });
+          doc.text(t2, x2, y2, { lineBreak: false, oblique: ob });
 
           // 업그레이드 밑줄 (PDFKit underline 옵션 대신 수동 그리기)
           if (ul) {
@@ -2862,10 +2863,15 @@ async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = nul
 function parseManualLabelList(text) {
   const items = [];
   const failed = [];
+  let italicGroup = false;  // [쿠팡] 그룹 아래 줄들은 기울임
   for (const raw of String(text).split(/\r?\n/)) {
     const original = raw.trim();
     if (!original) continue;
-    if (/^\[.*\]$/.test(original)) continue;           // 그룹 헤더 [쿠팡]
+    // 그룹 헤더 [쿠팡] / [펄스] 등 → 쿠팡이면 이후 줄 기울임 ON, 아니면 OFF
+    if (/^\[.*\]$/.test(original)) {
+      italicGroup = /쿠팡|coupang/i.test(original);
+      continue;
+    }
     let line = original.replace(/^[-*•·\d.)\s]+/, '').trim();  // 머리 불릿/번호 제거
     if (!line) continue;
 
@@ -2891,7 +2897,7 @@ function parseManualLabelList(text) {
     // 남은 텍스트의 첫 토큰 = 이름
     const name = line.replace(/[,/]+/g, ' ').trim().split(/\s+/)[0] || '';
     if (!name) { failed.push(original); continue; }
-    items.push({ name, lastFour, seatType, qty });
+    items.push({ name, lastFour, seatType, qty, italic: italicGroup });
   }
   return { items, failed };
 }
@@ -2913,11 +2919,13 @@ async function generateManualLabelPdf(text) {
     line1: o.lastFour ? `${o.name}(${o.lastFour})` : o.name,
     line2: o.seatType ? `${o.seatType} ${o.qty}매` : `${o.qty}매`,
     isUpgraded: false,
+    italic: !!o.italic,
   }));
 
   const pdfBuffer = await buildLabelSheetBuffer(labels);
   const totalQty = items.reduce((s, o) => s + (o.qty || 1), 0);
-  return { pdfBuffer, count: items.length, totalQty, failed };
+  const coupangCount = items.filter(o => o.italic).length;
+  return { pdfBuffer, count: items.length, totalQty, failed, coupangCount };
 }
 
 // 업그레이드 라벨 시트 PDF 생성 (글로리텍 8189: 동일 규격)
@@ -6937,9 +6945,10 @@ async function handleMessage(msg) {
       try {
         await sendMessage('🏷 라벨 생성 중...');
         // 원본 msg.text 사용 (대소문자·줄바꿈 보존)
-        const { pdfBuffer, count, totalQty, failed } = await generateManualLabelPdf(msg.text || '');
+        const { pdfBuffer, count, totalQty, failed, coupangCount } = await generateManualLabelPdf(msg.text || '');
         const filename = `라벨_추가_${count}건.pdf`;
         let caption = `🏷 추가 라벨 (${count}건, 총 ${totalQty}매)`;
+        if (coupangCount) caption += `\n📐 쿠팡 ${coupangCount}건 기울임 표시`;
         if (failed.length) caption += `\n⚠️ 인식 실패 ${failed.length}줄: ${failed.slice(0, 5).join(' / ')}`;
         await sendDocument(pdfBuffer, filename, caption);
       } catch (err) {
@@ -7953,6 +7962,11 @@ async function handleMessage(msg) {
       `• 취소등록 이름 뒷자리 - 수동 취소\n` +
       `• 취소삭제 번호 - 취소 목록에서 제거\n` +
       `• 설문발송 - 공연 후 설문 문자 발송\n\n` +
+      `<b>🏷 라벨</b>\n` +
+      `• /라벨추가 - 명단 붙여넣어 라벨 PDF 생성\n` +
+      `  (네이버 자동수집과 별개. 명령 후 명단 입력)\n` +
+      `• 라벨N - 최종결산 N번 공연 라벨\n` +
+      `• 업라벨 N / 감사라벨 N - 고정문구 라벨\n\n` +
       `<b>🔍 검색</b>\n` +
       `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
       `<b>⚙️ 관리</b>\n` +
@@ -8102,6 +8116,8 @@ async function startPolling() {
       `• 취소목록 - 취소/반품 목록 확인\n` +
       `• 취소등록 이름 뒷자리 - 수동 취소 등록\n` +
       `• 설문발송 - 공연 후 설문 문자 발송\n\n` +
+      `<b>🏷 라벨</b>\n` +
+      `• /라벨추가 - 명단 붙여넣어 라벨 PDF\n\n` +
       `<b>🔍 검색</b>\n` +
       `• 연관공연 - 놀티켓 멜론 공연 링크\n\n` +
       `<b>⚙️ 관리</b>\n` +
