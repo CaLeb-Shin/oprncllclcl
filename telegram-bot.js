@@ -2776,13 +2776,6 @@ function buildLabelSheetBuffer(labels) {
           const centerX = cellX + LABEL_W / 2;
           const centerY = cellY + LABEL_H / 2;
 
-          // 그룹 헤더 칸 → 테두리 박스로 구별
-          if (label.isHeader) {
-            doc.save().lineWidth(0.7).strokeColor('#000000')
-              .rect(mm(cellX) + 1, mm(cellY) + 0.5, mm(LABEL_W) - 2, mm(LABEL_H) - 1)
-              .stroke().restore();
-          }
-
           // line1 (bold) — 셀 중앙 위쪽
           doc.font('label-bold').fontSize(FONT_SIZE);
           const t1 = String(label.line1 || '');
@@ -2938,22 +2931,22 @@ async function generateManualLabelPdf(text) {
     totalQty += gQty;
     if (grp.italic) { coupangCount += grp.items.length; coupangQty += gQty; }
 
-    // 그룹 헤더 칸 (이름 있는 그룹만) — 테두리로 구별
+    // 그룹 헤더 칸 (이름 있는 그룹만) — 쿠팡 그룹은 그룹명을 기울임으로 구별
     if (grp.name) {
       labels.push({
         line1: grp.name,
         line2: `${grp.items.length}명 ${gQty}매`,
         isHeader: true,
-        italic: grp.italic,
+        italic: grp.italic,  // 쿠팡 그룹명만 기울임
       });
     }
-    // 그룹 명단
+    // 그룹 명단 — 멤버는 모두 일반체 (기울임은 그룹명에만)
     for (const o of grp.items) {
       labels.push({
         line1: o.lastFour ? `${o.name}(${o.lastFour})` : o.name,
         line2: o.seatType ? `${o.seatType} ${o.qty}매` : `${o.qty}매`,
         isUpgraded: false,
-        italic: grp.italic,
+        italic: false,
       });
     }
   }
@@ -6984,7 +6977,7 @@ async function handleMessage(msg) {
         const filename = `라벨_추가_${count}건.pdf`;
         let caption = `🏷 추가 라벨 (${count}명 ${totalQty}매)`;
         if (headerCount) caption += `\n📑 ${headerCount}개 그룹 (그룹명 칸 포함 총 ${count + headerCount}칸)`;
-        if (coupangCount) caption += `\n📐 쿠팡 ${coupangCount}건 ${coupangQty}매 (기울임)`;
+        if (coupangCount) caption += `\n📐 쿠팡 그룹명 기울임 (${coupangCount}건 ${coupangQty}매)`;
         if (failed.length) caption += `\n⚠️ 인식 실패 ${failed.length}줄: ${failed.slice(0, 5).join(' / ')}`;
         await sendDocument(pdfBuffer, filename, caption);
       } catch (err) {
