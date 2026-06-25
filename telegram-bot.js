@@ -2776,6 +2776,13 @@ function buildLabelSheetBuffer(labels) {
           const centerX = cellX + LABEL_W / 2;
           const centerY = cellY + LABEL_H / 2;
 
+          // 그룹 헤더 칸 → 테두리 박스로 구별
+          if (label.isHeader) {
+            doc.save().lineWidth(0.7).strokeColor('#000000')
+              .rect(mm(cellX) + 1, mm(cellY) + 0.5, mm(LABEL_W) - 2, mm(LABEL_H) - 1)
+              .stroke().restore();
+          }
+
           // line1 (bold) — 셀 중앙 위쪽
           doc.font('label-bold').fontSize(FONT_SIZE);
           const t1 = String(label.line1 || '');
@@ -2861,15 +2868,22 @@ async function generateLabelPdf(perfIndex, upgInfo = null, preloadedOrders = nul
 // 한 줄 = 1명. 그룹 헤더([쿠팡] 등)·머리 불릿(-, •)·빈 줄은 스킵.
 // 직접 붙여넣어도 어느 정도 견디도록 관대하게 파싱.
 function parseManualLabelList(text) {
-  const items = [];
+  const groups = [];
   const failed = [];
-  let italicGroup = false;  // [쿠팡] 그룹 아래 줄들은 기울임
+  // 기본(헤더 전) 그룹 — 헤더 없이 바로 명단이 오는 경우용
+  let current = { name: '', italic: false, items: [] };
+  groups.push(current);
+
   for (const raw of String(text).split(/\r?\n/)) {
     const original = raw.trim();
     if (!original) continue;
-    // 그룹 헤더 [쿠팡] / [펄스] 등 → 쿠팡이면 이후 줄 기울임 ON, 아니면 OFF
+    // 그룹 헤더 [쿠팡 · 20매] / [펄스] 등 → 새 그룹 시작
     if (/^\[.*\]$/.test(original)) {
-      italicGroup = /쿠팡|coupang/i.test(original);
+      const inner = original.replace(/^\[|\]$/g, '').trim();
+      // 헤더 표시명 = "· 20매" 같은 매수 꼬리 제거
+      const gname = inner.replace(/\s*[·\-|]?\s*\d+\s*매\s*$/, '').trim();
+      current = { name: gname, italic: /쿠팡|coupang/i.test(inner), items: [] };
+      groups.push(current);
       continue;
     }
     let line = original.replace(/^[-*•·\d.)\s]+/, '').trim();  // 머리 불릿/번호 제거
@@ -2897,37 +2911,56 @@ function parseManualLabelList(text) {
     // 남은 텍스트의 첫 토큰 = 이름
     const name = line.replace(/[,/]+/g, ' ').trim().split(/\s+/)[0] || '';
     if (!name) { failed.push(original); continue; }
-    items.push({ name, lastFour, seatType, qty, italic: italicGroup });
+    current.items.push({ name, lastFour, seatType, qty });
   }
-  return { items, failed };
+  return { groups: groups.filter(grp => grp.items.length > 0), failed };
 }
 
-// /라벨추가: 명단 텍스트 → 라벨 시트 PDF (등급순 정렬, 기존 규격 재사용)
+// /라벨추가: 명단 텍스트 → 라벨 시트 PDF
+// 그룹별로 [헤더 칸(테두리)] + 그룹 명단(등급순) 순서로 배치 → 그룹 구별
 async function generateManualLabelPdf(text) {
-  const { items, failed } = parseManualLabelList(text);
-  if (items.length === 0) throw new Error('인식된 명단이 없습니다. 형식을 확인해주세요.');
+  const { groups, failed } = parseManualLabelList(text);
+  const totalCount = groups.reduce((s, grp) => s + grp.items.length, 0);
+  if (totalCount === 0) throw new Error('인식된 명단이 없습니다. 형식을 확인해주세요.');
 
   const GRADE_ORDER = ['VIP석', 'R석', 'S석', 'A석'];
-  // 안정 정렬(Node): 등급순 정렬, 같은 등급 내 입력 순서 유지. 등급 없으면 맨 뒤.
-  items.sort((a, b) => {
-    const ai = GRADE_ORDER.indexOf(a.seatType);
-    const bi = GRADE_ORDER.indexOf(b.seatType);
-    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
-  });
+  const labels = [];
+  let totalQty = 0, coupangCount = 0, coupangQty = 0;
 
-  const labels = items.map(o => ({
-    line1: o.lastFour ? `${o.name}(${o.lastFour})` : o.name,
-    line2: o.seatType ? `${o.seatType} ${o.qty}매` : `${o.qty}매`,
-    isUpgraded: false,
-    italic: !!o.italic,
-  }));
+  for (const grp of groups) {
+    // 그룹 내 등급순 정렬 (등급 없으면 맨 뒤, 같은 등급 입력순 유지 — Node 안정정렬)
+    grp.items.sort((a, b) => {
+      const ai = GRADE_ORDER.indexOf(a.seatType);
+      const bi = GRADE_ORDER.indexOf(b.seatType);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+    const gQty = grp.items.reduce((s, o) => s + (o.qty || 1), 0);
+    totalQty += gQty;
+    if (grp.italic) { coupangCount += grp.items.length; coupangQty += gQty; }
+
+    // 그룹 헤더 칸 (이름 있는 그룹만) — 테두리로 구별
+    if (grp.name) {
+      labels.push({
+        line1: grp.name,
+        line2: `${grp.items.length}명 ${gQty}매`,
+        isHeader: true,
+        italic: grp.italic,
+      });
+    }
+    // 그룹 명단
+    for (const o of grp.items) {
+      labels.push({
+        line1: o.lastFour ? `${o.name}(${o.lastFour})` : o.name,
+        line2: o.seatType ? `${o.seatType} ${o.qty}매` : `${o.qty}매`,
+        isUpgraded: false,
+        italic: grp.italic,
+      });
+    }
+  }
 
   const pdfBuffer = await buildLabelSheetBuffer(labels);
-  const totalQty = items.reduce((s, o) => s + (o.qty || 1), 0);
-  const coupang = items.filter(o => o.italic);
-  const coupangCount = coupang.length;
-  const coupangQty = coupang.reduce((s, o) => s + (o.qty || 1), 0);
-  return { pdfBuffer, count: items.length, totalQty, failed, coupangCount, coupangQty };
+  const headerCount = labels.filter(l => l.isHeader).length;
+  return { pdfBuffer, count: totalCount, totalQty, failed, coupangCount, coupangQty, headerCount };
 }
 
 // 업그레이드 라벨 시트 PDF 생성 (글로리텍 8189: 동일 규격)
@@ -6947,9 +6980,10 @@ async function handleMessage(msg) {
       try {
         await sendMessage('🏷 라벨 생성 중...');
         // 원본 msg.text 사용 (대소문자·줄바꿈 보존)
-        const { pdfBuffer, count, totalQty, failed, coupangCount, coupangQty } = await generateManualLabelPdf(msg.text || '');
+        const { pdfBuffer, count, totalQty, failed, coupangCount, coupangQty, headerCount } = await generateManualLabelPdf(msg.text || '');
         const filename = `라벨_추가_${count}건.pdf`;
-        let caption = `🏷 추가 라벨 (${count}건, 총 ${totalQty}매)`;
+        let caption = `🏷 추가 라벨 (${count}명 ${totalQty}매)`;
+        if (headerCount) caption += `\n📑 ${headerCount}개 그룹 (그룹명 칸 포함 총 ${count + headerCount}칸)`;
         if (coupangCount) caption += `\n📐 쿠팡 ${coupangCount}건 ${coupangQty}매 (기울임)`;
         if (failed.length) caption += `\n⚠️ 인식 실패 ${failed.length}줄: ${failed.slice(0, 5).join(' / ')}`;
         await sendDocument(pdfBuffer, filename, caption);
