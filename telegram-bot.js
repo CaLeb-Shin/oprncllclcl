@@ -2931,13 +2931,13 @@ async function generateManualLabelPdf(text) {
     totalQty += gQty;
     if (grp.italic) { coupangCount += grp.items.length; coupangQty += gQty; }
 
-    // 그룹 헤더 칸 (이름 있는 그룹만) — 쿠팡 그룹은 그룹명을 기울임으로 구별
+    // 그룹 헤더 칸 (이름 있는 그룹만) — 모든 그룹명을 기울임으로 구별
     if (grp.name) {
       labels.push({
         line1: grp.name,
         line2: `${grp.items.length}명 ${gQty}매`,
         isHeader: true,
-        italic: grp.italic,  // 쿠팡 그룹명만 기울임
+        italic: true,  // 그룹명은 전부 기울임
       });
     }
     // 그룹 명단 — 멤버는 모두 일반체 (기울임은 그룹명에만)
@@ -6973,11 +6973,10 @@ async function handleMessage(msg) {
       try {
         await sendMessage('🏷 라벨 생성 중...');
         // 원본 msg.text 사용 (대소문자·줄바꿈 보존)
-        const { pdfBuffer, count, totalQty, failed, coupangCount, coupangQty, headerCount } = await generateManualLabelPdf(msg.text || '');
+        const { pdfBuffer, count, totalQty, failed, headerCount } = await generateManualLabelPdf(msg.text || '');
         const filename = `라벨_추가_${count}건.pdf`;
         let caption = `🏷 추가 라벨 (${count}명 ${totalQty}매)`;
-        if (headerCount) caption += `\n📑 ${headerCount}개 그룹 (그룹명 칸 포함 총 ${count + headerCount}칸)`;
-        if (coupangCount) caption += `\n📐 쿠팡 그룹명 기울임 (${coupangCount}건 ${coupangQty}매)`;
+        if (headerCount) caption += `\n📑 ${headerCount}개 그룹 (그룹명 칸 기울임, 포함 총 ${count + headerCount}칸)`;
         if (failed.length) caption += `\n⚠️ 인식 실패 ${failed.length}줄: ${failed.slice(0, 5).join(' / ')}`;
         await sendDocument(pdfBuffer, filename, caption);
       } catch (err) {
