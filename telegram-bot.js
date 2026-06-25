@@ -2924,8 +2924,10 @@ async function generateManualLabelPdf(text) {
 
   const pdfBuffer = await buildLabelSheetBuffer(labels);
   const totalQty = items.reduce((s, o) => s + (o.qty || 1), 0);
-  const coupangCount = items.filter(o => o.italic).length;
-  return { pdfBuffer, count: items.length, totalQty, failed, coupangCount };
+  const coupang = items.filter(o => o.italic);
+  const coupangCount = coupang.length;
+  const coupangQty = coupang.reduce((s, o) => s + (o.qty || 1), 0);
+  return { pdfBuffer, count: items.length, totalQty, failed, coupangCount, coupangQty };
 }
 
 // 업그레이드 라벨 시트 PDF 생성 (글로리텍 8189: 동일 규격)
@@ -6945,10 +6947,10 @@ async function handleMessage(msg) {
       try {
         await sendMessage('🏷 라벨 생성 중...');
         // 원본 msg.text 사용 (대소문자·줄바꿈 보존)
-        const { pdfBuffer, count, totalQty, failed, coupangCount } = await generateManualLabelPdf(msg.text || '');
+        const { pdfBuffer, count, totalQty, failed, coupangCount, coupangQty } = await generateManualLabelPdf(msg.text || '');
         const filename = `라벨_추가_${count}건.pdf`;
         let caption = `🏷 추가 라벨 (${count}건, 총 ${totalQty}매)`;
-        if (coupangCount) caption += `\n📐 쿠팡 ${coupangCount}건 기울임 표시`;
+        if (coupangCount) caption += `\n📐 쿠팡 ${coupangCount}건 ${coupangQty}매 (기울임)`;
         if (failed.length) caption += `\n⚠️ 인식 실패 ${failed.length}줄: ${failed.slice(0, 5).join(' / ')}`;
         await sendDocument(pdfBuffer, filename, caption);
       } catch (err) {
