@@ -2892,9 +2892,10 @@ function parseManualLabelList(text) {
     const g = line.match(/(VIP|R|S|A)\s*석/i);
     if (g) { seatType = g[1].toUpperCase() + '석'; line = line.replace(g[0], ' '); }
 
-    // 매수: "N매" 우선, 없으면 남은 1~2자리 숫자
+    // 매수: 단위(매/장/명/석/좌석) 우선, 없으면 남은 1~2자리 숫자
+    // (좌석등급 VIP석/R석 등은 위에서 이미 제거됨 → 남은 "2석/6석"은 매수)
     let qty = 1;
-    const q = line.match(/(\d+)\s*(?:매|장|명)/);
+    const q = line.match(/(\d+)\s*(?:매|장|좌석|석|명)/);
     if (q) { qty = parseInt(q[1], 10); line = line.replace(q[0], ' '); }
     else {
       const qn = line.match(/(?:^|\s)(\d{1,2})(?:\s|$)/);
