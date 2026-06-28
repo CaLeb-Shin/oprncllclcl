@@ -97,6 +97,7 @@ const CONFIG = {
   surveyLogFile: path.join(__dirname, 'survey-sent.json'),
   processedNolticketFile: path.join(__dirname, 'processed-nolticket.json'),
   nolticketDailyLogFile: path.join(__dirname, 'nolticket-daily-log.json'),
+  hourlySettlementPausedFile: path.join(__dirname, 'hourly-settlement-paused.json'),  // 멜론OS 정시결산 일시정지 플래그
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
@@ -3628,6 +3629,24 @@ const VENUE_SEATS_PER_LINE = {
 // 좌석배정 대기 플래그
 let seatAssignWaiting = null; // { perfIndex, chatId, timestamp }
 let labelAddWaiting = null;  // { timestamp } - /라벨추가 명단 입력 대기
+// 멜론OS 정시 자동결산 일시정지 (공연 없을 때) — 파일로 영속화(재시작에도 유지)
+// 파일 없으면 기본 '정지' (공연 없는 동안). '자동재개' 입력 시 파일에 false 기록 → 유지.
+function loadHourlySettlementPaused() {
+  try {
+    if (fs.existsSync(CONFIG.hourlySettlementPausedFile)) {
+      return !!JSON.parse(fs.readFileSync(CONFIG.hourlySettlementPausedFile, 'utf8')).paused;
+    }
+  } catch {}
+  return true;  // 파일 없으면 기본 일시정지
+}
+let hourlySettlementPaused = loadHourlySettlementPaused();
+function setHourlySettlementPaused(paused) {
+  hourlySettlementPaused = paused;
+  try {
+    fs.writeFileSync(CONFIG.hourlySettlementPausedFile,
+      JSON.stringify({ paused, since: new Date().toISOString() }, null, 2));
+  } catch (e) { console.error('정시결산 정지상태 저장 실패:', e.message); }
+}
 let lastAssignmentUpgrades = null; // { perfIndex, upgradedNames: Set } - 라벨 생성 시 참조
 let lastAssignmentContext = null;  // 직전 좌석배정 컨텍스트 (엑셀 취소 비교용)
 
@@ -6987,6 +7006,18 @@ async function handleMessage(msg) {
     }
   }
 
+  // 멜론OS 정시 자동결산 일시정지/재개 (공연 없을 때)
+  if (['정시결산정지', '자동결산정지', '결산정지', '자동정지'].includes(text)) {
+    setHourlySettlementPaused(true);
+    await sendMessage('⏸ <b>멜론OS 정시 자동결산 일시정지</b>\n\n매시 정각 자동결산을 멈췄습니다. (주문/예매 확인은 계속 작동)\n공연 생기면 <code>정시결산재개</code> 입력하세요.');
+    return;
+  }
+  if (['정시결산재개', '자동결산재개', '결산재개', '자동재개'].includes(text)) {
+    setHourlySettlementPaused(false);
+    await sendMessage('▶️ <b>멜론OS 정시 자동결산 재개</b>\n\n다음 정각부터 다시 자동결산 리포트를 올립니다.');
+    return;
+  }
+
   // 결산 (놀티켓 + 네이버 어제/오늘 따로)
   if (['결산'].includes(text)) {
     await sendMessage('📊 결산 조회 중... (놀티켓 → 네이버 순)');
@@ -8003,6 +8034,7 @@ async function handleMessage(msg) {
       `• 뿌리오로그인 - 뿌리오 재로그인\n` +
       `• 미발송확인 - 뿌리오 발송결과 대조\n` +
       `• 재발송 / 재발송 3/12 - 미발송 건 자동 재발송\n` +
+      `• 자동정지 / 자동재개 - 멜론OS 정시 자동결산 끄기/켜기\n` +
       `• 도움말 - 이 안내 다시 보기`
     );
     return;
@@ -8461,6 +8493,10 @@ function startHourlyGroupSettlementReport() {
 
     setTimeout(async () => {
       try {
+        if (hourlySettlementPaused) {
+          console.log('⏸ 멜론OS 정시 자동결산 일시정지 중 → 건너뜀');
+          return;  // finally에서 다음 정시 재예약 (재개 시 자동 작동)
+        }
         console.log('🕐 멜론OS 정시 자동 결산 시작...');
         await runGroupSettlementReport(CONFIG.telegramGroupId, '정시 자동');
         console.log('✅ 멜론OS 정시 자동 결산 완료');
@@ -8734,6 +8770,9 @@ startPpurioKeepAlive();
 startSmsPoll();
 startNaverProductSync();
 startHourlyGroupSettlementReport();
+console.log(hourlySettlementPaused
+  ? '⏸ 멜론OS 정시 자동결산: 일시정지 상태 (재개: "자동재개")'
+  : '⏰ 멜론OS 정시 자동결산: 작동 중');
 startDailyReport();
 startNolticketDailyReport();
 startSeatDownloadScheduler();
