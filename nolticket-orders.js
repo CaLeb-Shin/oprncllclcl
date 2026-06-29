@@ -127,6 +127,19 @@ function appendDailyLog(entries) {
   fs.renameSync(tmp, CONFIG.dailyLogFile);
 }
 
+// ── 로그인/실패 알림 하루 1회 throttle (telegram-bot.js와 같은 파일 공유) ──
+// 공연 없을 때 매시간 "확인 실패" 알림이 반복되지 않도록 날짜(KST)로 제한.
+function shouldNotifyOncePerDay(key) {
+  const file = path.join(__dirname, 'login-alert-state.json');
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' });
+  let state = {};
+  try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  if (state[key] === today) return false;
+  state[key] = today;
+  try { fs.writeFileSync(file, JSON.stringify(state, null, 2)); } catch {}
+  return true;
+}
+
 // ── 텔레그램 ─────────────────────────────────────────────────
 async function sendTelegram(message) {
   const url = `https://api.telegram.org/bot${CONFIG.telegramBotToken}/sendMessage`;
@@ -408,7 +421,10 @@ async function scrapeNolticket() {
   } catch (err) {
     console.error('❌ 오류:', err.message);
     await page.screenshot({ path: 'debug-nolticket-error.png' }).catch(() => {});
-    await sendTelegram(`❌ 놀티켓 신규주문 확인 실패\n${err.message}`);
+    // 실패 알림은 하루 1회만 (공연 없을 때 매시간 스팸 방지)
+    if (shouldNotifyOncePerDay('nolticket')) {
+      await sendTelegram(`❌ 놀티켓 신규주문 확인 실패\n${err.message}\n\n<i>(이 알림은 하루 1회만 옵니다)</i>`);
+    }
   } finally {
     await browser.close();
   }

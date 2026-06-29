@@ -98,6 +98,7 @@ const CONFIG = {
   processedNolticketFile: path.join(__dirname, 'processed-nolticket.json'),
   nolticketDailyLogFile: path.join(__dirname, 'nolticket-daily-log.json'),
   hourlySettlementPausedFile: path.join(__dirname, 'hourly-settlement-paused.json'),  // 멜론OS 정시결산 일시정지 플래그
+  loginAlertStateFile: path.join(__dirname, 'login-alert-state.json'),  // 로그인/세션 알림 하루1회 throttle (날짜 기록)
 
   salesCheckInterval: 5 * 60 * 60 * 1000,  // 5시간
   orderCheckInterval: 3 * 60 * 1000,         // 3분
@@ -129,24 +130,30 @@ let isNolticketRunning = false;  // 놀티켓 신규 예매 확인 중복 실행
 let isSmartstoreRunning = false;
 let wasDisconnected = false;  // 인터넷 끊김 감지 플래그
 let isEnsureBrowserRunning = false; // ensureBrowser 동시 호출 방지
-let lastSessionExpireNotice = 0;  // 세션 만료 알림 쿨다운
 let lastPendingReminder = 0;  // 승인 대기 리마인드 쿨다운
 let surveyState = null;  // 설문 발송 상태: { perfKey, candidates, selected }
 
-function shouldNotifySessionExpire() {
-  const now = Date.now();
-  if (now - lastSessionExpireNotice < 30 * 60 * 1000) return false; // 30분 쿨다운
-  lastSessionExpireNotice = now;
+// 로그인/세션 알림 하루 1회 throttle — 공연 없을 때 "재로그인 필요" 반복 스팸 방지.
+// 키별 마지막 알림 날짜(KST)를 파일에 저장 → 재시작에도 유지.
+function shouldNotifyOncePerDay(key) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }); // YYYY-MM-DD
+  let state = {};
+  try { state = JSON.parse(fs.readFileSync(CONFIG.loginAlertStateFile, 'utf8')); } catch {}
+  if (state[key] === today) return false;  // 오늘 이미 알림 보냄
+  state[key] = today;
+  try { fs.writeFileSync(CONFIG.loginAlertStateFile, JSON.stringify(state, null, 2)); } catch {}
   return true;
 }
 
-// 스마트스토어 로그인 실패 즉시 알림 (5분 쿨다운으로 스팸 방지)
-let lastSmartLoginFailNotice = 0;
+// 뿌리오 세션 만료 알림 (하루 1회)
+function shouldNotifySessionExpire() {
+  return shouldNotifyOncePerDay('ppurio');
+}
+
+// 스마트스토어 로그인 실패 알림 (하루 1회 — 공연 없을 때 반복 스팸 방지)
 async function notifySmartLoginFail(context = '') {
-  const now = Date.now();
-  if (now - lastSmartLoginFailNotice < 5 * 60 * 1000) return;
-  lastSmartLoginFailNotice = now;
-  const msg = `🚨 <b>스마트스토어 로그인 실패</b>${context ? ` (${context})` : ''}\n\n서버에서 재로그인 필요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>`;
+  if (!shouldNotifyOncePerDay('smartstore')) return;
+  const msg = `🚨 <b>스마트스토어 로그인 실패</b>${context ? ` (${context})` : ''}\n\n서버에서 재로그인 필요:\n<code>cd C:\\Users\\LG\\oprncllclcl</code>\n<code>node setup-login.js smartstore</code>\n그 후 <code>봇재시작</code>\n\n<i>(이 알림은 하루 1회만 옵니다)</i>`;
   try { await sendMessage(msg); } catch {}
 }
 

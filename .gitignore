@@ -35,6 +35,7 @@ processed-cancels.json
 processed-nolticket.json
 nolticket-daily-log.json
 hourly-settlement-paused.json
+login-alert-state.json
 
 # macOS
 .DS_Store
